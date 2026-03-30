@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: elevate-backend
+    runtime: python
+    plan: free
+    rootDir: .
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: python -m backend.app
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: AI_TOPIC_SERVICE_URL
+        sync: false
+      - key: AI_TOPIC_SERVICE_TOKEN
+        sync: false
+      - key: AI_TOPIC_SERVICE_AUTH_SCHEME
+        value: "Bearer"
+      - key: HF_TOKEN
+        sync: false
+      - key: AI_TOPIC_LLM_ONLY_DEFAULT
+        value: "true"
+      - key: AI_TOPIC_SERVICE_TIMEOUT_SECONDS
+        value: "120"

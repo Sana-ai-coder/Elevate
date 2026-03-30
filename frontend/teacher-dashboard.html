@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Elevate - Teacher Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="stylesheet" href="css/teacher-dashboard.css" />
+</head>
+<body>
+  <div class="dashboard">
+    <nav class="navbar navbar-expand-lg">
+      <div class="container-fluid">
+        <a class="navbar-brand" href="teacher-dashboard.html">
+          <i class="fas fa-chalkboard-teacher me-2"></i>Elevate Teacher
+        </a>
+        <div class="user-info" id="teacherUserInfo">
+          <span id="teacherUserName">Teacher</span>
+          <div class="profile-menu">
+            <button class="profile-menu-toggle" id="profileMenuToggle" type="button" aria-label="Open profile menu" aria-expanded="false">
+              <div class="user-avatar" id="teacherUserAvatar" title="Profile">T</div>
+              <i class="fas fa-chevron-down profile-menu-caret"></i>
+            </button>
+            <div class="profile-menu-dropdown" id="profileMenuDropdown">
+              <a class="profile-menu-item" href="settings.html">
+                <i class="fas fa-cog"></i> Settings
+              </a>
+              <button class="profile-menu-item profile-menu-logout" id="logoutBtn" type="button">
+                <i class="fas fa-sign-out-alt"></i> Logout
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </nav>
+
+    <div class="main-content">
+      <aside class="sidebar">
+        <ul class="nav flex-column teacher-nav" id="teacherNav">
+          <li class="nav-item"><a class="nav-link active" data-target="overviewSection" href="#overviewSection"><i class="fas fa-chart-line"></i> Overview</a></li>
+          <li class="nav-item"><a class="nav-link" data-target="createSection" href="#createSection"><i class="fas fa-wand-magic-sparkles"></i> Create Test</a></li>
+          <li class="nav-item"><a class="nav-link" data-target="testsSection" href="#testsSection"><i class="fas fa-list-check"></i> My Tests</a></li>
+          <li class="nav-item"><a class="nav-link" data-target="classroomsSection" href="#classroomsSection"><i class="fas fa-school"></i> Classrooms</a></li>
+          <li class="nav-item"><a class="nav-link" data-target="assignmentsSection" href="#assignmentsSection"><i class="fas fa-tasks"></i> Assignments</a></li>
+          <li class="nav-item"><a class="nav-link" data-target="studentsSection" href="#studentsSection"><i class="fas fa-users"></i> Students</a></li>
+          <li class="nav-item"><a class="nav-link" data-target="reportsSection" href="#reportsSection"><i class="fas fa-file-lines"></i> Reports</a></li>
+          <li class="nav-item"><a class="nav-link" data-target="analyticsSection" href="#analyticsSection"><i class="fas fa-chart-column"></i> Analytics</a></li>
+        </ul>
+      </aside>
+
+      <main class="content-area teacher-content" id="teacherContentArea">
+        <section class="teacher-section" id="overviewSection">
+          <div class="teacher-section-head">
+            <h2 class="mb-1">Teacher Dashboard</h2>
+            <p class="text-muted mb-0">Track class progress, generate AI questions, and manage tests with confidence.</p>
+          </div>
+          <div class="row g-3 mt-1" id="teacherStatsGrid">
+            <div class="col-md-3 col-6">
+              <div class="stats-card"><div class="stats-value" id="statStudents">0</div><div class="stats-label">Students</div></div>
+            </div>
+            <div class="col-md-3 col-6">
+              <div class="stats-card"><div class="stats-value" id="statTests">0</div><div class="stats-label">Total Tests</div></div>
+            </div>
+            <div class="col-md-3 col-6">
+              <div class="stats-card"><div class="stats-value" id="statAttempts">0</div><div class="stats-label">Attempts (Period)</div></div>
+            </div>
+            <div class="col-md-3 col-6">
+              <div class="stats-card"><div class="stats-value" id="statAvgScore">0%</div><div class="stats-label">Avg Score (Period)</div></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="teacher-section" id="createSection">
+          <div class="teacher-card">
+            <div class="teacher-card-head">
+              <h3><i class="fas fa-wand-magic-sparkles"></i> AI Test Builder</h3>
+              <p>Create tests and preview generated questions before publishing.</p>
+            </div>
+            <div class="teacher-section-grid teacher-section-grid-create">
+              <div class="teacher-panel teacher-panel-form">
+                <form id="createTestForm" class="row g-3">
+                  <div class="col-md-6"><label class="form-label" for="testTitle">Test Title</label><input id="testTitle" class="form-control" required /></div>
+                  <div class="col-md-6"><label class="form-label" for="testDescription">Description</label><input id="testDescription" class="form-control" /></div>
+                  <div class="col-md-3"><label class="form-label" for="testSubject">Subject</label><select id="testSubject" class="form-control" required></select></div>
+                  <div class="col-md-3"><label class="form-label" for="testGrade">Grade</label><select id="testGrade" class="form-control"><option value="elementary">Elementary</option><option value="middle">Middle School</option><option value="high" selected>High School</option><option value="college">College</option></select></div>
+                  <div class="col-md-2"><label class="form-label" for="testDifficulty">Difficulty</label><select id="testDifficulty" class="form-control"><option value="easy">Easy</option><option value="medium" selected>Medium</option><option value="hard">Hard</option></select></div>
+                  <div class="col-md-2"><label class="form-label" for="testCount">Questions</label><input id="testCount" class="form-control" type="number" min="1" max="50" value="10" /></div>
+                  <div class="col-md-2"><label class="form-label" for="testTimeLimit">Time (min)</label><input id="testTimeLimit" class="form-control" type="number" min="5" max="240" value="30" /></div>
+                  <div class="col-md-6"><label class="form-label" for="testTopic">Sub Topic (optional)</label><select id="testTopic" class="form-control"></select></div>
+                  <div class="col-md-3"><label class="form-label" for="testSeed">Seed (optional)</label><input id="testSeed" class="form-control" type="number" /></div>
+                  <div class="col-md-6 create-test-actions">
+                    <button type="button" class="btn btn-outline-primary w-100" id="previewQuestionsBtn"><i class="fas fa-eye me-1"></i> Preview AI Questions</button>
+                    <button type="submit" class="btn btn-primary w-100" id="createTestBtn"><i class="fas fa-plus me-1"></i> Create Test</button>
+                  </div>
+                </form>
+              </div>
+              <div class="teacher-panel teacher-panel-preview">
+                <div id="aiPreviewWrap" class="ai-preview-wrap hidden">
+                  <div class="preview-head">
+                    <strong>Generated Questions Preview</strong>
+                    <span id="previewMeta" class="text-muted small"></span>
+                  </div>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                      <thead><tr><th>#</th><th>Question</th><th>Options</th><th>Answer</th></tr></thead>
+                      <tbody id="aiPreviewTableBody"></tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="teacher-section" id="testsSection">
+          <div class="teacher-card">
+            <div class="teacher-card-head"><h3><i class="fas fa-list-check"></i> My Tests</h3><p>Publish, inspect, and remove tests.</p></div>
+            <div class="teacher-section-grid teacher-section-grid-tests">
+              <div class="teacher-panel">
+                <div class="table-responsive">
+                  <table class="table align-middle">
+                    <thead><tr><th>Title</th><th>Subject</th><th>Grade</th><th>Difficulty</th><th>Attempts</th><th>Avg Score</th><th>Status</th><th>Actions</th></tr></thead>
+                    <tbody id="testsTableBody"></tbody>
+                  </table>
+                </div>
+                <div id="testDetailPanel" class="test-detail-panel hidden"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="teacher-section" id="studentsSection">
+          <div class="teacher-card">
+            <div class="teacher-card-head"><h3><i class="fas fa-users"></i> Students</h3><p>Students in your assigned grade and school.</p></div>
+            <div class="table-responsive">
+              <table class="table align-middle">
+                <thead><tr><th>Name</th><th>Email</th><th>Grade</th><th>Attempts</th><th>Avg Score</th></tr></thead>
+                <tbody id="studentsTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section class="teacher-section" id="classroomsSection">
+          <div class="teacher-card">
+            <div class="teacher-card-head"><h3><i class="fas fa-school"></i> Classrooms</h3><p>Create classes and enroll students.</p></div>
+            <form class="row g-2 mb-3" id="classroomForm">
+              <div class="col-md-5"><input id="classroomName" class="form-control" placeholder="Classroom name (e.g., Grade 9-A)" required /></div>
+              <div class="col-md-4"><select id="classroomGrade" class="form-control"><option value="elementary">Elementary</option><option value="middle">Middle School</option><option value="high" selected>High School</option><option value="college">College</option></select></div>
+              <div class="col-md-3"><button class="btn btn-primary w-100" id="createClassroomBtn" type="submit">Create Classroom</button></div>
+              <div class="col-12">
+                <div class="form-check mt-1">
+                  <input class="form-check-input" type="checkbox" id="autoEnrollGradeStudents" checked>
+                  <label class="form-check-label" for="autoEnrollGradeStudents">
+                    Auto-enroll same-grade students (including unassigned students during onboarding)
+                  </label>
+                </div>
+              </div>
+            </form>
+            <div class="table-responsive">
+              <table class="table align-middle">
+                <thead><tr><th>Classroom</th><th>Grade</th><th>Students</th><th>Add Student</th></tr></thead>
+                <tbody id="classroomsTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section class="teacher-section" id="assignmentsSection">
+          <div class="teacher-card">
+            <div class="teacher-card-head"><h3><i class="fas fa-tasks"></i> Assignment Lifecycle</h3><p>Assign published tests to classroom or student with due dates.</p></div>
+            <form class="row g-2 mb-3" id="assignmentForm">
+              <div class="col-md-3"><label class="form-label" for="assignmentTestId">Test</label><select id="assignmentTestId" class="form-control" required></select></div>
+              <div class="col-md-3"><label class="form-label" for="assignmentClassroomId">Classroom</label><select id="assignmentClassroomId" class="form-control"></select></div>
+              <div class="col-md-3"><label class="form-label" for="assignmentStudentId">Student</label><select id="assignmentStudentId" class="form-control"></select></div>
+              <div class="col-md-3"><label class="form-label" for="assignmentDueAt">Due At</label><input id="assignmentDueAt" type="datetime-local" class="form-control" /></div>
+              <div class="col-md-3"><label class="form-label" for="assignmentMandatory">Mandatory</label><select id="assignmentMandatory" class="form-control"><option value="1" selected>Yes</option><option value="0">No</option></select></div>
+              <div class="col-md-3"><label class="form-label" for="assignmentAllowLate">Allow Late</label><select id="assignmentAllowLate" class="form-control"><option value="0" selected>No</option><option value="1">Yes</option></select></div>
+              <div class="col-md-6"><label class="form-label" for="assignmentNotes">Notes</label><input id="assignmentNotes" class="form-control" placeholder="optional instructions" /></div>
+              <div class="col-md-12"><button class="btn btn-primary" id="createAssignmentBtn" type="submit">Create Assignment</button></div>
+            </form>
+            <div class="table-responsive">
+              <table class="table align-middle">
+                <thead><tr><th>Test</th><th>Target</th><th>Status</th><th>Due</th><th>Edit Due Date/Time</th><th>Actions</th></tr></thead>
+                <tbody id="assignmentsTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section class="teacher-section" id="reportsSection">
+          <div class="teacher-card">
+            <div class="teacher-card-head"><h3><i class="fas fa-file-lines"></i> Student Test Reports</h3><p>Filter and review detailed attempts.</p></div>
+            <div class="row g-2 align-items-end mb-3">
+              <div class="col-md-4"><label class="form-label" for="reportSubject">Subject</label><select id="reportSubject" class="form-control"></select></div>
+              <div class="col-md-3"><label class="form-label" for="reportDays">Period</label><select id="reportDays" class="form-control"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select></div>
+              <div class="col-md-3"><label class="form-label" for="reportLimit">Max Rows</label><input id="reportLimit" class="form-control" type="number" min="1" max="500" value="100" /></div>
+              <div class="col-md-2"><button id="refreshReportsBtn" class="btn btn-outline-primary w-100" type="button">Refresh</button></div>
+            </div>
+            <div class="table-responsive">
+              <table class="table align-middle">
+                <thead><tr><th>Student</th><th>Subject</th><th>Score</th><th>Correct</th><th>Status</th><th>Date</th></tr></thead>
+                <tbody id="teacherReportsBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section class="teacher-section" id="analyticsSection">
+          <div class="teacher-card">
+            <div class="teacher-card-head"><h3><i class="fas fa-chart-column"></i> Class Analytics</h3><p>Category-based performance insights by student, subject, difficulty, and weak topics.</p></div>
+            <div class="row g-2 align-items-end mb-3 analytics-filters-row">
+              <div class="col-md-3"><label class="form-label" for="analyticsDays">Period</label><select id="analyticsDays" class="form-control"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option><option value="180">180 days</option></select></div>
+              <div class="col-md-3"><label class="form-label" for="analyticsGrade">Grade Scope</label><select id="analyticsGrade" class="form-control"><option value="">All Grades</option><option value="elementary">Elementary</option><option value="middle">Middle School</option><option value="high">High School</option><option value="college">College</option></select></div>
+              <div class="col-md-2"><button id="refreshAnalyticsBtn" class="btn btn-outline-primary w-100" type="button">Refresh</button></div>
+            </div>
+
+            <div class="analytics-summary-grid" id="analyticsSummaryGrid">
+              <div class="analytics-kpi-card"><div class="kpi-label">Students In Scope</div><div class="kpi-value" id="analyticsTotalStudents">0</div></div>
+              <div class="analytics-kpi-card"><div class="kpi-label">Active Students</div><div class="kpi-value" id="analyticsActiveStudents">0</div></div>
+              <div class="analytics-kpi-card"><div class="kpi-label">Total Attempts</div><div class="kpi-value" id="analyticsTotalAttempts">0</div></div>
+              <div class="analytics-kpi-card"><div class="kpi-label">Avg Score</div><div class="kpi-value" id="analyticsAverageScore">0.0%</div></div>
+              <div class="analytics-kpi-card analytics-kpi-highlight"><div class="kpi-label">Top Performer</div><div class="kpi-value" id="analyticsTopStudent">-</div></div>
+            </div>
+
+            <div class="row g-3 mt-1">
+              <div class="col-lg-6">
+                <div class="chart-container teacher-chart">
+                  <h5 class="analytics-chart-title">Subject Mastery vs Attempt Volume</h5>
+                  <canvas id="teacherSubjectChart"></canvas>
+                </div>
+              </div>
+              <div class="col-lg-6">
+                <div class="chart-container teacher-chart">
+                  <h5 class="analytics-chart-title">Grade Level Performance</h5>
+                  <canvas id="teacherDifficultyChart"></canvas>
+                </div>
+              </div>
+            </div>
+
+            <div class="analytics-category mt-3">
+              <h4 class="analytics-category-title"><i class="fas fa-user-graduate"></i> By Student</h4>
+              <div class="table-responsive">
+                <table class="table align-middle">
+                  <thead><tr><th>Student</th><th>Grade</th><th>Attempts</th><th>Avg Score</th><th>Correct</th><th>Best Subject</th></tr></thead>
+                  <tbody id="analyticsStudentsBody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="analytics-category mt-3">
+              <h4 class="analytics-category-title"><i class="fas fa-book-open"></i> By Subject</h4>
+              <div class="table-responsive">
+                <table class="table align-middle">
+                  <thead><tr><th>Subject</th><th>Attempts</th><th>Avg Score</th><th>Top Student</th></tr></thead>
+                  <tbody id="analyticsSubjectsBody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="analytics-category mt-3">
+              <h4 class="analytics-category-title"><i class="fas fa-layer-group"></i> By Difficulty</h4>
+              <div class="difficulty-insights-grid" id="difficultyInsightsList"></div>
+            </div>
+
+            <div class="analytics-category mt-3">
+              <h4 class="analytics-category-title"><i class="fas fa-triangle-exclamation"></i> Weak Topics</h4>
+              <div class="weak-topics" id="weakTopicsList"></div>
+            </div>
+
+            <div class="analytics-category mt-3">
+              <h4 class="analytics-category-title"><i class="fas fa-user-shield"></i> At-Risk Predictor</h4>
+              <div class="table-responsive">
+                <table class="table align-middle">
+                  <thead>
+                    <tr>
+                      <th>Student</th>
+                      <th>At-Risk Probability</th>
+                      <th>Top SHAP Driver</th>
+                    </tr>
+                  </thead>
+                  <tbody id="atRiskStudentsBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div class="emotion-feedback" id="emotionFeedback">
+    <span class="emotion-feedback-icon" id="feedbackIcon">ℹ️</span>
+    <div class="emotion-feedback-text" id="feedbackText">Notification</div>
+  </div>
+
+  <script type="module" src="js/teacher-dashboard.js"></script>
+</body>
+</html>

@@ -1,0 +1,105 @@
+@import url('variables.css');
+
+/* Admin page styles */
+body {
+  font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
+  background: linear-gradient(180deg, #f6f9ff 0%, #ffffff 60%);
+  color: var(--dark-color);
+}
+
+.admin-container {
+  max-width: 1100px;
+  margin: 32px auto;
+  padding: 24px;
+}
+
+.admin-header {
+  text-align: left;
+  margin-bottom: 18px;
+}
+.admin-header h1 {
+  margin: 0 0 6px 0;
+  color: var(--primary-color);
+  background: var(--gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-size: 1.8rem;
+}
+.admin-header .subtitle {
+  margin: 0;
+  color: #6b7280;
+  font-size: 0.95rem;
+}
+
+main > section {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 18px;
+  align-items: start;
+  margin-bottom: 18px;
+}
+
+section h2 { margin: 0 0 8px 0; font-size: 1.05rem; }
+
+.card { background: white; border-radius: 10px; padding: 18px; box-shadow: 0 6px 18px rgba(33,41,53,0.06); }
+
+input, select {
+  width: 100%;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  border: 1px solid #e6e9ef;
+  font-size: 0.95rem;
+}
+
+select {
+  border-color: var(--dropdown-border);
+  border-radius: var(--dropdown-radius);
+  min-height: var(--dropdown-height);
+  color: var(--dropdown-text);
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 36px;
+  background-color: var(--dropdown-bg);
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--dropdown-arrow) 50%),
+    linear-gradient(135deg, var(--dropdown-arrow) 50%, transparent 50%);
+  background-position:
+    calc(100% - 18px) calc(50% - 1px),
+    calc(100% - 12px) calc(50% - 1px);
+  background-size: 6px 6px, 6px 6px;
+  background-repeat: no-repeat;
+}
+
+select:focus {
+  border-color: var(--dropdown-focus-border);
+  box-shadow: var(--dropdown-focus-ring);
+  outline: none;
+}
+
+button {
+  background: var(--primary-color);
+  color: white;
+  border: none;
+  padding: 10px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--primary-color);
+  border: 1px solid rgba(74,108,247,0.12);
+}
+
+pre { background: #0f172a10; padding: 12px; border-radius: 8px; overflow:auto }
+
+/* Right column panel */
+.panel { display:flex; flex-direction:column; gap:8px }
+
+@media (max-width: 880px) {
+  main > section { grid-template-columns: 1fr; }
+}

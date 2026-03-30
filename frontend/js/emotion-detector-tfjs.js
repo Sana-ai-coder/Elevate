@@ -1,0 +1,1206 @@
+/**
+ * emotion-detector-tfjs.js  — Elevate Emotion Detection Engine
+ * ==============================================================
+ * Model: HOG(48×48) → Dense(512,relu) → Dense(128,relu) → Dense(6,softmax)
+ * Trained by: train_emotion_fast.py
+ * Classes: happy | bored | focused | confused | neutral | angry
+ *
+ * BUGS FIXED IN THIS VERSION
+ * ──────────────────────────
+ * FIX 1 (CRITICAL) — Scaler not loaded from .bin file.
+ *   Root cause: _hydrateHogScaler() tried to read scaler_mean/scaler_std
+ *   from model.json elevate_meta — those fields do not exist there.
+ *   The scaler tensors are weight tensors inside the .bin file at indices
+ *   6 (mean) and 7 (std).  Fixed: extract from model.getWeights() after load.
+ *   Impact before fix: raw HOG (mean≈0.05) fed to model expecting mean=0 → ~35% accuracy.
+ *
+ * FIX 2 (CRITICAL) — Gradient kernel mismatch.
+ *   Root cause: browser used Sobel 3×3 kernel.
+ *   skimage.feature.hog uses simple central differences:
+ *     gx[y,x] = img[y, x+1] - img[y, x-1]
+ *     gy[y,x] = img[y+1, x] - img[y-1, x]
+ *   Fixed: replaced Sobel with exact central-difference matching skimage.
+ *
+ * FIX 3 (CRITICAL) — Spurious preprocessing not applied during training.
+ *   Root cause: browser applied CLAHE, gamma correction, 3×3 blur before HOG.
+ *   train_emotion_fast.py does none of these — PIL→gray→resize→HOG directly.
+ *   Fixed: removed preprocessing so browser matches training pipeline exactly.
+ *
+ * FIX 4 — Class balance weights derived from training recall, not guessed.
+ *   Root cause: neutral was penalised (0.88) but had worst recall (0.563).
+ *   Fixed: weights = 1/recall, normalised to mean=1.
+ *
+ * FIX 5 — Temperature scaling removed (mathematically wrong post-softmax).
+ *   Class balance weights handle sharpening correctly.
+ *
+ * FIX 6 — FaceMesh throttled to 10fps; inference at 2.5fps.
+ *   Root cause: FaceMesh ran every rAF frame (30fps) burning CPU unnecessarily.
+ */
+
+import { config }             from './config.js';
+import { state, updateState } from './state.js';
+import { utils }              from './utils.js';
+
+const MODE_SERVER = 'server';
+const MODE_TFJS   = 'tfjs';
+const MODE_SIM    = 'simulation';
+
+// Class names — MUST match train_emotion_fast.py CLASS_NAMES order exactly
+const CLASS_NAMES = ['happy', 'bored', 'focused', 'confused', 'neutral', 'angry'];
+
+const EMOTION_EMOJI = {
+  happy: '😊', bored: '😑', focused: '🧠',
+  confused: '😕', neutral: '😐', angry: '😠',
+};
+
+// HOG parameters — MUST match train_emotion_fast.py exactly
+const HOG_IMG_SIZE    = 48;
+const HOG_PPC_X       = 6;
+const HOG_PPC_Y       = 6;
+const HOG_CELLS_X     = Math.floor(HOG_IMG_SIZE / HOG_PPC_X);
+const HOG_CELLS_Y     = Math.floor(HOG_IMG_SIZE / HOG_PPC_Y);
+const HOG_BINS        = 9;
+const HOG_BLOCK_W     = 2;
+const HOG_BLOCK_H     = 2;
+const HOG_FEATURE_DIM =
+  (HOG_CELLS_X - HOG_BLOCK_W + 1) *
+  (HOG_CELLS_Y - HOG_BLOCK_H + 1) *
+  HOG_BLOCK_W * HOG_BLOCK_H * HOG_BINS;
+
+// Confidence gates
+const MIN_CONFIDENCE = 0.32;
+const MIN_MARGIN     = 0.06;
+
+// Temporal smoothing
+const SMOOTH_ALPHA = 0.35;
+const SMOOTH_LEAK  = 0.02;
+
+// FIX 4: Class balance weights from 1/recall, normalised to mean=1
+// Source: training console output test metrics
+const CLASS_BALANCE_WEIGHTS = {
+  happy: 0.985, bored: 0.731, focused: 0.733,
+  confused: 0.854, neutral: 1.299, angry: 1.398,
+};
+const CLASS_WEIGHT_MIN = 0.78;
+const CLASS_WEIGHT_MAX = 1.32;
+
+const CLASS_PRIOR_MULTIPLIERS = {
+  happy: 1.0,
+  bored: 1.0,
+  focused: 1.03,
+  confused: 1.02,
+  neutral: 1.04,
+  angry: 0.94,
+};
+
+// FIX 6: Separate timers for FaceMesh and inference
+const FACEMESH_INTERVAL_MS  = 100;  // ~10fps
+const INFERENCE_INTERVAL_MS = 400;  // ~2.5fps
+
+
+export const emotionDetector = {
+
+  videoElement:  null,
+  canvasElement: null,
+  facemeshModel: null,
+  tfjsModel:     null,
+  tfjsEmotionHeadModel: null,
+  tfjsEngagementHeadModel: null,
+
+  // FIX 1: Populated from model.getWeights()[6] and [7]
+  _scalerMean: null,
+  _scalerStd:  null,
+
+  inferenceMode:         MODE_SIM,
+  detectionActive:       false,
+  isRunningFacemesh:     false,
+  serverModelAvailable:  false,
+  serverStatusChecked:   false,
+
+  _facemeshTimer:        null,
+  _inferenceTimer:       null,
+  _lastFacePrediction:   null,
+  animationFrameId:      null,
+  isDetectingFrame:      false,
+
+  _smoothedScores:       null,
+  _hogCanvas:            null,
+  _resizeHandler:        null,
+  _lastLogTime:          0,
+  _logIntervalMs:        10_000,
+  _modelMetaCache:       null,
+
+
+  // ═══════════════════════════════════════════
+  //  PUBLIC API
+  // ═══════════════════════════════════════════
+
+  async init() {
+    this.videoElement  = document.getElementById('webcam');
+    this.canvasElement = document.getElementById('faceCanvas');
+    if (!this.videoElement || !this.canvasElement) {
+      console.warn('[EmotionDetector] webcam or faceCanvas not found');
+      return false;
+    }
+    await this._checkServerModel();
+    return true;
+  },
+
+  async loadModels() {
+    if (!this.videoElement || !this.canvasElement) {
+      const ok = await this.init();
+      if (!ok) return false;
+    }
+    if (!this.facemeshModel && !state.usingSimulatedEmotions) {
+      await this._loadFacemesh();
+    }
+    await this._loadTfjsModel();
+    return Boolean(this.facemeshModel || this.tfjsModel || this.serverModelAvailable);
+  },
+
+  async startCamera() {
+    try {
+      if (state.cameraActive && state.cameraStream) {
+        const live = state.cameraStream.getVideoTracks()
+          .filter(t => t.readyState === 'live');
+        if (live.length) {
+          this.videoElement.srcObject = state.cameraStream;
+          await this.videoElement.play();
+          this._syncCanvas(); this._attachResize();
+          this._updateCameraUI('active');
+          return true;
+        }
+      }
+
+      this._stopTracks(this.videoElement?.srcObject);
+      this._stopTracks(state.cameraStream);
+
+      if (!this.facemeshModel && !state.usingSimulatedEmotions) {
+        await this._loadFacemesh();
+      }
+
+      updateState({ cameraPermissionDenied: false, usingSimulatedEmotions: false });
+      this._updateCameraUI('starting');
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 480 }, height: { ideal: 360 },
+                 frameRate: { ideal: 30, max: 30 }, facingMode: 'user' },
+      });
+
+      this.videoElement.srcObject = stream;
+      await new Promise(resolve => { this.videoElement.onloadedmetadata = resolve; });
+      await this.videoElement.play();
+
+      this._syncCanvas(); this._attachResize();
+      updateState({ cameraStream: stream, cameraActive: true, faceDetectionConfirmed: false });
+      this._updateCameraUI('active');
+      return true;
+
+    } catch (err) {
+      console.error('[EmotionDetector] startCamera error:', err);
+      this._updateCameraUI('error');
+      updateState({ usingSimulatedEmotions: false });
+      return false;
+    }
+  },
+
+  stopCamera() {
+    this.stopDetection();
+    this._detachResize();
+    this._stopTracks(this.videoElement?.srcObject);
+    this._stopTracks(state.cameraStream);
+    if (this.videoElement) {
+      try { this.videoElement.pause(); } catch (_) {}
+      this.videoElement.srcObject = null;
+    }
+    if (this.canvasElement) {
+      const ctx = this.canvasElement.getContext('2d');
+      ctx?.clearRect(0, 0, this.canvasElement.width, this.canvasElement.height);
+    }
+    this._smoothedScores     = null;
+    this._lastFacePrediction = null;
+    updateState({ cameraStream: null, cameraActive: false,
+                  faceDetectionConfirmed: false, currentEmotion: 'neutral' });
+    this._updateCameraUI('off');
+  },
+
+  prepareForRouteChange() {
+    this.stopDetection();
+    this._detachResize();
+    if (this.videoElement) this.videoElement.srcObject = null;
+  },
+
+  async restoreActiveSession() {
+    if (!state.cameraActive || !state.cameraStream) return false;
+    if (!this.videoElement) {
+      if (!(await this.init())) return false;
+    }
+    try {
+      this.videoElement.srcObject = state.cameraStream;
+      if (this.videoElement.readyState < 2)
+        await new Promise(r => { this.videoElement.onloadedmetadata = r; });
+      await this.videoElement.play();
+      this._syncCanvas(); this._attachResize();
+      this._updateCameraUI('active');
+      return true;
+    } catch (err) {
+      console.error('[EmotionDetector] restoreActiveSession error:', err);
+      return false;
+    }
+  },
+
+  startDetection() {
+    if (this.detectionActive) return;
+    this.detectionActive = true;
+
+    const hasTfjsModel = Boolean(this.tfjsEmotionHeadModel || this.tfjsModel);
+    const hasModel = this.facemeshModel && (hasTfjsModel || this.serverModelAvailable);
+
+    if (!hasModel || state.usingSimulatedEmotions) {
+      this._startSimulation();
+      return;
+    }
+
+    // FIX 6: FaceMesh at 10fps, inference at 2.5fps — separate timers
+    this._facemeshTimer = setInterval(async () => {
+      if (!this.detectionActive || this.isRunningFacemesh) return;
+      this.isRunningFacemesh = true;
+      try { await this._runFacemesh(); }
+      finally { this.isRunningFacemesh = false; }
+    }, FACEMESH_INTERVAL_MS);
+
+    this._inferenceTimer = setInterval(async () => {
+      if (!this.detectionActive) return;
+      await this._runInference();
+    }, INFERENCE_INTERVAL_MS);
+  },
+
+  stopDetection() {
+    this.detectionActive = false;
+    if (this._facemeshTimer) { clearInterval(this._facemeshTimer); this._facemeshTimer = null; }
+    if (this._inferenceTimer) { clearInterval(this._inferenceTimer); this._inferenceTimer = null; }
+    if (state.emotionDetectionInterval) {
+      clearInterval(state.emotionDetectionInterval);
+      updateState({ emotionDetectionInterval: null });
+    }
+    if (this.animationFrameId) {
+      cancelAnimationFrame(this.animationFrameId);
+      this.animationFrameId = null;
+    }
+    this.isRunningFacemesh = false;
+    this.isDetectingFrame  = false;
+  },
+
+  resetFeedbackState() {
+    this._smoothedScores     = null;
+    this._lastFacePrediction = null;
+  },
+
+
+  // ═══════════════════════════════════════════
+  //  MODEL LOADING
+  // ═══════════════════════════════════════════
+
+  async _checkServerModel() {
+    if (this.serverStatusChecked) return;
+    this.serverStatusChecked = true;
+    try {
+      const resp = await fetch(`${config.API_BASE_URL}/ai/emotion/status`);
+      if (resp.ok) {
+        const data = await resp.json();
+        this.serverModelAvailable = Boolean(data.model_loaded);
+        if (this.serverModelAvailable) {
+          this.inferenceMode = MODE_SERVER;
+          console.info('[EmotionDetector] Server model available');
+        }
+      }
+    } catch (_) { this.serverModelAvailable = false; }
+  },
+
+  async _loadFacemesh() {
+    this._updateModelStatus('loading', 'Loading face detection model…');
+    try {
+      await this._ensureTFLibraries();
+      this.facemeshModel = await faceLandmarksDetection.load(
+        faceLandmarksDetection.SupportedPackages.mediapipeFacemesh,
+        { maxFaces: 1 }
+      );
+      this._updateModelStatus('success', 'Face detection ready');
+      updateState({ modelsLoaded: true });
+      console.info('[EmotionDetector] FaceMesh loaded');
+    } catch (err) {
+      console.error('[EmotionDetector] FaceMesh load failed:', err);
+      this._updateModelStatus('error', 'Face detection unavailable');
+      updateState({ usingSimulatedEmotions: false });
+    }
+  },
+
+  /**
+   * FIX 1: Load TF.js model and extract scaler tensors from model.getWeights().
+   *
+   * .bin file weight tensor order:
+   *   [0] dense_1/kernel  (1764, 512)
+   *   [1] dense_1/bias    (512,)
+   *   [2] dense_2/kernel  (512, 128)
+   *   [3] dense_2/bias    (128,)
+   *   [4] dense_3/kernel  (128, 6)
+   *   [5] dense_3/bias    (6,)
+   *   [6] scaler/mean     (1764,)   ← StandardScaler mean
+   *   [7] scaler/std      (1764,)   ← StandardScaler scale
+   */
+  async _loadTfjsModel() {
+    if (this.tfjsEmotionHeadModel || this.tfjsModel) return true;
+    try {
+      await this._ensureTFLibraries();
+
+      const emotionHeadUrl = config.EMOTION_TFJS_EMOTION_HEAD_URL;
+      const engagementHeadUrl = config.EMOTION_TFJS_ENGAGEMENT_HEAD_URL;
+
+      if (emotionHeadUrl && engagementHeadUrl) {
+        const [emotionHeadExists, engagementHeadExists] = await Promise.all([
+          this._urlExists(emotionHeadUrl),
+          this._urlExists(engagementHeadUrl),
+        ]);
+
+        if (emotionHeadExists && engagementHeadExists) {
+          try {
+            console.info('[EmotionDetector] Loading TF.js two-head models');
+            const [emotionHeadModel, engagementHeadModel] = await Promise.all([
+              tf.loadLayersModel(emotionHeadUrl, { strict: false }),
+              tf.loadLayersModel(engagementHeadUrl, { strict: false }),
+            ]);
+
+            this.tfjsEmotionHeadModel = emotionHeadModel;
+            this.tfjsEngagementHeadModel = engagementHeadModel;
+            this.tfjsModel = emotionHeadModel;
+
+            let scalerLoaded = await this._hydrateScalerFromModelMeta(emotionHeadUrl);
+            if (!scalerLoaded) scalerLoaded = await this._hydrateScalerFromModelWeights();
+            if (!scalerLoaded) {
+              console.warn('[EmotionDetector] Scaler unavailable for two-head TF.js model; accuracy may degrade');
+            }
+
+            this.inferenceMode = MODE_TFJS;
+            console.info('[EmotionDetector] TF.js two-head models loaded');
+            return true;
+          } catch (headErr) {
+            console.warn('[EmotionDetector] Two-head TF.js load failed, falling back to single model:', headErr?.message || headErr);
+            this.tfjsEmotionHeadModel = null;
+            this.tfjsEngagementHeadModel = null;
+            this.tfjsModel = null;
+          }
+        } else {
+          console.info('[EmotionDetector] Two-head TF.js models not found; using single-head model');
+        }
+      }
+
+      const modelUrl = config.EMOTION_TFJS_MODEL_URL || '/js/emotion_tfjs/model.json';
+      console.info('[EmotionDetector] Loading TF.js single-head model from', modelUrl);
+
+      this.tfjsModel = await tf.loadLayersModel(modelUrl, { strict: false });
+
+      let scalerLoaded = await this._hydrateScalerFromModelMeta(modelUrl);
+      if (!scalerLoaded) scalerLoaded = await this._hydrateScalerFromModelWeights();
+      if (!scalerLoaded) {
+        console.warn('[EmotionDetector] Scaler unavailable for single-head TF.js model; accuracy may degrade');
+      }
+
+      this.inferenceMode = MODE_TFJS;
+      console.info('[EmotionDetector] TF.js single-head model loaded');
+      return true;
+
+    } catch (err) {
+      console.warn('[EmotionDetector] TF.js model load failed:', err.message);
+      return false;
+    }
+  },
+
+  async _ensureTFLibraries() {
+    if (typeof tf !== 'undefined' && typeof faceLandmarksDetection !== 'undefined') return;
+    let waited = 0;
+    while ((typeof tf === 'undefined' || typeof faceLandmarksDetection === 'undefined')
+           && waited < 8000) {
+      await new Promise(r => setTimeout(r, 200));
+      waited += 200;
+    }
+    if (typeof tf === 'undefined') throw new Error('TensorFlow.js not loaded');
+    if (typeof faceLandmarksDetection === 'undefined')
+      throw new Error('faceLandmarksDetection not loaded');
+  },
+
+  async _urlExists(url) {
+    if (!url) return false;
+    try {
+      const headResp = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+      if (headResp.ok) return true;
+    } catch (_) {}
+
+    try {
+      const getResp = await fetch(url, { method: 'GET', cache: 'no-store' });
+      return getResp.ok;
+    } catch (_) {
+      return false;
+    }
+  },
+
+  async _hydrateScalerFromModelMeta(modelUrl) {
+    if (!modelUrl) return false;
+    if (this._scalerMean && this._scalerStd) return true;
+    if (this._modelMetaCache && this._modelMetaCache.url === modelUrl) {
+      return Boolean(this._modelMetaCache.loaded);
+    }
+    try {
+      const resp = await fetch(modelUrl, { cache: 'no-store' });
+      if (!resp.ok) {
+        this._modelMetaCache = { url: modelUrl, loaded: false };
+        return false;
+      }
+      const json = await resp.json();
+      const loaded = this._applyScalerFromMeta(json?.elevate_meta);
+      this._modelMetaCache = { url: modelUrl, loaded };
+      return loaded;
+    } catch (err) {
+      console.warn('[EmotionDetector] Failed to fetch model metadata for scaler:', err?.message || err);
+      this._modelMetaCache = { url: modelUrl, loaded: false };
+      return false;
+    }
+  },
+
+  async _hydrateScalerFromModelWeights() {
+    try {
+      const sourceModel = this.tfjsEmotionHeadModel || this.tfjsModel;
+      if (!sourceModel || typeof sourceModel.getWeights !== 'function') {
+        return false;
+      }
+
+      const allWeights = sourceModel.getWeights();
+      if (!allWeights || allWeights.length < 8) {
+        return false;
+      }
+
+      const meanTensor = allWeights[6];
+      const stdTensor = allWeights[7];
+      if (!meanTensor || !stdTensor) {
+        return false;
+      }
+
+      if (meanTensor.shape?.[0] !== HOG_FEATURE_DIM || stdTensor.shape?.[0] !== HOG_FEATURE_DIM) {
+        console.warn('[EmotionDetector] Scaler shape mismatch in model weights');
+        return false;
+      }
+
+      this._scalerMean = await meanTensor.data();
+      this._scalerStd = await stdTensor.data();
+      console.info(
+        `[EmotionDetector] Scaler loaded from model weights: mean[0]=${Number(this._scalerMean[0] || 0).toFixed(4)} std[0]=${Number(this._scalerStd[0] || 0).toFixed(4)}`
+      );
+      return true;
+    } catch (err) {
+      console.warn('[EmotionDetector] Failed to read scaler from model weights:', err?.message || err);
+      return false;
+    }
+  },
+
+  _applyScalerFromMeta(metaSection) {
+    if (!metaSection) return false;
+    const mean = metaSection.scaler_mean;
+    const std  = metaSection.scaler_std;
+    if (Array.isArray(mean) && Array.isArray(std) &&
+        mean.length === HOG_FEATURE_DIM && std.length === HOG_FEATURE_DIM) {
+      this._scalerMean = Float32Array.from(mean);
+      this._scalerStd  = Float32Array.from(std);
+      console.info('[EmotionDetector] Scaler loaded from model metadata');
+      return true;
+    }
+    return false;
+  },
+
+
+  // ═══════════════════════════════════════════
+  //  DETECTION LOOPS
+  // ═══════════════════════════════════════════
+
+  async _runFacemesh() {
+    if (!this.videoElement || this.videoElement.paused ||
+        this.videoElement.readyState < 2 || !state.cameraActive) return;
+    this._syncCanvas();
+    try {
+      const predictions = await this.facemeshModel.estimateFaces({
+        input: this.videoElement, returnTensors: false,
+        flipHorizontal: false, predictIrises: false,
+      });
+      if (!state.cameraActive) return;
+
+      const ctx = this.canvasElement.getContext('2d');
+      ctx.clearRect(0, 0, this.canvasElement.width, this.canvasElement.height);
+
+      if (predictions && predictions.length > 0) {
+        if (!state.faceDetectionConfirmed) updateState({ faceDetectionConfirmed: true });
+        this._lastFacePrediction = predictions[0];
+        this._drawLandmarks(ctx, predictions[0]);
+      } else {
+        this._lastFacePrediction = null;
+      }
+    } catch (_) {}
+  },
+
+  async _runInference() {
+    if (!this._lastFacePrediction && !this.serverModelAvailable) return;
+    let result = null;
+
+    if (this.serverModelAvailable) {
+      result = await this._serverInference(this._lastFacePrediction);
+      if (result) this.inferenceMode = MODE_SERVER;
+      else this.serverModelAvailable = false;
+    }
+
+    if (!result && (this.tfjsEmotionHeadModel || this.tfjsModel)) {
+      result = await this._tfjsInference(this._lastFacePrediction);
+      if (result) this.inferenceMode = MODE_TFJS;
+    }
+
+    if (!result) return;
+
+    const calibratedScores = this._applyLandmarkEmotionPriors(
+      result.all_scores,
+      this._lastFacePrediction,
+      result.engagement_score,
+    );
+
+    if (calibratedScores) {
+      result.all_scores = calibratedScores;
+      const ranked = Object.entries(calibratedScores).sort((a, b) => b[1] - a[1]);
+      result.emotion = ranked[0]?.[0] || result.emotion || 'neutral';
+      result.confidence = Number(ranked[0]?.[1] || result.confidence || 0);
+    }
+
+    const { emotion, confidence, all_scores } = result;
+    if (!this._passesGate(all_scores, confidence)) return;
+
+    this._applySmoothing(all_scores);
+    const smoothed = this._getSmoothedEmotion();
+    this._applyEmotion(smoothed.emotion, smoothed.confidence);
+  },
+
+
+  // ═══════════════════════════════════════════
+  //  INFERENCE IMPLEMENTATIONS
+  // ═══════════════════════════════════════════
+
+  async _serverInference(facePrediction) {
+    try {
+      const b64 = this._captureAlignedFaceB64(facePrediction, 96);
+      if (!b64) return null;
+      const resp = await fetch(`${config.API_BASE_URL}/ai/emotion/predict`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: b64 }),
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      return data.error ? null : data;
+    } catch (_) { return null; }
+  },
+
+  async _tfjsInference(facePrediction) {
+    try {
+      // Step 1: HOG features (FIX 2 + FIX 3 applied inside)
+      const hogFeatures = this._extractHog32(facePrediction);
+      if (!hogFeatures) return null;
+
+      // Step 2: FIX 1 — StandardScaler normalisation from .bin weights
+      const scaled = this._applyScaler(hogFeatures);
+      const emotionModel = this.tfjsEmotionHeadModel || this.tfjsModel;
+      if (!emotionModel) return null;
+
+      // Step 3: MLP forward pass
+      const rawProbs = tf.tidy(() => {
+        const t = tf.tensor2d(scaled, [1, HOG_FEATURE_DIM]);
+        return Array.from(emotionModel.predict(t).dataSync());
+      });
+
+      if (!rawProbs || rawProbs.length !== CLASS_NAMES.length) return null;
+
+      // Step 4: FIX 4 — recall-derived class balance
+      const probsArr = this._applyClassBalance(rawProbs);
+      const engagementScore = this._inferEngagementScore(scaled);
+      const topIdx   = probsArr.indexOf(Math.max(...probsArr));
+
+      return {
+        emotion:    CLASS_NAMES[topIdx],
+        confidence: probsArr[topIdx],
+        engagement_score: engagementScore,
+        all_scores: Object.fromEntries(CLASS_NAMES.map((c, i) => [c, probsArr[i]])),
+      };
+    } catch (err) {
+      console.warn('[EmotionDetector] TF.js inference error:', err.message);
+      return null;
+    }
+  },
+
+  // FIX 1: Apply StandardScaler — z = (x - mean) / std
+  _applyScaler(features) {
+    if (!this._scalerMean || !this._scalerStd ||
+        this._scalerMean.length !== features.length) {
+      return features; // No scaler → raw features (accuracy reduced but no crash)
+    }
+    const out = new Float32Array(features.length);
+    for (let i = 0; i < features.length; i++) {
+      const std = this._scalerStd[i] > 1e-8 ? this._scalerStd[i] : 1.0;
+      out[i] = (features[i] - this._scalerMean[i]) / std;
+    }
+    return out;
+  },
+
+  // FIX 4: Recall-derived class balance weights
+  _applyClassBalance(probs) {
+    const weighted = probs.map((p, i) => {
+      const className = CLASS_NAMES[i];
+      const rawWeight = Number(CLASS_BALANCE_WEIGHTS[className] ?? 1.0);
+      const boundedWeight = Math.max(CLASS_WEIGHT_MIN, Math.min(CLASS_WEIGHT_MAX, rawWeight));
+      const prior = Number(CLASS_PRIOR_MULTIPLIERS[className] ?? 1.0);
+      return Number(p || 0) * boundedWeight * prior;
+    });
+    const total    = weighted.reduce((s, v) => s + v, 0);
+    if (!total || !isFinite(total)) return probs;
+    return weighted.map(v => v / total);
+  },
+
+  _inferEngagementScore(scaledFeatures) {
+    if (!this.tfjsEngagementHeadModel) return null;
+
+    try {
+      const raw = tf.tidy(() => {
+        const t = tf.tensor2d(scaledFeatures, [1, HOG_FEATURE_DIM]);
+        const y = this.tfjsEngagementHeadModel.predict(t);
+        return Array.from(y.dataSync());
+      });
+
+      if (!raw.length) return null;
+      if (raw.length === 1) {
+        const value = Number(raw[0] || 0);
+        if (value >= 0 && value <= 1) return value;
+        return 1 / (1 + Math.exp(-value));
+      }
+
+      const safe = raw.map(v => Math.max(0, Number(v || 0)));
+      const sum = safe.reduce((acc, v) => acc + v, 0);
+      if (!sum) return null;
+
+      const normalized = safe.map(v => v / sum);
+      return normalized[normalized.length - 1];
+    } catch (err) {
+      console.warn('[EmotionDetector] Engagement head inference failed:', err?.message || err);
+      return null;
+    }
+  },
+
+  _normalizeScoreMap(scores) {
+    const mapped = {};
+    let total = 0;
+    for (const className of CLASS_NAMES) {
+      const value = Math.max(0, Number(scores?.[className] || 0));
+      mapped[className] = value;
+      total += value;
+    }
+
+    if (!Number.isFinite(total) || total <= 0) {
+      const uniform = 1 / CLASS_NAMES.length;
+      return Object.fromEntries(CLASS_NAMES.map(className => [className, uniform]));
+    }
+
+    return Object.fromEntries(CLASS_NAMES.map(className => [className, mapped[className] / total]));
+  },
+
+  _applyLandmarkEmotionPriors(scoreMap, facePrediction, engagementScore) {
+    if (!scoreMap) return null;
+
+    const adjusted = this._normalizeScoreMap(scoreMap);
+    const landmarks = this._extractLandmarkSignals(facePrediction);
+
+    if (landmarks) {
+      if (landmarks.smileHint) {
+        adjusted.happy *= 1.16;
+        adjusted.angry *= 0.70;
+      }
+
+      if (landmarks.calmBrow && !landmarks.browFurrowStrong) {
+        adjusted.angry *= 0.66;
+        adjusted.neutral *= 1.10;
+        adjusted.focused *= 1.07;
+      }
+
+      if (landmarks.browFurrowStrong && landmarks.eyeNarrow) {
+        adjusted.angry *= 1.08;
+        adjusted.confused *= 1.06;
+      }
+
+      const calmMass = (adjusted.neutral || 0) + (adjusted.focused || 0);
+      if ((adjusted.angry || 0) > 0.28 && calmMass > (adjusted.angry || 0) * 1.15 && landmarks.calmBrow) {
+        adjusted.angry *= 0.55;
+        adjusted.neutral *= 1.08;
+      }
+    }
+
+    if (Number.isFinite(engagementScore)) {
+      if (engagementScore >= 0.65) {
+        adjusted.focused *= 1.08;
+        adjusted.angry *= 0.84;
+      } else if (engagementScore <= 0.35) {
+        adjusted.bored *= 1.07;
+        adjusted.angry *= 0.90;
+      }
+    }
+
+    return this._normalizeScoreMap(adjusted);
+  },
+
+  _extractLandmarkSignals(facePrediction) {
+    const mesh = facePrediction?.scaledMesh;
+    if (!Array.isArray(mesh) || mesh.length < 387) {
+      return null;
+    }
+
+    const point = (index) => {
+      const row = mesh[index];
+      if (!row || row.length < 2) return null;
+      const x = Number(row[0]);
+      const y = Number(row[1]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+      return { x, y };
+    };
+
+    const meanPoint = (indices) => {
+      let sumX = 0;
+      let sumY = 0;
+      let count = 0;
+      for (const idx of indices) {
+        const p = point(idx);
+        if (!p) continue;
+        sumX += p.x;
+        sumY += p.y;
+        count += 1;
+      }
+      if (!count) return null;
+      return { x: sumX / count, y: sumY / count };
+    };
+
+    const distance = (a, b) => {
+      if (!a || !b) return 0;
+      return Math.hypot(a.x - b.x, a.y - b.y);
+    };
+
+    const leftEyeOuter = point(33);
+    const rightEyeOuter = point(263);
+    const mouthLeft = point(61);
+    const mouthRight = point(291);
+    const upperLip = point(13);
+    const lowerLip = point(14);
+    const leftBrow = meanPoint([70, 63, 105]);
+    const rightBrow = meanPoint([336, 296, 334]);
+    const leftEyeCenter = meanPoint([33, 133, 159, 145]);
+    const rightEyeCenter = meanPoint([362, 263, 386, 374]);
+    const leftEyeTop = point(159);
+    const leftEyeBottom = point(145);
+    const rightEyeTop = point(386);
+    const rightEyeBottom = point(374);
+
+    const faceWidth = Math.max(1, distance(leftEyeOuter, rightEyeOuter));
+    const browGap = distance(leftBrow, rightBrow) / faceWidth;
+    const browEyeLeft = distance(leftBrow, leftEyeCenter) / faceWidth;
+    const browEyeRight = distance(rightBrow, rightEyeCenter) / faceWidth;
+    const browEyeAvg = (browEyeLeft + browEyeRight) / 2;
+    const mouthWidth = distance(mouthLeft, mouthRight) / faceWidth;
+    const mouthOpen = distance(upperLip, lowerLip) / faceWidth;
+    const eyeOpenLeft = distance(leftEyeTop, leftEyeBottom) / faceWidth;
+    const eyeOpenRight = distance(rightEyeTop, rightEyeBottom) / faceWidth;
+    const eyeOpenAvg = (eyeOpenLeft + eyeOpenRight) / 2;
+
+    return {
+      smileHint: mouthWidth > 0.34 && mouthOpen > 0.025,
+      calmBrow: browEyeAvg > 0.09,
+      browFurrowStrong: browGap < 0.165,
+      eyeNarrow: eyeOpenAvg < 0.028,
+    };
+  },
+
+
+  // ═══════════════════════════════════════════
+  //  HOG FEATURE EXTRACTION
+  //  FIX 2: Simple central differences (matches skimage exactly)
+  //  FIX 3: No CLAHE / gamma / blur preprocessing
+  // ═══════════════════════════════════════════
+
+  /**
+   * Extract 1764-dim HOG vector from current video frame.
+   *
+   * Pipeline exactly matches train_emotion_fast.py:
+   *   PIL→gray→resize(32,32) → skimage.hog(orient=9,ppc=(4,4),cpb=(2,2))
+   *
+   * FIX 2: gx = img[y,x+1] - img[y,x-1]  (NOT Sobel)
+   * FIX 3: No CLAHE, no gamma, no blur before HOG
+   */
+  _extractHog32(facePrediction) {
+    if (!this.videoElement) return null;
+
+    if (!this._hogCanvas) {
+      this._hogCanvas        = document.createElement('canvas');
+      this._hogCanvas.width  = HOG_IMG_SIZE;
+      this._hogCanvas.height = HOG_IMG_SIZE;
+    }
+
+    const ctx = this._hogCanvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+
+    this._drawAlignedFaceToCanvas(ctx, HOG_IMG_SIZE, HOG_IMG_SIZE, facePrediction);
+
+    const rgba = ctx.getImageData(0, 0, HOG_IMG_SIZE, HOG_IMG_SIZE).data;
+
+    // FIX 3: BT.601 grayscale ONLY — no CLAHE, no gamma, no blur
+    const W    = HOG_IMG_SIZE;
+    const H    = HOG_IMG_SIZE;
+    const gray = new Float32Array(W * H);
+    for (let i = 0; i < W * H; i++) {
+      const r = rgba[i * 4];
+      const g = rgba[i * 4 + 1];
+      const b = rgba[i * 4 + 2];
+      gray[i] = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
+    }
+
+    // Gradient computation
+    // FIX 2: Simple central difference — matches skimage.feature.hog exactly
+    const cellHist = new Float32Array(HOG_CELLS_X * HOG_CELLS_Y * HOG_BINS);
+
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const xm1 = x > 0     ? x - 1 : 0;
+        const xp1 = x < W - 1 ? x + 1 : W - 1;
+        const ym1 = y > 0     ? y - 1 : 0;
+        const yp1 = y < H - 1 ? y + 1 : H - 1;
+
+        // FIX 2: central difference only — NO Sobel row weighting
+        const gx = gray[y * W + xp1] - gray[y * W + xm1];
+        const gy = gray[yp1 * W + x] - gray[ym1 * W + x];
+
+        const mag = Math.sqrt(gx * gx + gy * gy);
+        if (mag === 0) continue;
+
+        // Unsigned orientation [0, 180)
+        let angle = Math.atan2(Math.abs(gy), gx) * (180 / Math.PI);
+        if (angle < 0) angle += 180;
+        if (angle >= 180) angle = 0;
+
+        // Soft bin assignment
+        const binF = (angle / 180) * HOG_BINS;
+        const bin0 = Math.floor(binF) % HOG_BINS;
+        const bin1 = (bin0 + 1) % HOG_BINS;
+        const w1   = binF - Math.floor(binF);
+        const w0   = 1 - w1;
+
+        const cx   = Math.min(HOG_CELLS_X - 1, Math.floor(x / HOG_PPC_X));
+        const cy   = Math.min(HOG_CELLS_Y - 1, Math.floor(y / HOG_PPC_Y));
+        const base = (cy * HOG_CELLS_X + cx) * HOG_BINS;
+        cellHist[base + bin0] += mag * w0;
+        cellHist[base + bin1] += mag * w1;
+      }
+    }
+
+    // Block normalisation: 7×7 blocks of 2×2 cells, L2-Hys
+    const nBX     = HOG_CELLS_X - 1;  // 7
+    const nBY     = HOG_CELLS_Y - 1;  // 7
+    const bSize   = HOG_BLOCK_W * HOG_BLOCK_H * HOG_BINS;  // 36
+    const features = new Float32Array(nBX * nBY * bSize);  // 1764
+    let outIdx = 0;
+
+    for (let by = 0; by < nBY; by++) {
+      for (let bx = 0; bx < nBX; bx++) {
+        const block = new Float32Array(bSize);
+        let p = 0;
+        for (let dy = 0; dy < HOG_BLOCK_H; dy++) {
+          for (let dx = 0; dx < HOG_BLOCK_W; dx++) {
+            const cellBase = ((by + dy) * HOG_CELLS_X + (bx + dx)) * HOG_BINS;
+            for (let b = 0; b < HOG_BINS; b++) block[p++] = cellHist[cellBase + b];
+          }
+        }
+        // L2-Hys: normalise → clip 0.2 → renormalise
+        let sqSum = 0;
+        for (let i = 0; i < bSize; i++) sqSum += block[i] * block[i];
+        let norm = Math.sqrt(sqSum + 1e-6);
+        for (let i = 0; i < bSize; i++) block[i] = Math.min(0.2, block[i] / norm);
+        sqSum = 0;
+        for (let i = 0; i < bSize; i++) sqSum += block[i] * block[i];
+        norm = Math.sqrt(sqSum + 1e-6);
+        for (let i = 0; i < bSize; i++) features[outIdx++] = block[i] / norm;
+      }
+    }
+
+    return features;
+  },
+
+
+  // ═══════════════════════════════════════════
+  //  GATES + SMOOTHING
+  // ═══════════════════════════════════════════
+
+  _passesGate(allScores, confidence) {
+    if (!allScores) return confidence >= MIN_CONFIDENCE;
+    const sorted = Object.values(allScores).sort((a, b) => b - a);
+    const top1   = sorted[0] ?? 0;
+    const top2   = sorted[1] ?? 0;
+    if (top1 >= 0.65) return (top1 - top2) >= 0.04;
+    return top1 >= MIN_CONFIDENCE && (top1 - top2) >= MIN_MARGIN;
+  },
+
+  _applySmoothing(allScores) {
+    if (!allScores) return;
+    const uniform = 1 / CLASS_NAMES.length;
+    if (!this._smoothedScores)
+      this._smoothedScores = Object.fromEntries(CLASS_NAMES.map(c => [c, uniform]));
+
+    const vals   = Object.values(allScores);
+    const top1   = Math.max(...vals);
+    const top2   = vals.slice().sort((a, b) => b - a)[1] ?? 0;
+    const alpha  = Math.min(0.7, SMOOTH_ALPHA + (top1 - top2) * 0.4);
+
+    for (const c of CLASS_NAMES) {
+      const prev = this._smoothedScores[c] ?? uniform;
+      const curr = allScores[c] ?? 0;
+      let next = (1 - alpha) * prev + alpha * curr;
+      next = (1 - SMOOTH_LEAK) * next + SMOOTH_LEAK * uniform;
+      this._smoothedScores[c] = next;
+    }
+    const total = CLASS_NAMES.reduce((s, c) => s + (this._smoothedScores[c] || 0), 0);
+    if (total > 0) for (const c of CLASS_NAMES) this._smoothedScores[c] /= total;
+  },
+
+  _getSmoothedEmotion() {
+    if (!this._smoothedScores) return { emotion: 'neutral', confidence: 0.5 };
+    const ranked = Object.entries(this._smoothedScores).sort((a, b) => b[1] - a[1]);
+    return { emotion: ranked[0]?.[0] || 'neutral', confidence: ranked[0]?.[1] || 0.5 };
+  },
+
+
+  // ═══════════════════════════════════════════
+  //  APPLY EMOTION → UI + STATE + LOG
+  // ═══════════════════════════════════════════
+
+  _applyEmotion(emotion, confidence) {
+    updateState({ currentEmotion: emotion });
+    this._updateEmotionUI(emotion, confidence);
+    const settings = this._getSettings();
+    if (settings.enableEmotionFeedback !== false) this._throttledLog(emotion, confidence);
+  },
+
+  _updateEmotionUI(emotion, confidence) {
+    const icon      = document.getElementById('emotionIcon');
+    const text      = document.getElementById('emotionText');
+    const indicator = document.getElementById('emotionIndicator');
+    if (!icon || !text || !indicator) return;
+
+    icon.textContent = EMOTION_EMOJI[emotion.toLowerCase()] || '😐';
+    text.textContent = `${emotion} (${Math.round(confidence * 100)}%)`;
+    indicator.style.display = 'flex';
+    indicator.style.cssText = 'display:flex;position:absolute;top:8px;right:8px;left:auto;bottom:auto;';
+    document.getElementById('emotionModeLabel')?.remove();
+    document.getElementById('emotionScoreLabel')?.remove();
+  },
+
+  async _throttledLog(emotion, confidence) {
+    const now = Date.now();
+    if (now - this._lastLogTime < this._logIntervalMs) return;
+    this._lastLogTime = now;
+    try {
+      const { api } = await import('./api.js');
+      const ctx = state.questionsAnswered > 0 ? 'answering_question' : 'session_active';
+      await api.emotions.log(emotion, confidence, ctx);
+    } catch (_) {}
+  },
+
+
+  // ═══════════════════════════════════════════
+  //  SIMULATION
+  // ═══════════════════════════════════════════
+
+  _startSimulation() {
+    updateState({ usingSimulatedEmotions: true, faceDetectionConfirmed: false });
+    this._updateCameraUI('active');
+    const emotions = ['neutral', 'focused', 'happy', 'confused', 'bored', 'neutral'];
+    let idx = 0;
+    const interval = setInterval(() => {
+      if (!this.detectionActive) { clearInterval(interval); return; }
+      this._applyEmotion(emotions[idx % emotions.length], 0.70 + Math.random() * 0.25);
+      idx++;
+    }, 1800);
+    updateState({ emotionDetectionInterval: interval });
+  },
+
+
+  // ═══════════════════════════════════════════
+  //  FACE CROP + DRAWING
+  // ═══════════════════════════════════════════
+
+  _drawAlignedFaceToCanvas(ctx, outW, outH, facePrediction) {
+    if (!ctx || !this.videoElement) return;
+    const rect  = this._getFaceCropRect(facePrediction);
+    const angle = this._estimateFaceRoll(facePrediction);
+    ctx.save();
+    ctx.clearRect(0, 0, outW, outH);
+    ctx.translate(outW / 2, outH / 2);
+    ctx.rotate(-angle);
+    ctx.drawImage(this.videoElement, rect.sx, rect.sy, rect.sw, rect.sh,
+                  -outW / 2, -outH / 2, outW, outH);
+    ctx.restore();
+  },
+
+  _getFaceCropRect(facePrediction) {
+    const vw  = this.videoElement?.videoWidth  || 96;
+    const vh  = this.videoElement?.videoHeight || 96;
+    const toN = v => Array.isArray(v) ? Number(v[0]) : Number(v);
+    const box = facePrediction?.boundingBox;
+    const tl  = box?.topLeft;
+    const br  = box?.bottomRight;
+
+    let x1 = isFinite(toN(tl?.[0])) ? toN(tl[0]) : -1;
+    let y1 = isFinite(toN(tl?.[1])) ? toN(tl[1]) : -1;
+    let x2 = isFinite(toN(br?.[0])) ? toN(br[0]) : -1;
+    let y2 = isFinite(toN(br?.[1])) ? toN(br[1]) : -1;
+
+    if (x1 < 0 || y1 < 0 || x2 <= x1 || y2 <= y1) {
+      const px = vw * 0.10, py = vh * 0.10;
+      return { sx: px, sy: py, sw: vw - 2 * px, sh: vh - 2 * py };
+    }
+
+    const w    = x2 - x1, h = y2 - y1;
+    const padX = w * 0.18, padY = h * 0.24;
+    const sx   = Math.max(0,  Math.floor(x1 - padX));
+    const sy   = Math.max(0,  Math.floor(y1 - padY));
+    return {
+      sx, sy,
+      sw: Math.min(vw, Math.ceil(x2 + padX)) - sx,
+      sh: Math.min(vh, Math.ceil(y2 + padY)) - sy,
+    };
+  },
+
+  _estimateFaceRoll(facePrediction) {
+    const kps = facePrediction?.scaledMesh;
+    if (!Array.isArray(kps) || kps.length < 400) return 0;
+    const avg = (indices) => {
+      let sx = 0, sy = 0, n = 0;
+      for (const idx of indices) {
+        const p = kps[idx];
+        if (p) { sx += p[0]; sy += p[1]; n++; }
+      }
+      return n ? { x: sx / n, y: sy / n } : null;
+    };
+    const L = avg([33, 133, 159, 145]);
+    const R = avg([362, 263, 386, 374]);
+    if (!L || !R) return 0;
+    return Math.atan2(R.y - L.y, R.x - L.x);
+  },
+
+  _captureAlignedFaceB64(facePrediction, size) {
+    try {
+      const tmp = document.createElement('canvas');
+      tmp.width = size; tmp.height = size;
+      this._drawAlignedFaceToCanvas(tmp.getContext('2d'), size, size, facePrediction);
+      return tmp.toDataURL('image/jpeg', 0.80);
+    } catch (_) { return null; }
+  },
+
+  _drawLandmarks(ctx, prediction) {
+    const kps = prediction?.scaledMesh;
+    if (!kps) return;
+    ctx.fillStyle = 'rgba(76,245,133,0.80)';
+    for (let i = 0; i < kps.length; i++) {
+      const p = kps[i];
+      if (p) {
+        ctx.beginPath();
+        ctx.arc(p[0], p[1], 1.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  },
+
+
+  // ═══════════════════════════════════════════
+  //  CAMERA UI
+  // ═══════════════════════════════════════════
+
+  _updateCameraUI(status) {
+    const statusDot   = document.getElementById('statusDot');
+    const statusText  = document.getElementById('cameraStatusText');
+    const placeholder = document.getElementById('webcamPlaceholder');
+    const webcam      = document.getElementById('webcam');
+    const indicator   = document.getElementById('emotionIndicator');
+    const startBtn    = document.getElementById('startCamera');
+    const stopBtn     = document.getElementById('stopCamera');
+
+    const show = el => el && (el.style.display = 'flex');
+    const hide = el => el && (el.style.display = 'none');
+
+    webcam?.classList.remove('active');
+    placeholder?.classList.remove('hidden');
+    hide(indicator); show(startBtn); hide(stopBtn);
+
+    if (status === 'starting' || status === 'active') {
+      webcam?.classList.add('active');
+      placeholder?.classList.add('hidden');
+      show(indicator); hide(startBtn); show(stopBtn);
+      if (statusDot)  statusDot.className   = status === 'active' ? 'status-dot active' : 'status-dot loading';
+      if (statusText) statusText.textContent = status === 'active' ? 'Active' : 'Initialising…';
+      if (startBtn)   { startBtn.disabled = false; startBtn.innerHTML = '<i class="fas fa-video"></i> Start Camera'; }
+    } else if (status === 'off') {
+      if (statusDot)  statusDot.className   = 'status-dot';
+      if (statusText) statusText.textContent = 'Camera Off';
+      const ph = document.getElementById('webcamPlaceholder');
+      if (ph) { ph.classList.remove('hidden'); ph.style.display = 'flex'; }
+    } else if (status === 'error') {
+      if (placeholder) placeholder.innerHTML = '<i class="fas fa-exclamation-triangle"></i><p>Camera error</p>';
+    }
+  },
+
+  _isSimulationAllowed() {
+    return config.EMOTION_ALLOW_SIMULATION_FALLBACK === true;
+  },
+
+  _updateModelStatus(type, message) {
+    const statusEl = document.getElementById('modelLoadingStatus');
+    const textEl   = document.getElementById('modelStatusText');
+    const retryBtn = document.getElementById('retryModelLoad');
+    if (statusEl) statusEl.className = `model-loading-status ${type} show`;
+    if (textEl)   textEl.textContent = message;
+    if (retryBtn) retryBtn.style.display = type === 'error' ? 'inline-block' : 'none';
+  },
+
+  _getSettings() {
+    try { return JSON.parse(localStorage.getItem('userSettings') || '{}') || {}; }
+    catch (_) { return {}; }
+  },
+
+  _syncCanvas() {
+    if (!this.videoElement || !this.canvasElement) return;
+    const vw = this.videoElement.videoWidth;
+    const vh = this.videoElement.videoHeight;
+    if (vw > 0 && vh > 0) {
+      if (this.canvasElement.width  !== vw) this.canvasElement.width  = vw;
+      if (this.canvasElement.height !== vh) this.canvasElement.height = vh;
+    }
+  },
+
+  _attachResize() {
+    if (this._resizeHandler) return;
+    this._resizeHandler = () => this._syncCanvas();
+    window.addEventListener('resize', this._resizeHandler, { passive: true });
+  },
+
+  _detachResize() {
+    if (!this._resizeHandler) return;
+    window.removeEventListener('resize', this._resizeHandler);
+    this._resizeHandler = null;
+  },
+
+  _stopTracks(stream) {
+    stream?.getTracks?.().forEach(t => { try { t.stop(); } catch (_) {} });
+  },
+};

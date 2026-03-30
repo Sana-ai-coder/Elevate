@@ -1,0 +1,264 @@
+{
+  "timestamp": "20260329T164011Z",
+  "model_type": "hog_mlp_tfjs",
+  "feature_info": {
+    "type": "HOG",
+    "img_size": [
+      48,
+      48
+    ],
+    "colour": "grayscale",
+    "hog_orientations": 9,
+    "hog_pixels_per_cell": [
+      6,
+      6
+    ],
+    "hog_cells_per_block": [
+      2,
+      2
+    ],
+    "feature_dim": 1764,
+    "rationale": "HOG encodes gradient orientation histograms in local spatial cells. It captures eyebrow shape, mouth corner angles, and eye aperture independently of illumination \u2014 the cues humans use to read emotion."
+  },
+  "model_info": {
+    "architecture": "HOG(48\u00d748) \u2192 MLP(512, 128) \u2192 Softmax(6)",
+    "hidden_layer_sizes": [
+      512,
+      128
+    ],
+    "activation": "relu",
+    "solver": "adam",
+    "learning_rate_init": 0.001,
+    "batch_size": 128,
+    "l2_alpha": 0.0001,
+    "early_stopping": true,
+    "epochs_trained": 13,
+    "final_train_loss": 0.128764,
+    "n_features": 1764,
+    "n_classes": 6,
+    "total_params": 970118
+  },
+  "class_names": [
+    "happy",
+    "bored",
+    "focused",
+    "confused",
+    "neutral",
+    "angry"
+  ],
+  "dataset_counts": {
+    "happy": 7215,
+    "bored": 3222,
+    "focused": 3123,
+    "confused": 1285,
+    "neutral": 4965,
+    "angry": 3995
+  },
+  "split_counts": {
+    "train_balanced": 14423,
+    "val": 3568,
+    "test": 3576,
+    "train_by_class": {
+      "happy": 2525,
+      "bored": 2525,
+      "focused": 2525,
+      "confused": 1798,
+      "neutral": 2525,
+      "angry": 2525
+    }
+  },
+  "validation_metrics": {
+    "accuracy": 0.7559,
+    "macro_f1": 0.7793,
+    "macro_precision": 0.7748,
+    "macro_recall": 0.7885,
+    "per_class": {
+      "happy": {
+        "precision": 0.7332,
+        "recall": 0.7874,
+        "f1": 0.7594,
+        "support": 1082
+      },
+      "bored": {
+        "precision": 0.9918,
+        "recall": 1.0,
+        "f1": 0.9959,
+        "support": 483
+      },
+      "focused": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 468
+      },
+      "confused": {
+        "precision": 0.7277,
+        "recall": 0.849,
+        "f1": 0.7837,
+        "support": 192
+      },
+      "neutral": {
+        "precision": 0.6565,
+        "recall": 0.5188,
+        "f1": 0.5796,
+        "support": 744
+      },
+      "angry": {
+        "precision": 0.5399,
+        "recall": 0.576,
+        "f1": 0.5574,
+        "support": 599
+      }
+    },
+    "confusion_matrix": [
+      [
+        852,
+        1,
+        0,
+        31,
+        86,
+        112
+      ],
+      [
+        0,
+        483,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        468,
+        0,
+        0,
+        0
+      ],
+      [
+        14,
+        0,
+        0,
+        163,
+        4,
+        11
+      ],
+      [
+        163,
+        3,
+        0,
+        21,
+        386,
+        171
+      ],
+      [
+        133,
+        0,
+        0,
+        9,
+        112,
+        345
+      ]
+    ]
+  },
+  "test_metrics": {
+    "accuracy": 0.7623,
+    "macro_f1": 0.7827,
+    "macro_precision": 0.7765,
+    "macro_recall": 0.7943,
+    "per_class": {
+      "happy": {
+        "precision": 0.7491,
+        "recall": 0.7941,
+        "f1": 0.771,
+        "support": 1083
+      },
+      "bored": {
+        "precision": 0.9938,
+        "recall": 1.0,
+        "f1": 0.9969,
+        "support": 484
+      },
+      "focused": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 469
+      },
+      "confused": {
+        "precision": 0.7034,
+        "recall": 0.8557,
+        "f1": 0.7721,
+        "support": 194
+      },
+      "neutral": {
+        "precision": 0.6633,
+        "recall": 0.5308,
+        "f1": 0.5897,
+        "support": 746
+      },
+      "angry": {
+        "precision": 0.5493,
+        "recall": 0.585,
+        "f1": 0.5666,
+        "support": 600
+      }
+    },
+    "confusion_matrix": [
+      [
+        860,
+        1,
+        0,
+        20,
+        88,
+        114
+      ],
+      [
+        0,
+        484,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        469,
+        0,
+        0,
+        0
+      ],
+      [
+        12,
+        0,
+        0,
+        166,
+        5,
+        11
+      ],
+      [
+        157,
+        2,
+        0,
+        28,
+        396,
+        163
+      ],
+      [
+        119,
+        0,
+        0,
+        22,
+        108,
+        351
+      ]
+    ]
+  },
+  "timing_seconds": {
+    "load_s": 241.74,
+    "scale_s": 0.6,
+    "train_s": 85.96,
+    "eval_s": 0.26
+  }
+}

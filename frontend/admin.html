@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Elevate Admin</title>
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="stylesheet" href="css/admin.css" />
+</head>
+<body>
+  <main class="admin-container">
+    <header class="admin-header">
+      <h1>Elevate — Admin & Teacher Portal</h1>
+      <p class="subtitle">Manage teachers, view stats, and inspect reports.</p>
+      <div style="margin-top:8px;display:flex;gap:12px;align-items:center">
+        <span id="serverStatus">Checking server…</span>
+        <span id="apiUrl" style="color:#6b7280">API: auto</span>
+        <button id="healthRetry" class="secondary" style="padding:6px 8px">Retry</button>
+        <small style="color:#6b7280">(Open this page via http://localhost:8000 for best results)</small>
+      </div>
+    </header>
+
+    <section class="card">
+      <div>
+        <h2>Teacher Signup</h2>
+        <input id="signupName" placeholder="Full name" />
+        <input id="signupEmail" placeholder="you@example.com" />
+        <input id="signupPassword" type="password" placeholder="Password" />
+        <label for="signupGrade">Grade Level:</label>
+        <select id="signupGrade">
+          <option value="elementary">Elementary</option>
+          <option value="middle">Middle School</option>
+          <option value="high">High School</option>
+          <option value="college">College</option>
+        </select>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button id="signupBtn">Sign Up</button>
+          <button class="secondary" id="clearSignup">Clear</button>
+        </div>
+      </div>
+      <div class="panel card">
+        <strong>Signup status</strong>
+        <pre id="signupOutput">No action yet</pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <div>
+        <h2>Teacher Login</h2>
+        <input id="loginEmail" placeholder="you@example.com" />
+        <input id="loginPassword" type="password" placeholder="Password" />
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button id="loginBtn">Log In</button>
+          <button class="secondary" id="toSignup">Go to Signup</button>
+        </div>
+      </div>
+      <div class="panel card">
+        <strong>Login status</strong>
+        <pre id="loginOutput">Not logged in</pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <div>
+        <h2>Admin Actions</h2>
+        <label for="adminToken">Admin token:</label>
+        <input id="adminToken" placeholder="dev-admin-token" />
+        <button id="getStats">Get Stats</button>
+        <a href="/teacher-dashboard.html"><button id="openTeacherDashboard" class="secondary">Open Teacher Dashboard</button></a>
+      </div>
+      <div class="panel card">
+        <strong>Server stats</strong>
+        <pre id="statsOutput">No data</pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <div>
+        <h2>Admin — Pending Teacher Requests</h2>
+        <label for="adminTokenRequests">Admin token:</label>
+        <input id="adminTokenRequests" placeholder="dev-admin-token" />
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button id="refreshRequests">Refresh Requests</button>
+          <button id="clearRequests" class="secondary">Clear View</button>
+        </div>
+      </div>
+      <div class="panel card">
+        <strong>Pending requests</strong>
+        <div id="requestsList">No requests loaded</div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+          <button id="prevPage" class="secondary">Prev</button>
+          <span id="requestsPage">Page: 1</span>
+          <button id="nextPage">Next</button>
+        </div>
+      </div>
+      <!-- Modal placeholder -->
+      <div id="confirmModal" class="modal hidden" aria-hidden="true">
+        <div class="modal-content">
+          <p id="confirmMessage">Are you sure?</p>
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+            <button id="confirmYes">Yes</button>
+            <button id="confirmNo" class="secondary">No</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div>
+        <h2>Test Results (Students)</h2>
+        <label for="filterSubject">Subject:</label>
+        <input id="filterSubject" placeholder="e.g., Math" />
+        <label for="filterEmail">Student email:</label>
+        <input id="filterEmail" placeholder="student@example.com" />
+        <label for="filterStart">Start date:</label>
+        <input id="filterStart" type="date" />
+        <label for="filterEnd">End date:</label>
+        <input id="filterEnd" type="date" />
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button id="refreshResults">Refresh Results</button>
+          <button id="exportCsv" class="secondary" title="Includes column avg_time_per_question (seconds)">Export CSV</button>
+          <button id="clearResults" class="secondary">Clear View</button>
+        </div>
+        <small style="color:#6b7280;display:block;margin-top:6px">Note: <strong>avg time</strong> is average time per question (seconds) and is included in CSV export.</small>
+      </div>
+      <div class="panel card">
+        <strong>Recent test results</strong>
+        <div id="resultsList">No results loaded</div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+          <button id="resultsPrev" class="secondary">Prev</button>
+          <span id="resultsPage">Page: 1</span>
+          <button id="resultsNext">Next</button>
+        </div>
+      </div>
+
+      <!-- Details modal -->
+      <div id="resultsModal" class="modal hidden" aria-hidden="true">
+        <div class="modal-content">
+          <h3 id="resultsModalTitle">Student history</h3>
+          <div id="resultsModalBody">
+            <div style="margin-bottom:12px">
+              <canvas id="scoresChart" width="600" height="160"></canvas>
+            </div>
+            <div id="historyList">Loading history...</div>
+            <hr />
+            <div id="testDetail">
+              <h4 id="testDetailTitle">Test details</h4>
+              <div style="margin-bottom:12px">
+                <canvas id="perTestChart" width="600" height="160"></canvas>
+              </div>
+              <div id="perTestDetails">Select a test to view question-by-question breakdown.</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+            <button id="resultsClose">Close</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div>
+        <h2>Authenticated Actions (Teacher)</h2>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button id="whoami">Who Am I</button>
+          <button id="getSummary">Get My Summary</button>
+          <button id="logoutBtn">Logout</button>
+        </div>
+      </div>
+      <div class="panel card">
+        <strong>Auth output</strong>
+        <pre id="authOutput">No user</pre>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="js/admin.js"></script>
+</body>
+</html>
