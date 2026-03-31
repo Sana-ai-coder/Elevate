@@ -9,6 +9,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from config import (
+    HF_TOKEN,
     LLM_MODEL,
     LORA_ADAPTER_PATH,
     MAX_NEW_TOKENS,
@@ -52,6 +53,8 @@ class LanguageModel:
         self.tokenizer = AutoTokenizer.from_pretrained(
             LLM_MODEL,
             cache_dir=str(MODELS_DIR),
+            token=HF_TOKEN or None,
+            use_fast=True,
             trust_remote_code=True,
         )
 
@@ -61,9 +64,11 @@ class LanguageModel:
         self.model = AutoModelForCausalLM.from_pretrained(
             LLM_MODEL,
             cache_dir=str(MODELS_DIR),
+            token=HF_TOKEN or None,
             quantization_config=quantization_config,
             device_map="auto" if self.device == "cuda" else None,
             dtype=torch.float16 if self.device == "cuda" else torch.float32,
+            low_cpu_mem_usage=True,
             trust_remote_code=True,
         )
 

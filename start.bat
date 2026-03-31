@@ -98,6 +98,16 @@ if "%NEEDS_SETUP%"=="1" (
     echo  [INFO] Virtual environment found and healthy.
 )
 
+if not defined ELEVATE_FAST_STARTUP set "ELEVATE_FAST_STARTUP=1"
+if /I "%ELEVATE_FAST_STARTUP%"=="1" (
+    if not defined ELEVATE_BUILD_INTERACTION_DATASET set "ELEVATE_BUILD_INTERACTION_DATASET=0"
+    if not defined ELEVATE_BUILD_BKT_MODEL set "ELEVATE_BUILD_BKT_MODEL=0"
+    if not defined ELEVATE_BUILD_DKT_MODEL set "ELEVATE_BUILD_DKT_MODEL=0"
+    if not defined ELEVATE_BUILD_EMOTION_MODEL set "ELEVATE_BUILD_EMOTION_MODEL=0"
+    if not defined ELEVATE_BUILD_AT_RISK_MODEL set "ELEVATE_BUILD_AT_RISK_MODEL=0"
+    echo  [INFO] Fast startup mode enabled. Heavy training/bootstrap jobs are skipped.
+)
+
 echo  [CHECK] Running startup healthcheck...
 "%VENV_PY%" scripts\startup_healthcheck.py
 if errorlevel 1 (

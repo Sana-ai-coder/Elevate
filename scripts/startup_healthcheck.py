@@ -129,7 +129,7 @@ def _ensure_dependencies() -> None:
 def _ensure_questions(question_count: int) -> None:
     strict_rebuild = os.environ.get("ELEVATE_STRICT_REBUILD", "0") == "1"
     per_subtopic = int(os.environ.get("ELEVATE_PER_SUBTOPIC", "80"))
-    min_questions = int(os.environ.get("ELEVATE_MIN_QUESTIONS", "1000"))
+    min_questions = int(os.environ.get("ELEVATE_MIN_QUESTIONS", "300"))
 
     if strict_rebuild:
         _run(
@@ -170,7 +170,7 @@ def _ensure_questions(question_count: int) -> None:
 
 
 def _ensure_interaction_dataset() -> None:
-    build_enabled = os.environ.get("ELEVATE_BUILD_INTERACTION_DATASET", "1") == "1"
+    build_enabled = os.environ.get("ELEVATE_BUILD_INTERACTION_DATASET", "0") == "1"
     if not build_enabled:
         print("[BOOTSTRAP] Interaction dataset build disabled by env flag.")
         return
@@ -200,7 +200,7 @@ def _ensure_interaction_dataset() -> None:
 
 def _ensure_bkt_model() -> None:
     """Train BKT model if it doesn't exist or dataset is fresh."""
-    build_enabled = os.environ.get("ELEVATE_BUILD_BKT_MODEL", "1") == "1"
+    build_enabled = os.environ.get("ELEVATE_BUILD_BKT_MODEL", "0") == "1"
     if not build_enabled:
         print("[BOOTSTRAP] BKT model training disabled by env flag.")
         return
@@ -221,7 +221,7 @@ def _ensure_bkt_model() -> None:
 
 def _ensure_dkt_model() -> None:
     """Train Deep Knowledge Tracing model if it doesn't exist."""
-    build_enabled = os.environ.get("ELEVATE_BUILD_DKT_MODEL", "1") == "1"
+    build_enabled = os.environ.get("ELEVATE_BUILD_DKT_MODEL", "0") == "1"
     if not build_enabled:
         print("[BOOTSTRAP] DKT model training disabled by env flag.")
         return
@@ -242,7 +242,7 @@ def _ensure_dkt_model() -> None:
 
 def _ensure_emotion_model() -> None:
     """Build TFJS emotion model artifact when missing."""
-    build_enabled = os.environ.get("ELEVATE_BUILD_EMOTION_MODEL", "1") == "1"
+    build_enabled = os.environ.get("ELEVATE_BUILD_EMOTION_MODEL", "0") == "1"
     if not build_enabled:
         print("[BOOTSTRAP] Emotion model training disabled by env flag.")
         return
@@ -261,7 +261,7 @@ def _ensure_emotion_model() -> None:
 
 def _ensure_at_risk_model() -> None:
     """Train at-risk predictor artifact if missing."""
-    build_enabled = os.environ.get("ELEVATE_BUILD_AT_RISK_MODEL", "1") == "1"
+    build_enabled = os.environ.get("ELEVATE_BUILD_AT_RISK_MODEL", "0") == "1"
     if not build_enabled:
         print("[BOOTSTRAP] At-risk model training disabled by env flag.")
         return

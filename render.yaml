@@ -32,4 +32,14 @@ services:
       - key: AI_TOPIC_LLM_ONLY_DEFAULT
         value: "true"
       - key: AI_TOPIC_SERVICE_TIMEOUT_SECONDS
-        value: "120"
+        value: "45"
+
+  - type: static
+    name: elevate-frontend
+    rootDir: .
+    buildCommand: python scripts/render_frontend_build.py
+    staticPublishPath: frontend
+    pullRequestPreviewsEnabled: false
+    envVars:
+      - key: FRONTEND_API_BASE_URL
+        sync: false

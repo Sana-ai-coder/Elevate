@@ -45,17 +45,24 @@ def configure_logging(app):
     console_handler.addFilter(RequestIdFilter())
     app.logger.addHandler(console_handler)
     
-    # File handler (rotating) - only in production
+    # File handler (rotating) - only in production.
+    # Render/runtime containers may not have this directory pre-created.
     if not app.config.get('DEBUG') and not app.config.get('TESTING'):
-        file_handler = RotatingFileHandler(
-            'logs/elevate.log',
-            maxBytes=10485760,  # 10MB
-            backupCount=10
-        )
-        file_handler.setLevel(logging.INFO)
-        file_handler.setFormatter(formatter)
-        file_handler.addFilter(RequestIdFilter())
-        app.logger.addHandler(file_handler)
+        try:
+            log_path = os.path.join('logs', 'elevate.log')
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            file_handler = RotatingFileHandler(
+                log_path,
+                maxBytes=10485760,  # 10MB
+                backupCount=10
+            )
+            file_handler.setLevel(logging.INFO)
+            file_handler.setFormatter(formatter)
+            file_handler.addFilter(RequestIdFilter())
+            app.logger.addHandler(file_handler)
+        except Exception as exc:
+            # Do not block startup if file logging cannot be configured.
+            app.logger.warning(f"File logging disabled: {exc}")
     
     # Add request ID to each request
     @app.before_request

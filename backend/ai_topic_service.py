@@ -14,7 +14,7 @@ from .validation import sanitize_string
 
 
 DEFAULT_TOPIC_AI_SERVICE_URL = "http://127.0.0.1:7860"
-DEFAULT_TOPIC_AI_TIMEOUT_SECONDS = 120
+DEFAULT_TOPIC_AI_TIMEOUT_SECONDS = 45
 
 
 TRUTHY_VALUES = {"1", "true", "yes", "y", "on"}

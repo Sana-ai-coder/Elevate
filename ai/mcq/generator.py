@@ -547,7 +547,9 @@ class MCQGenerator:
         attempts = 0
         max_attempts = max(2, requested_count)
         if strict_llm:
-            max_attempts = max(max_attempts, max(2, LLM_MAX_ATTEMPTS))
+            max_attempts = min(max_attempts + 2, max(2, LLM_MAX_ATTEMPTS))
+            if is_cpu:
+                max_attempts = min(max_attempts, max(2, requested_count + 1))
         elif is_cpu:
             max_attempts = min(max_attempts, max(1, CPU_LLM_MAX_ATTEMPTS))
 
@@ -559,15 +561,16 @@ class MCQGenerator:
                 break
 
             remaining = requested_count - len(collected)
-            if is_cpu and strict_llm:
-                batch_size = min(1, remaining)
-            elif is_cpu:
-                batch_size = min(1, remaining)
+            if is_cpu:
+                if strict_llm:
+                    batch_size = min(2, remaining)
+                else:
+                    batch_size = min(1, remaining)
             else:
                 batch_size = min(LLM_BATCH_SIZE, remaining)
 
             existing_questions = [str(row.get("question") or "") for row in collected if row.get("question")]
-            if strict_llm and is_cpu:
+            if strict_llm and is_cpu and batch_size == 1:
                 prompt = self._create_llm_plain_prompt(
                     topic=topic,
                     subject=subject,
@@ -591,14 +594,14 @@ class MCQGenerator:
             if is_cpu:
                 cpu_token_cap = max(32, CPU_LLM_MAX_NEW_TOKENS)
                 if strict_llm:
-                    cpu_token_cap = max(cpu_token_cap, 180)
+                    cpu_token_cap = max(cpu_token_cap, 200)
                 token_cap = min(token_cap, cpu_token_cap)
 
             temperature = 0.05 if attempts == 0 else 0.12
             top_p = 0.95 if attempts == 0 else 0.98
             max_time = LLM_GENERATE_MAX_TIME_SECONDS
             if strict_llm and is_cpu:
-                max_time = max(max_time, 60.0)
+                max_time = min(max_time, 10.0)
 
             response = self.llm.generate(
                 prompt=prompt,
@@ -615,7 +618,7 @@ class MCQGenerator:
             else:
                 consecutive_empty += 1
 
-            if strict_llm and consecutive_empty >= 3 and len(collected) > 0:
+            if strict_llm and consecutive_empty >= 2 and len(collected) > 0:
                 break
 
             attempts += 1

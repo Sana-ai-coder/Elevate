@@ -11,6 +11,12 @@ const teacherCache = {
   reportRows: [],
 };
 
+const previewReuseState = {
+  fingerprint: null,
+  signature: null,
+  questions: [],
+};
+
 function getKnownStudents() {
   const byId = new Map();
 
@@ -1196,6 +1202,23 @@ function collectBuilderPayload() {
   return payload;
 }
 
+function buildPreviewFingerprint(payload) {
+  return JSON.stringify({
+    subject: String(payload?.subject || '').trim().toLowerCase(),
+    grade: String(payload?.grade || '').trim().toLowerCase(),
+    difficulty: String(payload?.difficulty || '').trim().toLowerCase(),
+    topic: String(payload?.topic || '').trim().toLowerCase(),
+    question_count: Number(payload?.question_count || 0),
+    seed: payload?.seed ?? null,
+  });
+}
+
+function resetPreviewReuseState() {
+  previewReuseState.fingerprint = null;
+  previewReuseState.signature = null;
+  previewReuseState.questions = [];
+}
+
 async function previewAIQuestions() {
   const button = document.getElementById('previewQuestionsBtn');
   const createSection = document.getElementById('createSection');
@@ -1217,6 +1240,37 @@ async function previewAIQuestions() {
     const previewMeta = document.getElementById('previewMeta');
     const rows = Array.isArray(result.questions) ? result.questions : [];
     const diagnostics = formatGenerationDiagnostics(result.generation_status);
+    const reusableQuestions = rows
+      .map(item => {
+        const options = Array.isArray(item?.options) ? item.options.filter(opt => String(opt || '').trim()) : [];
+        const text = String(item?.text || '').trim();
+        if (!text || options.length < 2) return null;
+
+        const parsedCorrectIndex = Number(item?.correct_index || 0);
+        const boundedCorrectIndex = Number.isFinite(parsedCorrectIndex)
+          ? Math.max(0, Math.min(parsedCorrectIndex, options.length - 1))
+          : 0;
+
+        return {
+          text,
+          options,
+          correct_index: boundedCorrectIndex,
+          hint: item?.hint || null,
+          explanation: item?.explanation || null,
+          topic: item?.topic || payload.topic || null,
+          source: item?.source || 'topic_ai_service',
+        };
+      })
+      .filter(Boolean)
+      .slice(0, Math.max(0, Number(payload.question_count || 0)));
+
+    if (reusableQuestions.length > 0) {
+      previewReuseState.fingerprint = buildPreviewFingerprint(payload);
+      previewReuseState.signature = result?.preview_signature || null;
+      previewReuseState.questions = reusableQuestions;
+    } else {
+      resetPreviewReuseState();
+    }
 
     if (previewWrap) previewWrap.classList.remove('hidden');
     if (createSection) createSection.classList.add('has-preview');
@@ -1246,6 +1300,7 @@ async function previewAIQuestions() {
     }
   } catch (error) {
     console.error(error);
+    resetPreviewReuseState();
     const diagnostics = formatGenerationDiagnostics(error?.payload?.generation_status);
     if (diagnostics.summary || diagnostics.error) {
       utils.showNotification(`Generation diagnostics: ${diagnostics.summary}${diagnostics.error ? ` | ${diagnostics.error}` : ''}`, 'warning');
@@ -1267,6 +1322,20 @@ async function createTest(event) {
       return;
     }
 
+    const previewFingerprint = buildPreviewFingerprint(payload);
+    const canReusePreview = (
+      previewReuseState.fingerprint === previewFingerprint
+      && Array.isArray(previewReuseState.questions)
+      && previewReuseState.questions.length >= payload.question_count
+    );
+
+    if (canReusePreview) {
+      payload.preview_questions = previewReuseState.questions.slice(0, payload.question_count);
+      if (previewReuseState.signature) {
+        payload.preview_signature = previewReuseState.signature;
+      }
+    }
+
     const result = await api.teacher.createTest(payload);
     const diagnostics = formatGenerationDiagnostics(result?.generation_status);
     if (result && result.warning) {
@@ -1281,8 +1350,18 @@ async function createTest(event) {
       utils.showNotification(`Generation diagnostics: ${diagnostics.summary}${endpointSuffix}${errorSuffix}`, 'info');
     }
 
+    if (Number(result?.generation_status?.preview_reused_count || 0) > 0) {
+      utils.showNotification('Created test using previewed questions (no second AI generation needed).', 'success');
+    }
+
     await Promise.all([loadOverview(), loadTests()]);
     syncAssignmentFormOptions();
+
+    resetPreviewReuseState();
+    const previewWrap = document.getElementById('aiPreviewWrap');
+    const createSection = document.getElementById('createSection');
+    if (previewWrap) previewWrap.classList.add('hidden');
+    if (createSection) createSection.classList.remove('has-preview');
   } catch (error) {
     console.error(error);
     const diagnostics = formatGenerationDiagnostics(error?.payload?.generation_status);

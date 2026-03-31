@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import time
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -28,6 +29,37 @@ def _ensure_generator_loaded():
     generator = get_mcq_generator()
     _MODEL_READY = True
     return generator
+
+
+def _get_required_service_token() -> str:
+    token = (
+        os.environ.get("AI_TOPIC_SERVICE_TOKEN")
+        or os.environ.get("TOPIC_AI_SERVICE_TOKEN")
+        or ""
+    )
+    return str(token).strip()
+
+
+def _get_auth_scheme() -> str:
+    scheme = os.environ.get("AI_TOPIC_SERVICE_AUTH_SCHEME", "Bearer")
+    return str(scheme or "Bearer").strip() or "Bearer"
+
+
+def _enforce_service_auth(authorization_header: Optional[str]) -> None:
+    expected_token = _get_required_service_token()
+    if not expected_token:
+        return
+
+    if not authorization_header:
+        raise HTTPException(status_code=401, detail="Missing Authorization header.")
+
+    provided = str(authorization_header).strip()
+    expected_prefix = f"{_get_auth_scheme()} "
+    if provided.lower().startswith(expected_prefix.lower()):
+        provided = provided[len(expected_prefix):].strip()
+
+    if provided != expected_token:
+        raise HTTPException(status_code=401, detail="Invalid service token.")
 
 
 class GenerateMCQRequest(BaseModel):
@@ -52,7 +84,8 @@ def health() -> dict:
 
 
 @app.post("/warmup")
-def warmup() -> dict:
+def warmup(authorization: Optional[str] = Header(default=None, alias="Authorization")) -> dict:
+    _enforce_service_auth(authorization)
     started = time.perf_counter()
     _ensure_generator_loaded()
     elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -60,7 +93,11 @@ def warmup() -> dict:
 
 
 @app.post("/mcq/generate")
-def generate_mcqs(payload: GenerateMCQRequest) -> dict:
+def generate_mcqs(
+    payload: GenerateMCQRequest,
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+) -> dict:
+    _enforce_service_auth(authorization)
     if payload.source_type.lower() != "topic":
         raise HTTPException(status_code=400, detail="Only source_type='topic' is supported.")
 

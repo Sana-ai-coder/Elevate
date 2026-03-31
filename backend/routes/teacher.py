@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 
 from flask import Blueprint, jsonify, request, g, current_app
 from sqlalchemy import and_, func, or_
@@ -158,6 +160,82 @@ def _normalize_question_payload(item, subject, grade, difficulty, topic):
         "syllabus_topic": sanitize_string(topic or item.get("topic") or "", max_length=128) or None,
         "is_generated": True,
     }
+
+
+def _question_identity_key(text, options):
+    normalized_text = " ".join(str(text or "").strip().lower().split())
+    normalized_options = "|".join(
+        sorted(" ".join(str(opt or "").strip().lower().split()) for opt in (options or []))
+    )
+    return f"{normalized_text}|{normalized_options}"
+
+
+def _normalize_preview_reuse_payload(
+    preview_questions,
+    subject,
+    grade,
+    difficulty,
+    topic,
+    max_count,
+):
+    if not isinstance(preview_questions, list) or max_count <= 0:
+        return []
+
+    rows = []
+    seen = set()
+    for item in preview_questions:
+        if not isinstance(item, dict):
+            continue
+
+        normalized = _normalize_question_payload(item, subject, grade, difficulty, topic)
+        if not normalized:
+            continue
+
+        payload_row = {
+            "text": normalized["text"],
+            "options": normalized["options"],
+            "correct_index": normalized["correct_index"],
+            "hint": normalized["hint"],
+            "explanation": normalized["explanation"],
+            "topic": normalized["syllabus_topic"],
+            "source": sanitize_string(item.get("source") or "preview_reuse", max_length=64) or "preview_reuse",
+        }
+
+        key = _question_identity_key(payload_row["text"], payload_row["options"])
+        if not key or key in seen:
+            continue
+
+        seen.add(key)
+        rows.append(payload_row)
+
+        if len(rows) >= max_count:
+            break
+
+    return rows
+
+
+def _build_preview_signature(*, subject, grade, difficulty, topic, count, seed, questions):
+    canonical_payload = {
+        "subject": str(subject or "").strip().lower(),
+        "grade": str(grade or "").strip().lower(),
+        "difficulty": str(difficulty or "").strip().lower(),
+        "topic": str(topic or "").strip().lower(),
+        "count": int(max(0, count or 0)),
+        "seed": seed,
+        "questions": [
+            {
+                "text": str(item.get("text") or "").strip(),
+                "options": [str(opt or "").strip() for opt in (item.get("options") or [])],
+                "correct_index": int(item.get("correct_index") or 0),
+                "topic": str(item.get("topic") or "").strip(),
+                "source": str(item.get("source") or "").strip().lower(),
+            }
+            for item in (questions or [])
+            if isinstance(item, dict)
+        ],
+    }
+    raw = json.dumps(canonical_payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
 def _build_generated_question_records(
@@ -556,6 +634,7 @@ def teacher_generate_question_bank():
             "hint": normalized["hint"],
             "explanation": normalized["explanation"],
             "topic": normalized["syllabus_topic"],
+            "source": item.get("source") or "topic_ai_service",
         })
         normalized_payload.append({
             "text": normalized["text"],
@@ -571,6 +650,15 @@ def teacher_generate_question_bank():
             break
 
     generation_status["generated_count"] = len(normalized_payload)
+    preview_signature = _build_preview_signature(
+        subject=subject,
+        grade=grade,
+        difficulty=difficulty,
+        topic=topic,
+        count=count,
+        seed=seed,
+        questions=normalized_preview,
+    )
 
     if not persist:
         warning = None
@@ -583,6 +671,7 @@ def teacher_generate_question_bank():
             "generated_count": len(normalized_preview),
             "seed": seed,
             "llm_only": llm_only,
+            "preview_signature": preview_signature,
             "warning": warning,
             "generation_status": generation_status,
             "questions": normalized_preview,
@@ -686,6 +775,19 @@ def create_test():
 
     llm_only = _resolve_llm_only_mode(data)
     allow_local_fallback = _parse_bool_flag(data.get("allow_local_fallback"), False)
+    preview_questions_raw = data.get("preview_questions")
+    if preview_questions_raw is not None and not isinstance(preview_questions_raw, list):
+        return jsonify({"error": "preview_questions must be an array when provided"}), 400
+
+    preview_signature = sanitize_string(data.get("preview_signature") or "", max_length=128) or None
+    normalized_preview_payload = _normalize_preview_reuse_payload(
+        preview_questions=preview_questions_raw or [],
+        subject=subject,
+        grade=grade,
+        difficulty=difficulty,
+        topic=topic,
+        max_count=question_count,
+    )
 
     school_id = _ensure_teacher_school(teacher)
     if not school_id:
@@ -708,17 +810,73 @@ def create_test():
         db.session.add(test)
         db.session.flush()
 
-        questions, generation_status = _pick_or_generate_questions(
-            teacher_id=teacher.id,
-            subject=subject,
-            grade=grade,
-            difficulty=difficulty,
-            topic=topic,
-            count=question_count,
-            seed=seed,
-            llm_only=llm_only,
-            allow_local_fallback=allow_local_fallback,
-        )
+        use_preview_reuse = len(normalized_preview_payload) >= question_count
+        if use_preview_reuse:
+            preview_payload = normalized_preview_payload[:question_count]
+            questions = _build_generated_question_records(
+                preview_payload,
+                subject,
+                grade,
+                difficulty,
+                topic,
+                teacher.id,
+                seed,
+                default_source="preview_reuse",
+                generation_meta_extras={
+                    "preview_reused": True,
+                    "preview_signature": preview_signature,
+                    "llm_only": bool(llm_only),
+                    "allow_local_fallback": bool(allow_local_fallback),
+                },
+            )
+            for record in questions:
+                db.session.add(record)
+            if questions:
+                db.session.flush()
+
+            template_sources = {
+                "local_template_fallback",
+                "template",
+            }
+            template_count = len([
+                row for row in preview_payload if str(row.get("source") or "").strip().lower() in template_sources
+            ])
+            generation_status = {
+                "requested_count": question_count,
+                "existing_pool_count": 0,
+                "generated_count": len(questions),
+                "service_generated_count": len(questions),
+                "service_llm_count": max(0, len(questions) - template_count),
+                "service_template_count": template_count,
+                "service_cache_hit": True,
+                "local_fallback_count": template_count,
+                "service_error": None,
+                "service_status_code": 200,
+                "service_endpoint": "preview_reuse",
+                "service_latency_ms": 0,
+                "llm_only": bool(llm_only),
+                "allow_local_fallback": bool(allow_local_fallback),
+                "preview_reused_count": len(questions),
+                "preview_signature": preview_signature,
+            }
+        else:
+            questions, generation_status = _pick_or_generate_questions(
+                teacher_id=teacher.id,
+                subject=subject,
+                grade=grade,
+                difficulty=difficulty,
+                topic=topic,
+                count=question_count,
+                seed=seed,
+                llm_only=llm_only,
+                allow_local_fallback=allow_local_fallback,
+            )
+            if preview_questions_raw is not None:
+                generation_status["preview_reused_count"] = 0
+                if len(normalized_preview_payload) > 0 and len(normalized_preview_payload) < question_count:
+                    generation_status["preview_reuse_reason"] = "insufficient_preview_questions"
+                else:
+                    generation_status["preview_reuse_reason"] = "missing_or_invalid_preview"
 
         warning = None
         generated_count = len(questions)

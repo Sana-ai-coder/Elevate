@@ -1,4 +1,6 @@
 // Configuration module
+import './runtime-config.js';
+
 const SAME_ORIGIN_API = (typeof window !== 'undefined' && window.location?.origin)
   ? `${window.location.origin}/api`
   : 'http://localhost:5000/api';
@@ -30,10 +32,16 @@ function resolveRuntimeApiBase() {
 }
 
 const RUNTIME_API_BASE = resolveRuntimeApiBase();
+const GLOBAL_API_BASE = normalizeApiBase(
+  (typeof window !== 'undefined' && (
+    window.__ELEVATE_API_BASE_URL__
+    || window.ELEVATE_RUNTIME_CONFIG?.API_BASE_URL
+  )) || ''
+);
 
 export const config = {
   // API Configuration (will be used when backend is ready)
-  API_BASE_URL: RUNTIME_API_BASE || import.meta.env?.API_BASE_URL || SAME_ORIGIN_API,
+  API_BASE_URL: RUNTIME_API_BASE || GLOBAL_API_BASE || import.meta.env?.API_BASE_URL || SAME_ORIGIN_API,
   
   // Camera and Emotion Detection
   EMOTION_DETECTION_INTERVAL: 500, // ms

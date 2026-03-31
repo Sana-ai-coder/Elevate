@@ -147,6 +147,63 @@ def test_create_test_partial_generation_keeps_available_questions(client, monkey
         assert OrmTestQuestion.query.count() == 1
 
 
+def test_create_test_reuses_preview_questions(client, monkeypatch):
+    token = make_teacher(client, email="teacher-preview@example.com")
+
+    def fail_topic_service(**kwargs):
+        _ = kwargs
+        raise AssertionError("Topic AI service should not be called when preview questions are provided")
+
+    monkeypatch.setattr("backend.routes.teacher.generate_topic_mcqs", fail_topic_service)
+
+    response = client.post(
+        "/api/teacher/tests",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "title": "Preview Reuse Quiz",
+            "subject": "science",
+            "grade": "middle",
+            "difficulty": "easy",
+            "topic": "cells",
+            "question_count": 2,
+            "time_limit": 20,
+            "llm_only": True,
+            "preview_signature": "preview-signature-1",
+            "preview_questions": [
+                {
+                    "text": "Which organelle is known as the powerhouse of the cell?",
+                    "options": ["Nucleus", "Mitochondrion", "Ribosome", "Golgi apparatus"],
+                    "correct_index": 1,
+                    "hint": "It produces ATP.",
+                    "explanation": "Mitochondria are the main site of ATP production.",
+                    "topic": "cells",
+                    "source": "topic_ai_service",
+                },
+                {
+                    "text": "What does the cell membrane primarily control?",
+                    "options": ["DNA replication", "Protein synthesis", "Material movement in and out", "Cell division"],
+                    "correct_index": 2,
+                    "hint": "Think selective permeability.",
+                    "explanation": "The cell membrane regulates what enters and leaves the cell.",
+                    "topic": "cells",
+                    "source": "topic_ai_service",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["generated_count"] == 2
+    assert payload["requested_count"] == 2
+    assert payload["generation_status"]["preview_reused_count"] == 2
+    assert payload["generation_status"]["service_endpoint"] == "preview_reuse"
+
+    with client.application.app_context():
+        assert OrmTest.query.count() == 1
+        assert OrmTestQuestion.query.count() == 2
+
+
 def test_question_bank_returns_503_when_topic_service_is_down(client, monkeypatch):
     token = make_teacher(client, email="teacher-unavailable@example.com")
 
