@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import sys
 import time
 from typing import Dict, List, Optional
 
@@ -13,6 +14,9 @@ from dotenv import load_dotenv
 
 
 AI_ROOT = Path(__file__).resolve().parent
+if str(AI_ROOT) not in sys.path:
+    sys.path.insert(0, str(AI_ROOT))
+
 load_dotenv(AI_ROOT / ".env", override=False)
 load_dotenv(AI_ROOT.parent / ".env", override=False)
 

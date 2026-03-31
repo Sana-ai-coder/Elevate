@@ -16,7 +16,6 @@ env/
 !.env.example
 
 models_cache/
-models/
 fine_tune/output/
 fine_tune/checkpoints/
 fine_tune/runs/
