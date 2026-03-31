@@ -223,35 +223,22 @@ class MCQGenerator:
         test_description: str = "",
         existing_questions: Optional[List[str]] = None,
     ) -> str:
-        fact_lines = "\n".join(f"- {fact}" for fact in facts[:15])
-        test_context = self._test_context_block(test_title, test_description)
-        grade_guidance = self._grade_guidance(grade)
-        difficulty_guidance = self._difficulty_guidance(difficulty)
+        # We only feed the top 10 facts to reduce reading time for the LLM
+        fact_lines = "\n".join(f"- {fact}" for fact in facts[:10])
         
         return (
-            f"Generate exactly {num_questions} high-quality exam-style multiple-choice questions using only the facts below.\n"
-            "Do NOT output JSON. Use EXACTLY this compact format for EACH question:\n\n"
-            "Question: <text ending with ?>\n"
-            "A) <option>\n"
-            "B) <option>\n"
-            "C) <option>\n"
-            "D) <option>\n"
-            "Answer: <A|B|C|D>\n"
-            "Explanation: <one short sentence>\n\n"
-            "Rules:\n"
-            "1) Output all 4 options.\n"
-            "2) Separate each question with a blank line.\n"
-            "3) Do not include any intro or outro text.\n\n"
-            f"Subject: {subject}\n"
-            f"Grade: {grade}\n"
-            f"Difficulty: {difficulty}\n"
-            f"Topic: {topic}\n"
-            f"Required Questions: {num_questions}\n\n"
-            f"Grade Guidance: {grade_guidance}\n"
-            f"Difficulty Guidance: {difficulty_guidance}\n"
-            f"{test_context}\n\n"
-            "Facts:\n"
-            f"{fact_lines}\n"
+            f"Generate exactly {num_questions} multiple-choice questions about {topic}.\n"
+            "Use ONLY these facts:\n"
+            f"{fact_lines}\n\n"
+            "Return ONLY a JSON array. No markdown, no intro. Use this exact schema:\n"
+            "[\n"
+            "  {\n"
+            "    \"question\": \"<question text>\",\n"
+            "    \"options\": [\"<opt1>\", \"<opt2>\", \"<opt3>\", \"<opt4>\"],\n"
+            "    \"answer\": \"<A, B, C, or D>\",\n"
+            "    \"explanation\": \"<short explanation>\"\n"
+            "  }\n"
+            "]"
         )
 
     def _create_llm_plain_prompt(
@@ -545,45 +532,33 @@ class MCQGenerator:
         llm = self.ensure_model_loaded()
         collected: List[Dict] = []
         attempts = 0
-        max_attempts = 3
+        max_attempts = 2 # Max 2 attempts to guarantee we don't timeout
         started = time.perf_counter()
 
         while len(collected) < requested_count and attempts < max_attempts:
-            if (time.perf_counter() - started) >= 110.0:
+            # STRICT 85-second kill-switch. Ensure we return to backend before the 120s timeout!
+            if (time.perf_counter() - started) >= 85.0:
                 break
 
             remaining = requested_count - len(collected)
-            
-            # REMOVED the CPU batch size restriction. Ask for all remaining questions at once!
-            batch_size = remaining 
-
-            existing_questions = [str(row.get("question") or "") for row in collected if row.get("question")]
             
             prompt = self._create_llm_prompt(
                 topic=topic,
                 subject=subject,
                 grade=grade,
-                num_questions=batch_size,
+                num_questions=remaining, # Ask for all remaining questions at once
                 difficulty=difficulty,
                 facts=facts,
                 test_title=test_title,
                 test_description=test_description,
-                existing_questions=existing_questions,
             )
-
-            # A 5-question text block takes about 350-450 tokens. 
-            # We give the CPU enough tokens to finish the whole batch in one try.
-            token_cap = 500 
-
-            # Let the CPU think for up to 45 seconds for the single batch
-            max_time = 45.0 
 
             response = llm.generate(
                 prompt=prompt,
-                max_new_tokens=token_cap,
+                max_new_tokens=600,
                 temperature=0.1,
                 top_p=0.95,
-                max_time=max_time,
+                max_time=40.0, # Limit each LLM generation attempt to 40 seconds
             )
             
             parsed = self._parse_llm_output(response, difficulty, topic)

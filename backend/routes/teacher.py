@@ -1786,7 +1786,7 @@ def teacher_analytics():
         at_risk_payload = get_at_risk_predictions_for_students(
             [int(sid) for sid in student_ids],
             cutoff=cutoff,
-            top_k_shap=5,
+            top_k_shap=0,
         )
     except Exception:
         at_risk_payload = {"at_risk_students": [], "meta": {"reason": "at_risk_failed"}}
