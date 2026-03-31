@@ -95,7 +95,7 @@ def test_question_bank_persist_uses_topic_ai_service(client, monkeypatch):
         assert all((row.generation_meta or {}).get("source") == "topic_ai_service" for row in rows)
 
 
-def test_create_test_partial_generation_keeps_available_questions(client, monkeypatch):
+def test_create_test_partial_generation_backfills_with_local_fallback(client, monkeypatch):
     token = make_teacher(client, email="teacher-test@example.com")
 
     def fake_topic_service(**kwargs):
@@ -137,14 +137,14 @@ def test_create_test_partial_generation_keeps_available_questions(client, monkey
 
     assert response.status_code == 201
     payload = response.get_json()
-    assert payload["generated_count"] == 1
+    assert payload["generated_count"] == 3
     assert payload["requested_count"] == 3
-    assert payload["warning"] is not None
-    assert payload["test"]["question_count"] == 1
+    assert payload["test"]["question_count"] == 3
+    assert payload["generation_status"]["local_fallback_count"] >= 2
 
     with client.application.app_context():
         assert OrmTest.query.count() == 1
-        assert OrmTestQuestion.query.count() == 1
+        assert OrmTestQuestion.query.count() == 3
 
 
 def test_create_test_reuses_preview_questions(client, monkeypatch):
@@ -251,7 +251,7 @@ def test_create_test_passes_title_and_description_to_topic_service(client, monke
     assert captured.get("test_description") == "Focus on equations of motion and force applications."
 
 
-def test_question_bank_returns_503_when_topic_service_is_down(client, monkeypatch):
+def test_question_bank_uses_local_fallback_when_topic_service_is_down(client, monkeypatch):
     token = make_teacher(client, email="teacher-unavailable@example.com")
 
     def fake_topic_service(**kwargs):
@@ -281,10 +281,10 @@ def test_question_bank_returns_503_when_topic_service_is_down(client, monkeypatc
         },
     )
 
-    assert response.status_code == 503
+    assert response.status_code == 201
     payload = response.get_json()
-    assert "error" in payload
-    assert payload["generated_count"] == 0
+    assert payload["generated_count"] == 4
     assert payload["requested_count"] == 4
-    assert payload["service_url"].startswith("http")
+    assert payload["persisted"] is True
+    assert payload["generation_status"]["local_fallback_count"] >= 4
     assert payload["generation_status"]["service_error"]

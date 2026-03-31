@@ -73,7 +73,11 @@ def get_topic_ai_auth_scheme() -> str:
 
 
 def topic_ai_default_llm_only_mode() -> bool:
-    return _parse_bool(os.environ.get("AI_TOPIC_LLM_ONLY_DEFAULT"), True)
+    return _parse_bool(os.environ.get("AI_TOPIC_LLM_ONLY_DEFAULT"), False)
+
+
+def topic_ai_default_allow_local_fallback_mode() -> bool:
+    return _parse_bool(os.environ.get("AI_TOPIC_ALLOW_LOCAL_FALLBACK_DEFAULT"), True)
 
 
 def is_topic_ai_service_available() -> bool:

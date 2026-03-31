@@ -9,7 +9,7 @@ import sys
 import time
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -54,6 +54,22 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Elevate Topic MCQ Service", version="1.0.0", lifespan=lifespan)
+
+
+@app.get("/")
+def root() -> dict:
+    return {
+        "status": "ok",
+        "service": "topic-mcq",
+        "message": "Service is running",
+        "health_endpoint": "/health",
+        "generate_endpoint": "/mcq/generate",
+    }
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> Response:
+    return Response(status_code=204)
 
 
 def _get_required_service_token() -> str:

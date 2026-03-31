@@ -23,6 +23,7 @@ from ..validation import validate_required_fields, sanitize_string
 from ..ai_topic_service import (
     generate_topic_mcqs,
     get_topic_ai_service_url,
+    topic_ai_default_allow_local_fallback_mode,
     topic_ai_default_llm_only_mode,
 )
 from ..question_generator import generate_stem_questions
@@ -275,6 +276,88 @@ def _build_generated_question_records(
     return records
 
 
+def _extend_pool_from_existing_questions(
+    *,
+    pool,
+    subject,
+    grade,
+    difficulty,
+    topic,
+    count,
+):
+    if len(pool) >= count:
+        return 0, []
+
+    added = 0
+    strategies_used = []
+    existing_ids = {
+        int(row.id)
+        for row in pool
+        if getattr(row, "id", None) is not None
+    }
+
+    strategy_chain = [
+        {
+            "name": "strict",
+            "grade": grade,
+            "difficulty": difficulty,
+            "topic": topic,
+        },
+        {
+            "name": "relaxed_topic",
+            "grade": grade,
+            "difficulty": difficulty,
+            "topic": None,
+        },
+        {
+            "name": "relaxed_difficulty",
+            "grade": grade,
+            "difficulty": None,
+            "topic": None,
+        },
+        {
+            "name": "relaxed_grade",
+            "grade": None,
+            "difficulty": None,
+            "topic": None,
+        },
+    ]
+
+    for strategy in strategy_chain:
+        if len(pool) >= count:
+            break
+
+        needed = count - len(pool)
+        query = Question.query.filter(func.lower(Question.subject) == subject.lower())
+
+        if strategy["grade"]:
+            query = query.filter(Question.grade == strategy["grade"])
+        if strategy["difficulty"]:
+            query = query.filter(Question.difficulty == strategy["difficulty"])
+        if strategy["topic"]:
+            query = query.filter(Question.syllabus_topic == strategy["topic"])
+        if existing_ids:
+            query = query.filter(~Question.id.in_(list(existing_ids)))
+
+        rows = query.order_by(func.random()).limit(needed).all()
+        if not rows:
+            continue
+
+        strategy_added = 0
+        for row in rows:
+            if row.id in existing_ids:
+                continue
+            pool.append(row)
+            existing_ids.add(int(row.id))
+            added += 1
+            strategy_added += 1
+
+        if strategy_added > 0:
+            strategies_used.append(strategy["name"])
+
+    return added, strategies_used
+
+
 def _pick_or_generate_questions(
     teacher_id,
     subject,
@@ -305,6 +388,8 @@ def _pick_or_generate_questions(
         "llm_only": bool(llm_only),
         "allow_local_fallback": bool(allow_local_fallback),
         "existing_pool_reused": False,
+        "existing_pool_strategy": [],
+        "emergency_fallback_used": False,
     }
 
     service_result = generate_topic_mcqs(
@@ -367,6 +452,18 @@ def _pick_or_generate_questions(
         pool.extend(generated_records)
     generation_status["service_generated_count"] = len(generated_records)
 
+    existing_pool_count, strategy_chain = _extend_pool_from_existing_questions(
+        pool=pool,
+        subject=subject,
+        grade=grade,
+        difficulty=difficulty,
+        topic=topic,
+        count=count,
+    )
+    generation_status["existing_pool_count"] = int(existing_pool_count)
+    generation_status["existing_pool_reused"] = existing_pool_count > 0
+    generation_status["existing_pool_strategy"] = strategy_chain
+
     if allow_local_fallback and len(pool) < count:
         fallback_needed = count - len(pool)
         fallback_payload = generate_stem_questions(
@@ -377,7 +474,7 @@ def _pick_or_generate_questions(
             seed=seed,
             require_ai=False,
             topic=topic,
-            variant_offset=0,
+            variant_offset=max(0, len(pool)),
         )
         fallback_payload = [
             {
@@ -406,28 +503,54 @@ def _pick_or_generate_questions(
         if fallback_records:
             db.session.flush()
             pool.extend(fallback_records)
-        generation_status["local_fallback_count"] = len(fallback_records)
+        generation_status["local_fallback_count"] += len(fallback_records)
 
     if len(pool) < count:
-        fallback_needed = count - len(pool)
-        existing_query = Question.query.filter(
-            func.lower(Question.subject) == subject.lower(),
-            Question.grade == grade,
-            Question.difficulty == difficulty,
+        # Final safety net to avoid user-facing hard failures on strict constraints.
+        emergency_needed = count - len(pool)
+        emergency_payload = generate_stem_questions(
+            subject=subject,
+            grade=grade,
+            difficulty=difficulty,
+            count=emergency_needed,
+            seed=seed,
+            require_ai=False,
+            topic=topic or subject,
+            variant_offset=max(10, len(pool) * 3),
         )
-        if topic:
-            existing_query = existing_query.filter(Question.syllabus_topic == topic)
-        if pool:
-            existing_query = existing_query.filter(~Question.id.in_([q.id for q in pool]))
+        emergency_payload = [
+            {
+                **row,
+                "source": "local_template_emergency",
+            }
+            for row in emergency_payload
+            if isinstance(row, dict)
+        ]
+        emergency_records = _build_generated_question_records(
+            emergency_payload,
+            subject,
+            grade,
+            difficulty,
+            topic,
+            teacher_id,
+            seed,
+            default_source="local_template_emergency",
+            generation_meta_extras={
+                "fallback_reason": "enforced_emergency_fallback",
+                "llm_only": False,
+            },
+        )
+        for record in emergency_records:
+            db.session.add(record)
+        if emergency_records:
+            db.session.flush()
+            pool.extend(emergency_records)
+            generation_status["local_fallback_count"] += len(emergency_records)
+            generation_status["emergency_fallback_used"] = True
 
-        existing_rows = existing_query.order_by(func.random()).limit(fallback_needed).all()
-        if existing_rows:
-            pool.extend(existing_rows)
-            generation_status["existing_pool_count"] = len(existing_rows)
-            generation_status["existing_pool_reused"] = True
-
-    generation_status["generated_count"] = len(pool)
-    return pool, generation_status
+    final_pool = pool[:count]
+    generation_status["generated_count"] = len(final_pool)
+    return final_pool, generation_status
 
 
 @teacher_bp.get("/dashboard")
@@ -563,7 +686,10 @@ def teacher_generate_question_bank():
         return jsonify({"error": "Grade must be one of: elementary, middle, high, college"}), 400
 
     llm_only = _resolve_llm_only_mode(data)
-    allow_local_fallback = _parse_bool_flag(data.get("allow_local_fallback"), False)
+    allow_local_fallback = _parse_bool_flag(
+        data.get("allow_local_fallback"),
+        topic_ai_default_allow_local_fallback_mode(),
+    )
 
     service_result = generate_topic_mcqs(
         subject=subject,
@@ -694,19 +820,22 @@ def teacher_generate_question_bank():
             "questions": normalized_preview,
         }), 200
 
-    if len(normalized_payload) < count:
+    warning = None
+    if len(normalized_payload) == 0:
         status_code = 503 if generation_status.get("service_status_code") in {503, 504} else 502
         return jsonify({
-            "error": (
-                "Could not generate enough questions from the topic AI service. "
-                "Retry with a broader topic, lower count, or disable llm_only/enable fallback."
-            ),
+            "error": "Question generation is temporarily unavailable. Please retry shortly.",
             "generated_count": len(normalized_payload),
             "requested_count": count,
             "llm_only": llm_only,
             "service_url": get_topic_ai_service_url(),
             "generation_status": generation_status,
         }), status_code
+
+    if len(normalized_payload) < count:
+        warning = (
+            f"Requested {count} questions, but only {len(normalized_payload)} were generated and saved."
+        )
 
     generated_records = _build_generated_question_records(
         normalized_payload,
@@ -742,6 +871,7 @@ def teacher_generate_question_bank():
         "generated_count": len(generated_records),
         "seed": seed,
         "llm_only": llm_only,
+        "warning": warning,
         "generation_status": generation_status,
         "questions": [
             {
@@ -793,7 +923,10 @@ def create_test():
         return jsonify({"error": "Grade must be one of: elementary, middle, high, college"}), 400
 
     llm_only = _resolve_llm_only_mode(data)
-    allow_local_fallback = _parse_bool_flag(data.get("allow_local_fallback"), False)
+    allow_local_fallback = _parse_bool_flag(
+        data.get("allow_local_fallback"),
+        topic_ai_default_allow_local_fallback_mode(),
+    )
     preview_questions_raw = data.get("preview_questions")
     if preview_questions_raw is not None and not isinstance(preview_questions_raw, list):
         return jsonify({"error": "preview_questions must be an array when provided"}), 400
@@ -909,10 +1042,7 @@ def create_test():
             db.session.rollback()
             status_code = 503 if generation_status.get("service_status_code") in {503, 504} else 502
             return jsonify({
-                "error": (
-                    "Could not generate questions for the selected constraints. "
-                    "Try a broader topic, easier difficulty, or lower question count."
-                ),
+                "error": "Question generation is temporarily unavailable. Please retry shortly.",
                 "generated_count": generated_count,
                 "requested_count": question_count,
                 "llm_only": llm_only,
