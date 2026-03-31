@@ -165,58 +165,6 @@ class MCQGenerator:
             return "Require synthesis of multiple concepts or nuanced, multi-step reasoning. Distractors should target common misconceptions."
         return "Align the question's challenge level to the requested difficulty."
 
-    # def _create_llm_prompt(
-    #     self,
-    #     *,
-    #     topic: str,
-    #     subject: str,
-    #     grade: str,
-    #     num_questions: int,
-    #     difficulty: str,
-    #     facts: List[str],
-    #     test_title: str = "",
-    #     test_description: str = "",
-    # ) -> str:
-    #     """
-    #     Engineers a detailed, context-rich prompt for the language model.
-    #     This is the core of the AI's "intelligence".
-    #     """
-    #     grade_guidance = self._grade_guidance(grade)
-    #     difficulty_guidance = self._difficulty_guidance(difficulty)
-
-    #     # Create a context block for the test, if provided
-    #     test_context_parts = []
-    #     if test_title:
-    #         test_context_parts.append(f"The test is titled '{test_title}'.")
-    #     if test_description:
-    #         test_context_parts.append(f"Its description is: '{test_description}'.")
-    #     test_context = " ".join(test_context_parts)
-
-    #     # Provide a limited number of facts to keep the prompt focused
-    #     fact_lines = "\n".join(f"- {fact}" for fact in facts[:15])
-
-    #     # The main instruction block, framed as a persona
-    #     return (
-    #         f"You are an expert {subject} curriculum developer creating an assessment for {grade} students.\n"
-    #         f"Your task is to generate {num_questions} high-quality multiple-choice questions about '{topic}'.\n"
-    #         f"{test_context}\n"
-    #         f"Adhere to these rules:\n"
-    #         f"1. Grade Level: {grade_guidance}\n"
-    #         f"2. Difficulty: {difficulty_guidance}\n"
-    #         f"3. Grounding: Base questions on the provided facts. Do not invent information.\n"
-    #         f"4. Format: For each question, you must strictly follow the format shown in the example below, with no extra text.\n\n"
-    #         f"Here is a perfect example of the required format:\n"
-    #         "Question: What is the primary function of the mitochondria in a cell?\n"
-    #         "A) To store genetic information\n"
-    #         "B) To produce energy through cellular respiration\n"
-    #         "C) To synthesize proteins\n"
-    #         "D) To control cell division\n"
-    #         "Answer: B\n"
-    #         "Explanation: Mitochondria are known as the powerhouses of the cell because they generate most of the cell's supply of adenosine triphosphate (ATP).\n\n"
-    #         f"Begin now. Generate {num_questions} questions. Here are the facts to use:\n"
-    #         f"{fact_lines}\n"
-    #     )
-
     def _create_llm_prompt(
         self,
         *,
@@ -229,29 +177,44 @@ class MCQGenerator:
         test_title: str = "",
         test_description: str = "",
     ) -> str:
+        """
+        Engineers a detailed, context-rich prompt for the language model.
+        This is the core of the AI's "intelligence".
+        """
         grade_guidance = self._grade_guidance(grade)
         difficulty_guidance = self._difficulty_guidance(difficulty)
 
-        # Keep fact list very short to save prompt tokens
-        fact_lines = "\n".join(f"- {fact}" for fact in facts[:6])
+        # Create a context block for the test, if provided
+        test_context_parts = []
+        if test_title:
+            test_context_parts.append(f"The test is titled '{test_title}'.")
+        if test_description:
+            test_context_parts.append(f"Its description is: '{test_description}'.")
+        test_context = " ".join(test_context_parts)
 
+        # Provide a limited number of facts to keep the prompt focused
+        fact_lines = "\n".join(f"- {fact}" for fact in facts[:15])
+
+        # The main instruction block, framed as a persona
         return (
-            f"You are an expert {subject} teacher. Output ONLY a valid JSON array. No prose, no markdown, no explanation outside the JSON.\n"
-            f"Generate exactly {num_questions} multiple-choice questions about '{topic}' for {grade} students.\n"
-            f"Difficulty: {difficulty_guidance}\n"
-            f"Grade guidance: {grade_guidance}\n"
-            f"Facts to use:\n{fact_lines}\n\n"
-            f"Output format — a JSON array of exactly {num_questions} objects, each with these keys:\n"
-            '  "question": string (must end with ?)\n'
-            '  "options": array of exactly 4 strings [A_text, B_text, C_text, D_text]\n'
-            '  "answer": one of "A", "B", "C", or "D"\n'
-            '  "explanation": one sentence explaining why the answer is correct\n\n'
-            "Rules:\n"
-            "- Output ONLY the JSON array starting with [ and ending with ]\n"
-            "- Do NOT include ```json or any markdown\n"
-            "- All 4 options must be non-empty and distinct\n"
-            "- Every object must have all 4 keys\n\n"
-            "JSON array:\n"
+            f"You are an expert {subject} curriculum developer creating an assessment for {grade} students.\n"
+            f"Your task is to generate {num_questions} high-quality multiple-choice questions about '{topic}'.\n"
+            f"{test_context}\n"
+            f"Adhere to these rules:\n"
+            f"1. Grade Level: {grade_guidance}\n"
+            f"2. Difficulty: {difficulty_guidance}\n"
+            f"3. Grounding: Base questions on the provided facts. Do not invent information.\n"
+            f"4. Format: For each question, you must strictly follow the format shown in the example below, with no extra text.\n\n"
+            f"Here is a perfect example of the required format:\n"
+            "Question: What is the primary function of the mitochondria in a cell?\n"
+            "A) To store genetic information\n"
+            "B) To produce energy through cellular respiration\n"
+            "C) To synthesize proteins\n"
+            "D) To control cell division\n"
+            "Answer: B\n"
+            "Explanation: Mitochondria are known as the powerhouses of the cell because they generate most of the cell's supply of adenosine triphosphate (ATP).\n\n"
+            f"Begin now. Generate {num_questions} questions. Here are the facts to use:\n"
+            f"{fact_lines}\n"
         )
 
     def _generate_llm_mcqs(
