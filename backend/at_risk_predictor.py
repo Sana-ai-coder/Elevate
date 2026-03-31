@@ -218,7 +218,11 @@ def get_at_risk_predictions_for_students(
     X_raw = np.stack(X_raw_list, axis=0).astype(np.float32, copy=False)
 
     proba = runtime.predict_proba(X_raw)
-    shap_top_features = runtime.explain_top_features(X_raw, top_k=top_k_shap)
+    safe_top_k = max(0, int(top_k_shap or 0))
+    if safe_top_k > 0:
+        shap_top_features = runtime.explain_top_features(X_raw, top_k=safe_top_k)
+    else:
+        shap_top_features = [[] for _ in range(X_raw.shape[0])]
 
     at_risk_students: list[dict[str, Any]] = []
     for idx, sid in enumerate(student_ids):

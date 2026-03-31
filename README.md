@@ -379,10 +379,24 @@ AI_TOPIC_SERVICE_AUTH_SCHEME=Bearer
 For standalone topic-AI service config, copy `ai/.env.example` to `ai/.env`.
 The AI service now reads both `ai/.env` and root `.env`.
 
-Render deployment notes:
-- Set backend env vars in Render dashboard (do not commit real secrets).
-- If `AI_TOPIC_SERVICE_URL` points to a protected Hugging Face endpoint, set `AI_TOPIC_SERVICE_TOKEN`.
-- For Supabase/Postgres, set `DATABASE_URL` to your connection string.
+Render + Hugging Face Space deploy checklist:
+1. Configure backend env vars in Render.
+    - `AI_TOPIC_SERVICE_URL=https://<owner>-<space>.hf.space`
+    - `AI_TOPIC_SERVICE_TIMEOUT_SECONDS=45`
+    - If Space auth is enabled: `AI_TOPIC_SERVICE_TOKEN` and `AI_TOPIC_SERVICE_AUTH_SCHEME=Bearer`
+
+2. Configure AI Space cache env vars.
+    - `MODELS_CACHE_DIR=/data/elevate_models_cache`
+    - Optional bucket restore for faster startups:
+      - `HF_BUCKET_URI=hf://buckets/<username>/<bucket-name>`
+      - `HF_BUCKET_CACHE_PREFIX=elevate_models_cache`
+
+3. Confirm readiness semantics after deployment.
+    - AI Space reports ready only after model preload completes.
+    - `GET /health` may return `503` with `status=starting` during startup.
+
+4. Keep database config valid for backend deployment.
+    - Set `DATABASE_URL` (or `SUPABASE_POOLER_CONNECTION_STRING`) to your PostgreSQL connection string.
 
 ---
 

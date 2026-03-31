@@ -370,6 +370,9 @@ class MCQGenerator:
         seen_opts = set()
         for opt in options:
             clean_opt = re.sub(r"\s+", " ", str(opt or "")).strip().rstrip(".")
+            clean_opt = re.sub(r"^[\(\[]?[A-Da-d][\)\].:\-]\s*", "", clean_opt).strip()
+            if len(clean_opt) > 180:
+                clean_opt = clean_opt[:177].rstrip() + "..."
             if not clean_opt:
                 continue
             key = " ".join(clean_opt.lower().split())
@@ -383,19 +386,44 @@ class MCQGenerator:
         if len(normalized_options) != 4:
             return None
 
-        answer = str(item.get("answer") or item.get("correct_answer") or "").strip().upper()
-        if answer not in {"A", "B", "C", "D"}:
+        answer = ""
+        correct_index: Optional[int] = None
+
+        raw_answer = str(item.get("answer") or item.get("correct_answer") or "").strip()
+        if raw_answer:
+            normalized_answer = raw_answer.upper()
+            if normalized_answer in {"A", "B", "C", "D"}:
+                answer = normalized_answer
+                correct_index = ["A", "B", "C", "D"].index(answer)
+            else:
+                letter_match = re.search(r"\b([A-D])\b", normalized_answer)
+                if letter_match:
+                    answer = letter_match.group(1)
+                    correct_index = ["A", "B", "C", "D"].index(answer)
+
+        if correct_index is None:
             try:
                 idx = int(item.get("correct_index"))
                 if 0 <= idx < 4:
-                    answer = ["A", "B", "C", "D"][idx]
+                    correct_index = idx
+                elif 1 <= idx <= 4:
+                    # Some model outputs use 1-based indexing.
+                    correct_index = idx - 1
             except Exception:
-                return None
+                correct_index = None
 
-        if answer not in {"A", "B", "C", "D"}:
+        if correct_index is None and raw_answer:
+            normalized_answer_text = " ".join(raw_answer.strip().lower().split())
+            for idx, option_text in enumerate(normalized_options):
+                normalized_option_text = " ".join(str(option_text).strip().lower().split())
+                if normalized_answer_text == normalized_option_text:
+                    correct_index = idx
+                    break
+
+        if correct_index is None:
             return None
 
-        correct_index = ["A", "B", "C", "D"].index(answer)
+        answer = ["A", "B", "C", "D"][correct_index]
         raw_explanation = str(item.get("explanation") or "Based on documented facts.").strip()
         raw_explanation = re.sub(r"\s+", " ", raw_explanation)
         first_sentence = re.split(r"(?<=[.!?])\s+", raw_explanation, maxsplit=1)[0].strip()
@@ -825,9 +853,9 @@ class MCQGenerator:
 
     def _is_quality_question(self, row: Dict) -> bool:
         question = str(row.get("question") or "").strip()
-        if len(question) < 18:
+        if len(question) < 12:
             return False
-        if len(question.split()) < 5:
+        if len(question.split()) < 4:
             return False
         if "____" in question.lower() or "fill in the blank" in question.lower():
             return False

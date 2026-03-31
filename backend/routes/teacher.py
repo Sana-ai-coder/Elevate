@@ -528,11 +528,12 @@ def teacher_dashboard():
     at_risk_payload = {}
     try:
         # Compute predictions only for the small sample shown on the landing dashboard.
+        # Avoid SHAP on initial dashboard load to keep first-request latency low.
         sample_student_ids = [s.id for s in students[:8]]
         at_risk_payload = get_at_risk_predictions_for_students(
             sample_student_ids,
             cutoff=cutoff,
-            top_k_shap=3,
+            top_k_shap=0,
         )
     except Exception:
         at_risk_payload = {"at_risk_students": [], "meta": {"reason": "at_risk_failed"}}
