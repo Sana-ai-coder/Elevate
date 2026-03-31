@@ -78,7 +78,6 @@ def test_question_bank_persist_uses_topic_ai_service(client, monkeypatch):
             "topic": "arithmetic",
             "count": 2,
             "persist": True,
-            "llm_only": True,
         },
     )
 
@@ -95,7 +94,7 @@ def test_question_bank_persist_uses_topic_ai_service(client, monkeypatch):
         assert all((row.generation_meta or {}).get("source") == "topic_ai_service" for row in rows)
 
 
-def test_create_test_partial_generation_backfills_with_local_fallback(client, monkeypatch):
+def test_create_test_partial_generation_keeps_available_questions_only(client, monkeypatch):
     token = make_teacher(client, email="teacher-test@example.com")
 
     def fake_topic_service(**kwargs):
@@ -131,28 +130,35 @@ def test_create_test_partial_generation_backfills_with_local_fallback(client, mo
             "topic": "astronomy",
             "question_count": 3,
             "time_limit": 20,
-            "llm_only": True,
         },
     )
 
     assert response.status_code == 201
     payload = response.get_json()
-    assert payload["generated_count"] == 3
+    assert payload["generated_count"] == 1
     assert payload["requested_count"] == 3
-    assert payload["test"]["question_count"] == 3
-    assert payload["generation_status"]["local_fallback_count"] >= 2
+    assert payload["test"]["question_count"] == 1
+    assert payload["generation_status"]["service_generated_count"] == 1
+    assert payload["generation_status"]["technical_sample_count"] == 0
 
     with client.application.app_context():
         assert OrmTest.query.count() == 1
-        assert OrmTestQuestion.query.count() == 3
+        assert OrmTestQuestion.query.count() == 1
 
 
-def test_create_test_reuses_preview_questions(client, monkeypatch):
+def test_create_test_uses_technical_samples_when_topic_service_is_down(client, monkeypatch):
     token = make_teacher(client, email="teacher-preview@example.com")
 
     def fail_topic_service(**kwargs):
         _ = kwargs
-        raise AssertionError("Topic AI service should not be called when preview questions are provided")
+        return {
+            "ok": False,
+            "status_code": 503,
+            "error": "Topic AI service unavailable: timeout",
+            "questions": [],
+            "meta": {},
+            "service_url": "http://127.0.0.1:7860",
+        }
 
     monkeypatch.setattr("backend.routes.teacher.generate_topic_mcqs", fail_topic_service)
 
@@ -160,35 +166,13 @@ def test_create_test_reuses_preview_questions(client, monkeypatch):
         "/api/teacher/tests",
         headers={"Authorization": f"Bearer {token}"},
         json={
-            "title": "Preview Reuse Quiz",
+            "title": "Fallback Sample Quiz",
             "subject": "science",
             "grade": "middle",
             "difficulty": "easy",
             "topic": "cells",
             "question_count": 2,
             "time_limit": 20,
-            "llm_only": True,
-            "preview_signature": "preview-signature-1",
-            "preview_questions": [
-                {
-                    "text": "Which organelle is known as the powerhouse of the cell?",
-                    "options": ["Nucleus", "Mitochondrion", "Ribosome", "Golgi apparatus"],
-                    "correct_index": 1,
-                    "hint": "It produces ATP.",
-                    "explanation": "Mitochondria are the main site of ATP production.",
-                    "topic": "cells",
-                    "source": "topic_ai_service",
-                },
-                {
-                    "text": "What does the cell membrane primarily control?",
-                    "options": ["DNA replication", "Protein synthesis", "Material movement in and out", "Cell division"],
-                    "correct_index": 2,
-                    "hint": "Think selective permeability.",
-                    "explanation": "The cell membrane regulates what enters and leaves the cell.",
-                    "topic": "cells",
-                    "source": "topic_ai_service",
-                },
-            ],
         },
     )
 
@@ -196,8 +180,8 @@ def test_create_test_reuses_preview_questions(client, monkeypatch):
     payload = response.get_json()
     assert payload["generated_count"] == 2
     assert payload["requested_count"] == 2
-    assert payload["generation_status"]["preview_reused_count"] == 2
-    assert payload["generation_status"]["service_endpoint"] == "preview_reuse"
+    assert payload["generation_status"]["technical_fallback_used"] is True
+    assert payload["generation_status"]["technical_sample_count"] >= 2
 
     with client.application.app_context():
         assert OrmTest.query.count() == 1
@@ -242,7 +226,6 @@ def test_create_test_passes_title_and_description_to_topic_service(client, monke
             "topic": "motion",
             "question_count": 1,
             "time_limit": 20,
-            "llm_only": True,
         },
     )
 
@@ -251,7 +234,7 @@ def test_create_test_passes_title_and_description_to_topic_service(client, monke
     assert captured.get("test_description") == "Focus on equations of motion and force applications."
 
 
-def test_question_bank_uses_local_fallback_when_topic_service_is_down(client, monkeypatch):
+def test_question_bank_uses_technical_samples_when_topic_service_is_down(client, monkeypatch):
     token = make_teacher(client, email="teacher-unavailable@example.com")
 
     def fake_topic_service(**kwargs):
@@ -277,7 +260,6 @@ def test_question_bank_uses_local_fallback_when_topic_service_is_down(client, mo
             "topic": "optics",
             "count": 4,
             "persist": True,
-            "llm_only": True,
         },
     )
 
@@ -286,5 +268,6 @@ def test_question_bank_uses_local_fallback_when_topic_service_is_down(client, mo
     assert payload["generated_count"] == 4
     assert payload["requested_count"] == 4
     assert payload["persisted"] is True
-    assert payload["generation_status"]["local_fallback_count"] >= 4
+    assert payload["generation_status"]["technical_sample_count"] >= 4
+    assert payload["generation_status"]["technical_fallback_used"] is True
     assert payload["generation_status"]["service_error"]

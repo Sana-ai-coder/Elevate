@@ -15,17 +15,12 @@ import torch
 
 from config import (
     CPU_LLM_MAX_ATTEMPTS,
-    CPU_LLM_DISABLE_THRESHOLD,
     CPU_LLM_MAX_NEW_TOKENS,
-    CPU_LLM_MAX_TARGET,
-    ENABLE_TEMPLATE_FALLBACK,
     FACT_SENTENCE_MIN_CHARS,
     LLM_BATCH_SIZE,
     LLM_GENERATE_MAX_TIME_SECONDS,
     LLM_MAX_ATTEMPTS,
-    LLM_ONLY_MODE,
     LLM_TOTAL_TIME_BUDGET_SECONDS,
-    MAX_LLM_QUESTIONS_PER_REQUEST,
 )
 from models.llm import get_llm_model
 from web_context import build_topic_web_context
@@ -68,7 +63,6 @@ class MCQGenerator:
         subject: str,
         grade: str,
         seed: Optional[int],
-        llm_only: bool,
         test_title: str,
         test_description: str,
     ) -> tuple:
@@ -79,7 +73,6 @@ class MCQGenerator:
             str(subject or "science").strip().lower(),
             str(grade or "high").strip().lower(),
             int(seed) if seed is not None else None,
-            bool(llm_only),
             str(test_title or "").strip().lower()[:160],
             str(test_description or "").strip().lower()[:320],
         )
@@ -110,7 +103,6 @@ class MCQGenerator:
         subject: str = "science",
         grade: str = "high",
         seed: Optional[int] = None,
-        llm_only: Optional[bool] = None,
         test_title: Optional[str] = None,
         test_description: Optional[str] = None,
     ) -> List[Dict]:
@@ -122,8 +114,6 @@ class MCQGenerator:
             safe_topic = inferred_topic or "general science"
 
         requested_count = int(max(1, min(num_questions, 50)))
-        effective_llm_only = LLM_ONLY_MODE if llm_only is None else bool(llm_only)
-        rng = random.Random(seed)
 
         cache_key = self._cache_key(
             topic=safe_topic,
@@ -132,7 +122,6 @@ class MCQGenerator:
             subject=subject,
             grade=grade,
             seed=seed,
-            llm_only=effective_llm_only,
             test_title=safe_test_title,
             test_description=safe_test_description,
         )
@@ -145,7 +134,7 @@ class MCQGenerator:
                 "produced": len(final_cached),
                 "llm_count": len([q for q in final_cached if q.get("source") == "llm"]),
                 "template_count": len([q for q in final_cached if q.get("source") == "template"]),
-                "llm_only_mode": effective_llm_only,
+                "strict_llm_mode": True,
                 "fallback_used": any(q.get("source") == "template" for q in final_cached),
                 "cache_hit": True,
             }
@@ -153,75 +142,20 @@ class MCQGenerator:
 
         context = build_topic_web_context(safe_topic)
         facts = self._extract_facts(context, safe_topic)
-        is_cpu = self._is_cpu_runtime()
-
-        if effective_llm_only:
-            llm_target = requested_count
-        else:
-            if requested_count >= 20:
-                llm_target = min(4, MAX_LLM_QUESTIONS_PER_REQUEST)
-            elif requested_count >= 10:
-                llm_target = min(6, MAX_LLM_QUESTIONS_PER_REQUEST)
-            else:
-                llm_target = min(requested_count, MAX_LLM_QUESTIONS_PER_REQUEST)
-
-            if is_cpu:
-                if requested_count >= max(1, CPU_LLM_DISABLE_THRESHOLD):
-                    llm_target = 0
-                else:
-                    llm_target = min(llm_target, max(0, CPU_LLM_MAX_TARGET), requested_count)
 
         llm_rows = self._generate_llm_mcqs(
             topic=safe_topic,
             subject=subject,
             grade=grade,
             difficulty=difficulty,
-            requested_count=llm_target,
+            requested_count=requested_count,
             facts=facts,
-            strict_llm=effective_llm_only,
             test_title=safe_test_title,
             test_description=safe_test_description,
         )
 
         accepted = [row for row in llm_rows if self._is_quality_question(row)]
         accepted = self._dedupe_questions(accepted)
-
-        if effective_llm_only:
-            final_rows = accepted[:requested_count]
-            self.last_generation_meta = {
-                "requested": requested_count,
-                "produced": len(final_rows),
-                "llm_count": len(final_rows),
-                "template_count": 0,
-                "facts_count": len(facts),
-                "llm_only_mode": True,
-                "fallback_used": False,
-                "llm_shortfall": max(0, requested_count - len(final_rows)),
-                "cache_hit": False,
-                "test_context_used": bool(safe_test_title or safe_test_description),
-            }
-            self._set_cached(cache_key, final_rows)
-            return final_rows
-
-        template_rows: List[Dict] = []
-        if ENABLE_TEMPLATE_FALLBACK and len(accepted) < requested_count:
-            template_rows = self._generate_fact_based_mcqs(
-                facts=facts,
-                topic=safe_topic,
-                difficulty=difficulty,
-                needed=requested_count - len(accepted),
-                rng=rng,
-            )
-            accepted = self._dedupe_questions(accepted + template_rows)
-
-        if ENABLE_TEMPLATE_FALLBACK and len(accepted) < requested_count:
-            generic_rows = self._generate_generic_topic_mcqs(
-                topic=safe_topic,
-                difficulty=difficulty,
-                needed=requested_count - len(accepted),
-                rng=rng,
-            )
-            accepted = self._dedupe_questions(accepted + generic_rows)
 
         final_rows = accepted[:requested_count]
 
@@ -231,8 +165,9 @@ class MCQGenerator:
             "llm_count": len([q for q in final_rows if q.get("source") == "llm"]),
             "template_count": len([q for q in final_rows if q.get("source") == "template"]),
             "facts_count": len(facts),
-            "llm_only_mode": False,
-            "fallback_used": len([q for q in final_rows if q.get("source") == "template"]) > 0,
+            "strict_llm_mode": True,
+            "fallback_used": False,
+            "llm_shortfall": max(0, requested_count - len(final_rows)),
             "cache_hit": False,
             "test_context_used": bool(safe_test_title or safe_test_description),
         }
@@ -302,22 +237,22 @@ class MCQGenerator:
                 )
 
         return (
-            "Generate factual multiple-choice questions from only the provided facts.\n"
-            "Write questions that look like real school exam questions for the requested grade.\n"
-            "Return ONLY valid JSON as an array of objects with keys: question, options, answer, explanation.\n"
+            "Generate high-quality exam-style multiple-choice questions using only the facts below.\n"
+            "Return ONLY valid JSON as an array with keys: question, options, answer, explanation.\n"
             "Use ONLY option keys A, B, C, D. Never output E or F options.\n"
             "If you cannot satisfy the rules, output [] exactly.\n"
             "Rules:\n"
-            "1) options must be exactly 4 unique strings.\n"
-            "2) answer must be one of A, B, C, D and must match options.\n"
-            "3) Avoid vague or conversational wording.\n"
-            "4) Questions must be factual, specific, and grade-appropriate.\n"
-            "5) Explanations must be short and evidence-oriented.\n\n"
+            "1) Each question must be clear, readable, and end with a question mark.\n"
+            "2) options must be exactly 4 unique, sensible, and concise choices.\n"
+            "3) answer must be one of A, B, C, D and must match options.\n"
+            "4) Avoid trick wording, vague language, and duplicate options.\n"
+            "5) explanation must be one short sentence (max 20 words).\n"
+            "6) Questions must be factual, specific, and grade-appropriate.\n\n"
             "Schema example:\n"
             "[\n"
             "  {\n"
             "    \"question\": \"Which statement about Newton's second law is correct?\",\n"
-            "    \"options\": {\"A\": \"Force equals mass times acceleration\", \"B\": \"Energy equals mass times acceleration\", \"C\": \"Momentum equals force times velocity\", \"D\": \"Power equals force times distance\"},\n"
+            "    \"options\": {\"A\": \"Force equals mass times acceleration.\", \"B\": \"Energy equals mass times acceleration.\", \"C\": \"Momentum equals force times velocity.\", \"D\": \"Power equals force times distance.\"},\n"
             "    \"answer\": \"A\",\n"
             "    \"explanation\": \"Newton's second law is F = m * a.\"\n"
             "  }\n"
@@ -366,7 +301,8 @@ class MCQGenerator:
             "C) <option>\n"
             "D) <option>\n"
             "Answer: <A|B|C|D>\n"
-            "Explanation: <short factual reason>\n"
+            "Explanation: <one short sentence, max 20 words>\n"
+            "All four options must be sensible and distinct.\n"
             "Do not output JSON. Do not output E or F options.\n\n"
             f"Subject: {subject}\n"
             f"Grade: {grade}\n"
@@ -415,6 +351,7 @@ class MCQGenerator:
             return None
         if not question.endswith("?"):
             question = f"{question.rstrip('.')}?"
+        question = re.sub(r"\s+", " ", question).strip()
 
         raw_options = item.get("options")
         options: List[str] = []
@@ -432,11 +369,14 @@ class MCQGenerator:
         normalized_options: List[str] = []
         seen_opts = set()
         for opt in options:
-            key = " ".join(opt.lower().split())
+            clean_opt = re.sub(r"\s+", " ", str(opt or "")).strip().rstrip(".")
+            if not clean_opt:
+                continue
+            key = " ".join(clean_opt.lower().split())
             if key in seen_opts:
                 continue
             seen_opts.add(key)
-            normalized_options.append(opt)
+            normalized_options.append(clean_opt)
             if len(normalized_options) == 4:
                 break
 
@@ -456,7 +396,12 @@ class MCQGenerator:
             return None
 
         correct_index = ["A", "B", "C", "D"].index(answer)
-        explanation = str(item.get("explanation") or "Based on documented facts.").strip()
+        raw_explanation = str(item.get("explanation") or "Based on documented facts.").strip()
+        raw_explanation = re.sub(r"\s+", " ", raw_explanation)
+        first_sentence = re.split(r"(?<=[.!?])\s+", raw_explanation, maxsplit=1)[0].strip()
+        explanation = first_sentence if first_sentence else "Based on documented facts."
+        if len(explanation) > 180:
+            explanation = explanation[:177].rstrip() + "..."
 
         return {
             "question": question,
@@ -568,51 +513,6 @@ class MCQGenerator:
         if candidates:
             return candidates
 
-        question_match = re.search(r"(?im)^\s*Question\s*:\s*(.+)$", str(response or ""))
-        if question_match:
-            question_text = question_match.group(1).strip()
-            bullet_lines = re.findall(r"(?im)^\s*[-*]\s+(.+)$", str(response or ""))
-
-            options: List[str] = []
-            seen = set()
-            for line in bullet_lines:
-                opt = re.sub(r"\s+", " ", str(line or "")).strip().rstrip(".")
-                key = opt.lower()
-                if not opt or key in seen:
-                    continue
-                seen.add(key)
-                options.append(opt)
-
-            fallback_opts = [
-                f"It is unrelated to established physics principles in {topic}.",
-                f"It denies core evidence-based findings about {topic}.",
-                f"It contradicts standard scientific reasoning about {topic}.",
-                f"It excludes measured effects commonly studied in {topic}.",
-            ]
-            for opt in fallback_opts:
-                key = opt.lower()
-                if key in seen:
-                    continue
-                seen.add(key)
-                options.append(opt)
-                if len(options) >= 4:
-                    break
-
-            if len(options) >= 4:
-                row = self._normalize_candidate(
-                    {
-                        "question": question_text,
-                        "options": options[:4],
-                        "answer": "A",
-                        "explanation": "Derived from the model's bullet-point answer.",
-                    },
-                    difficulty,
-                    topic,
-                    source="llm",
-                )
-                if row:
-                    candidates.append(row)
-
         return candidates
 
     def _generate_llm_mcqs(
@@ -624,7 +524,6 @@ class MCQGenerator:
         difficulty: str,
         requested_count: int,
         facts: List[str],
-        strict_llm: bool = False,
         test_title: str = "",
         test_description: str = "",
     ) -> List[Dict]:
@@ -635,32 +534,25 @@ class MCQGenerator:
         is_cpu = str(getattr(llm, "device", "cpu")).lower() != "cuda"
         collected: List[Dict] = []
         attempts = 0
-        max_attempts = max(2, requested_count)
-        if strict_llm:
-            max_attempts = min(max_attempts + 2, max(2, LLM_MAX_ATTEMPTS))
-            if is_cpu:
-                max_attempts = min(max_attempts, max(2, requested_count + 1))
-        elif is_cpu:
-            max_attempts = min(max_attempts, max(1, CPU_LLM_MAX_ATTEMPTS))
+        max_attempts = max(LLM_MAX_ATTEMPTS, requested_count * 3)
+        if is_cpu:
+            max_attempts = min(max_attempts, max(CPU_LLM_MAX_ATTEMPTS, requested_count * 4))
 
         started = time.perf_counter()
         consecutive_empty = 0
 
         while len(collected) < requested_count and attempts < max_attempts:
-            if strict_llm and (time.perf_counter() - started) >= max(5.0, LLM_TOTAL_TIME_BUDGET_SECONDS):
+            if (time.perf_counter() - started) >= max(8.0, LLM_TOTAL_TIME_BUDGET_SECONDS):
                 break
 
             remaining = requested_count - len(collected)
             if is_cpu:
-                if strict_llm:
-                    batch_size = min(2, remaining)
-                else:
-                    batch_size = min(1, remaining)
+                batch_size = min(1, remaining)
             else:
                 batch_size = min(LLM_BATCH_SIZE, remaining)
 
             existing_questions = [str(row.get("question") or "") for row in collected if row.get("question")]
-            if strict_llm and is_cpu and batch_size == 1:
+            if batch_size == 1:
                 prompt = self._create_llm_plain_prompt(
                     topic=topic,
                     subject=subject,
@@ -687,14 +579,13 @@ class MCQGenerator:
             token_cap = min(max(160, batch_size * 85), 360)
             if is_cpu:
                 cpu_token_cap = max(32, CPU_LLM_MAX_NEW_TOKENS)
-                if strict_llm:
-                    cpu_token_cap = max(cpu_token_cap, 200)
+                cpu_token_cap = max(cpu_token_cap, 200)
                 token_cap = min(token_cap, cpu_token_cap)
 
-            temperature = 0.05 if attempts == 0 else 0.12
+            temperature = 0.0 if attempts == 0 else 0.1
             top_p = 0.95 if attempts == 0 else 0.98
             max_time = LLM_GENERATE_MAX_TIME_SECONDS
-            if strict_llm and is_cpu:
+            if is_cpu:
                 max_time = min(max_time, 10.0)
 
             response = llm.generate(
@@ -712,7 +603,7 @@ class MCQGenerator:
             else:
                 consecutive_empty += 1
 
-            if strict_llm and consecutive_empty >= 2 and len(collected) > 0:
+            if consecutive_empty >= 3 and len(collected) > 0:
                 break
 
             attempts += 1
@@ -936,11 +827,16 @@ class MCQGenerator:
         question = str(row.get("question") or "").strip()
         if len(question) < 18:
             return False
+        if len(question.split()) < 5:
+            return False
         if "____" in question.lower() or "fill in the blank" in question.lower():
             return False
 
         options = row.get("options") if isinstance(row.get("options"), list) else []
         if len(options) != 4:
+            return False
+
+        if any(len(str(opt).strip()) < 2 or len(str(opt).strip()) > 180 for opt in options):
             return False
 
         normalized = [" ".join(str(opt).lower().split()) for opt in options]
@@ -952,6 +848,10 @@ class MCQGenerator:
             return False
 
         if row.get("correct_answer") not in {"A", "B", "C", "D"}:
+            return False
+
+        explanation = str(row.get("explanation") or "").strip()
+        if not explanation or len(explanation) > 220:
             return False
 
         return True

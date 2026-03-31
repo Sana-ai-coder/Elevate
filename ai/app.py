@@ -6,11 +6,11 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 import sys
-import threading
 import time
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -24,7 +24,6 @@ load_dotenv(AI_ROOT.parent / ".env", override=False)
 
 from mcq.generator import get_mcq_generator
 from mcq.validator import MCQValidator
-from config import PRELOAD_MODEL_ON_STARTUP
 
 
 _MODEL_READY = False
@@ -36,7 +35,7 @@ def _ensure_generator_loaded():
     return get_mcq_generator()
 
 
-def _preload_model_background() -> None:
+def _preload_model_blocking() -> None:
     global _MODEL_READY, _PRELOAD_STARTED, _PRELOAD_ERROR
     _PRELOAD_STARTED = True
     started = time.perf_counter()
@@ -45,26 +44,22 @@ def _preload_model_background() -> None:
         if hasattr(generator, "ensure_model_loaded"):
             generator.ensure_model_loaded()
         _MODEL_READY = bool(getattr(generator, "is_model_loaded", lambda: True)())
+        if not _MODEL_READY:
+            raise RuntimeError("Model failed to report ready state after preload.")
+
+        _PRELOAD_ERROR = None
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        print(f"[topic-mcq] background model preload completed in {elapsed_ms}ms")
+        print(f"[topic-mcq] model preload completed in {elapsed_ms}ms")
     except Exception as exc:
         _MODEL_READY = False
         _PRELOAD_ERROR = str(exc)
-        print(f"[topic-mcq] preload warning: {exc}")
+        print(f"[topic-mcq] preload failed: {exc}")
+        raise
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    if PRELOAD_MODEL_ON_STARTUP:
-        thread = threading.Thread(
-            target=_preload_model_background,
-            name="topic-mcq-preload",
-            daemon=True,
-        )
-        thread.start()
-        print("[topic-mcq] background preload scheduled")
-    else:
-        print("[topic-mcq] model preload disabled by PRELOAD_MODEL_ON_STARTUP=0")
+    _preload_model_blocking()
 
     yield
 
@@ -74,6 +69,9 @@ app = FastAPI(title="Elevate Topic MCQ Service", version="1.0.0", lifespan=lifes
 
 @app.get("/")
 def root() -> dict:
+    if not _MODEL_READY:
+        raise HTTPException(status_code=503, detail="Model is still loading.")
+
     return {
         "status": "ok",
         "service": "topic-mcq",
@@ -127,7 +125,6 @@ class GenerateMCQRequest(BaseModel):
     subject: str = Field(default="science")
     grade: str = Field(default="high")
     seed: Optional[int] = None
-    llm_only: Optional[bool] = None
     test_title: Optional[str] = None
     test_description: Optional[str] = None
 
@@ -147,7 +144,7 @@ def health() -> dict:
     if model_ready and llm is not None:
         model_device = str(getattr(llm, "device", "cpu"))
 
-    return {
+    payload = {
         "status": "ok",
         "service": "topic-mcq",
         "model_ready": model_ready,
@@ -155,6 +152,10 @@ def health() -> dict:
         "preload_error": _PRELOAD_ERROR,
         "device": model_device,
     }
+    if not model_ready:
+        payload["status"] = "starting"
+        return JSONResponse(status_code=503, content=payload)
+    return payload
 
 @app.post("/warmup")
 def warmup(authorization: Optional[str] = Header(default=None, alias="Authorization")) -> dict:
@@ -192,6 +193,9 @@ def generate_mcqs(
     )
 
     generator = _ensure_generator_loaded()
+    if not bool(getattr(generator, "is_model_loaded", lambda: _MODEL_READY)()):
+        raise HTTPException(status_code=503, detail="Model is not loaded yet. Please retry shortly.")
+
     try:
         mcqs = generator.generate_from_topic(
             topic=payload.source,
@@ -200,7 +204,6 @@ def generate_mcqs(
             subject=payload.subject,
             grade=payload.grade,
             seed=payload.seed,
-            llm_only=payload.llm_only,
             test_title=payload.test_title,
             test_description=payload.test_description,
         )

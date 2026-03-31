@@ -4,7 +4,6 @@ set -euo pipefail
 MODEL_CACHE_DIR="${MODELS_CACHE_DIR:-/data/elevate_models_cache}"
 BUCKET_URI="${HF_BUCKET_URI:-}"
 BUCKET_CACHE_PREFIX="${HF_BUCKET_CACHE_PREFIX:-elevate_models_cache}"
-BUCKET_RESTORE_BLOCKING="${HF_BUCKET_RESTORE_BLOCKING:-false}"
 
 if [ -n "$BUCKET_URI" ]; then
 	restore_from_bucket() {
@@ -22,16 +21,7 @@ if [ -n "$BUCKET_URI" ]; then
 			echo "[topic-mcq] hf CLI not found; skipping bucket restore"
 		fi
 	}
-
-	case "$(echo "$BUCKET_RESTORE_BLOCKING" | tr '[:upper:]' '[:lower:]')" in
-		1|true|yes|on)
-			restore_from_bucket
-			;;
-		*)
-			restore_from_bucket &
-			echo "[topic-mcq] bucket restore running in background"
-			;;
-	esac
+	restore_from_bucket
 fi
 
 uvicorn app:app --host 0.0.0.0 --port "${PORT:-7860}"

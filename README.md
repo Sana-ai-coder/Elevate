@@ -368,7 +368,6 @@ CORS_ORIGINS=http://localhost:8000,http://127.0.0.1:8000
 
 # Topic AI Service Config (local or remote)
 AI_TOPIC_SERVICE_URL=http://127.0.0.1:7860
-AI_TOPIC_LLM_ONLY_DEFAULT=true
 AI_TOPIC_SERVICE_TIMEOUT_SECONDS=120
 
 # Optional auth for private Hugging Face/remote AI endpoint

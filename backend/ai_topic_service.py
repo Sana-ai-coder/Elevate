@@ -19,26 +19,6 @@ DEFAULT_TOPIC_AI_SERVICE_URL = "http://127.0.0.1:7860"
 DEFAULT_TOPIC_AI_TIMEOUT_SECONDS = 45
 
 
-TRUTHY_VALUES = {"1", "true", "yes", "y", "on"}
-FALSY_VALUES = {"0", "false", "no", "n", "off"}
-
-
-def _parse_bool(raw_value: Any, default: bool) -> bool:
-    if raw_value is None:
-        return default
-    if isinstance(raw_value, bool):
-        return raw_value
-    if isinstance(raw_value, (int, float)):
-        return raw_value != 0
-    if isinstance(raw_value, str):
-        value = raw_value.strip().lower()
-        if value in TRUTHY_VALUES:
-            return True
-        if value in FALSY_VALUES:
-            return False
-    return default
-
-
 def _to_hf_space_subdomain(owner: str, space: str) -> str:
     combined = f"{owner}-{space}".strip().lower().replace("_", "-")
     combined = re.sub(r"[^a-z0-9-]", "-", combined)
@@ -110,14 +90,6 @@ def get_topic_ai_service_token() -> str:
 def get_topic_ai_auth_scheme() -> str:
     scheme = os.environ.get("AI_TOPIC_SERVICE_AUTH_SCHEME", "Bearer")
     return str(scheme or "Bearer").strip() or "Bearer"
-
-
-def topic_ai_default_llm_only_mode() -> bool:
-    return _parse_bool(os.environ.get("AI_TOPIC_LLM_ONLY_DEFAULT"), False)
-
-
-def topic_ai_default_allow_local_fallback_mode() -> bool:
-    return _parse_bool(os.environ.get("AI_TOPIC_ALLOW_LOCAL_FALLBACK_DEFAULT"), True)
 
 
 def is_topic_ai_service_available() -> bool:
@@ -239,12 +211,10 @@ def generate_topic_mcqs(
     topic: str | None,
     count: int,
     seed: int | None = None,
-    llm_only: bool | None = None,
     test_title: str | None = None,
     test_description: str | None = None,
 ) -> Dict[str, Any]:
     requested_count = max(1, min(int(count), 50))
-    effective_llm_only = topic_ai_default_llm_only_mode() if llm_only is None else bool(llm_only)
     source_topic = _derive_source_topic(topic, subject, grade)
     endpoint = f"{get_topic_ai_service_url()}/mcq/generate"
     request_started = time.perf_counter()
@@ -260,7 +230,6 @@ def generate_topic_mcqs(
         "subject": str(subject or "science").strip().lower(),
         "grade": str(grade or "high").strip().lower(),
         "seed": seed,
-        "llm_only": effective_llm_only,
     }
 
     clean_title = sanitize_string(test_title or "", max_length=255)
@@ -307,7 +276,6 @@ def generate_topic_mcqs(
             "meta": {},
             "requested_count": requested_count,
             "generated_count": 0,
-            "llm_only": effective_llm_only,
             "service_url": get_topic_ai_service_url(),
             "service_endpoint": endpoint,
             "service_latency_ms": _elapsed_ms(),
@@ -321,7 +289,6 @@ def generate_topic_mcqs(
             "meta": {},
             "requested_count": requested_count,
             "generated_count": 0,
-            "llm_only": effective_llm_only,
             "service_url": get_topic_ai_service_url(),
             "service_endpoint": endpoint,
             "service_latency_ms": _elapsed_ms(),
@@ -336,7 +303,6 @@ def generate_topic_mcqs(
             "meta": {},
             "requested_count": requested_count,
             "generated_count": 0,
-            "llm_only": effective_llm_only,
             "service_url": get_topic_ai_service_url(),
             "service_endpoint": endpoint,
             "service_latency_ms": _elapsed_ms(),
@@ -353,7 +319,6 @@ def generate_topic_mcqs(
             "meta": {},
             "requested_count": requested_count,
             "generated_count": 0,
-            "llm_only": effective_llm_only,
             "service_url": get_topic_ai_service_url(),
             "service_endpoint": endpoint,
             "service_latency_ms": _elapsed_ms(),
@@ -380,7 +345,6 @@ def generate_topic_mcqs(
         "meta": meta,
         "requested_count": requested_count,
         "generated_count": len(rows),
-        "llm_only": effective_llm_only,
         "service_url": get_topic_ai_service_url(),
         "service_endpoint": endpoint,
         "service_latency_ms": _elapsed_ms(),

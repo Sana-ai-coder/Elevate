@@ -103,15 +103,14 @@ function formatGenerationDiagnostics(generationStatus) {
   const latencyValue = Number(status.service_latency_ms);
   const latencyLabel = Number.isFinite(latencyValue) && latencyValue >= 0 ? `${latencyValue}ms` : 'n/a';
   const serviceGenerated = Number(status.service_generated_count || 0);
-  const localFallback = Number(status.local_fallback_count || 0);
+  const technicalSamples = Number(status.technical_sample_count || 0);
 
   const parts = [
     `HTTP ${serviceStatus}`,
     `Latency ${latencyLabel}`,
     `Service ${serviceGenerated}`,
   ];
-  if (localFallback > 0) parts.push(`Fallback ${localFallback}`);
-  if (status.llm_only === true) parts.push('LLM only');
+  if (technicalSamples > 0) parts.push(`Samples ${technicalSamples}`);
 
   return {
     summary: parts.join(' | '),

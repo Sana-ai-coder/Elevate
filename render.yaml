@@ -36,8 +36,6 @@ services:
         value: "Bearer"
       - key: HF_TOKEN
         sync: false
-      - key: AI_TOPIC_LLM_ONLY_DEFAULT
-        value: "true"
       - key: AI_TOPIC_SERVICE_TIMEOUT_SECONDS
         value: "45"
 
