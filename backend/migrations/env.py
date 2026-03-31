@@ -11,10 +11,29 @@ from alembic import context
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from backend.models import db
+from backend.config import normalize_database_url
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+
+def _configure_runtime_database_url() -> None:
+    raw_url = (
+        os.environ.get("DATABASE_URL")
+        or os.environ.get("TEST_DATABASE_URL")
+        or os.environ.get("SUPABASE_DIRECT_CONNECTION_STRING")
+        or ""
+    )
+    if not str(raw_url).strip():
+        return
+
+    normalized = normalize_database_url(raw_url)
+    # ConfigParser treats % as interpolation; escape it for alembic config.
+    config.set_main_option("sqlalchemy.url", normalized.replace("%", "%%"))
+
+
+_configure_runtime_database_url()
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

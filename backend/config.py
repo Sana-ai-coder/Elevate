@@ -1,14 +1,80 @@
 import os
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 
-def _normalize_database_url(raw_value: str | None) -> str:
+DEFAULT_SQLITE_DB_URL = "sqlite:///elevate_dev.db"
+
+
+def _first_non_empty_env(*keys: str) -> str:
+    for key in keys:
+        value = os.environ.get(key)
+        if value and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _coerce_int(raw_value: str | None, default: int) -> int:
+    try:
+        return int(raw_value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_supabase_direct_url(project_url: str) -> str | None:
+    parts = urlsplit(project_url)
+    host = (parts.hostname or "").strip().lower()
+    if not host.endswith(".supabase.co"):
+        return None
+
+    project_ref = host.split(".", 1)[0]
+    if not project_ref:
+        return None
+
+    password = _first_non_empty_env("SUPABASE_DB_PASSWORD")
+    if not password:
+        return None
+
+    user = _first_non_empty_env("SUPABASE_DB_USER") or "postgres"
+    database = _first_non_empty_env("SUPABASE_DB_NAME") or "postgres"
+    port = _coerce_int(_first_non_empty_env("SUPABASE_DB_PORT"), 5432)
+    encoded_password = quote(password, safe="")
+    return f"postgresql://{user}:{encoded_password}@db.{project_ref}.supabase.co:{port}/{database}"
+
+
+def normalize_database_url(raw_value: str | None) -> str:
     value = (raw_value or "").strip()
     if not value:
-        return "sqlite:///elevate_dev.db"
+        value = _first_non_empty_env(
+            "SUPABASE_DIRECT_CONNECTION_STRING",
+            "SUPABASE_DB_URL",
+            "SUPABASE_DATABASE_URL",
+        )
+    if not value:
+        return DEFAULT_SQLITE_DB_URL
+
+    lowered = value.lower()
+    if lowered.startswith("http://") or lowered.startswith("https://"):
+        preferred_supabase_url = _first_non_empty_env(
+            "SUPABASE_DIRECT_CONNECTION_STRING",
+            "SUPABASE_DB_URL",
+            "SUPABASE_DATABASE_URL",
+        )
+        if preferred_supabase_url:
+            value = preferred_supabase_url
+        else:
+            inferred_url = _build_supabase_direct_url(value)
+            if inferred_url:
+                value = inferred_url
 
     if value.startswith("postgres://"):
         value = value.replace("postgres://", "postgresql://", 1)
+
+    if value.startswith("http://") or value.startswith("https://"):
+        raise ValueError(
+            "Invalid DATABASE_URL scheme 'http/https'. Use a PostgreSQL DSN like "
+            "postgresql://postgres:<password>@db.<project-ref>.supabase.co:5432/postgres "
+            "or set SUPABASE_DIRECT_CONNECTION_STRING / SUPABASE_DB_PASSWORD helpers."
+        )
 
     if value.startswith("postgresql://"):
         parts = urlsplit(value)
@@ -29,7 +95,17 @@ def _normalize_database_url(raw_value: str | None) -> str:
             )
         )
 
+    if not (value.startswith("postgresql://") or value.startswith("sqlite://")):
+        raise ValueError(
+            "Unsupported DATABASE_URL scheme. Supported: postgresql://, postgres://, sqlite://"
+        )
+
     return value
+
+
+# Backward-compatible alias used across existing modules.
+def _normalize_database_url(raw_value: str | None) -> str:
+    return normalize_database_url(raw_value)
 
 
 def _parse_cors_origins(raw_value: str | None):
@@ -53,7 +129,7 @@ def _engine_options_for(uri: str):
 
 class BaseConfig:
     SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key")
-    SQLALCHEMY_DATABASE_URI = _normalize_database_url(os.environ.get("DATABASE_URL", "sqlite:///elevate_dev.db"))
+    SQLALCHEMY_DATABASE_URI = normalize_database_url(os.environ.get("DATABASE_URL", DEFAULT_SQLITE_DB_URL))
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ENGINE_OPTIONS = _engine_options_for(SQLALCHEMY_DATABASE_URI)
     JWT_SECRET_KEY = os.environ.get("JWT_SECRET", "dev-jwt-secret")
@@ -73,7 +149,7 @@ class ProductionConfig(BaseConfig):
 class TestingConfig(BaseConfig):
     DEBUG = False
     TESTING = True
-    SQLALCHEMY_DATABASE_URI = _normalize_database_url(os.environ.get("TEST_DATABASE_URL", "sqlite:///:memory:"))
+    SQLALCHEMY_DATABASE_URI = normalize_database_url(os.environ.get("TEST_DATABASE_URL", "sqlite:///:memory:"))
     SQLALCHEMY_ENGINE_OPTIONS = _engine_options_for(SQLALCHEMY_DATABASE_URI)
 
 

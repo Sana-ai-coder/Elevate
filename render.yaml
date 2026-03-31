@@ -5,6 +5,7 @@ services:
     plan: free
     rootDir: .
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    preDeployCommand: python scripts/render_predeploy.py
     startCommand: python -m backend.app
     healthCheckPath: /health
     autoDeploy: true
@@ -18,6 +19,10 @@ services:
       - key: ADMIN_TOKEN
         sync: false
       - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_DIRECT_CONNECTION_STRING
+        sync: false
+      - key: SUPABASE_DB_PASSWORD
         sync: false
       - key: CORS_ORIGINS
         sync: false
