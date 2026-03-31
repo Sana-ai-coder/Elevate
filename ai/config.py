@@ -7,8 +7,38 @@ from pathlib import Path
 
 
 ROOT_DIR = Path(__file__).resolve().parent
-MODELS_DIR = ROOT_DIR / "models_cache"
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _resolve_models_dir() -> Path:
+    explicit_path = (
+        os.environ.get("MODELS_CACHE_DIR")
+        or os.environ.get("MODEL_CACHE_DIR")
+        or ""
+    ).strip()
+    if explicit_path:
+        explicit = Path(explicit_path).expanduser()
+        explicit.mkdir(parents=True, exist_ok=True)
+        return explicit
+
+    hf_persistent_dir = Path("/data") / "elevate_models_cache"
+    try:
+        hf_persistent_dir.mkdir(parents=True, exist_ok=True)
+        return hf_persistent_dir
+    except Exception:
+        pass
+
+    fallback = ROOT_DIR / "models_cache"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
+MODELS_DIR = _resolve_models_dir()
+
+HF_HOME_DIR = MODELS_DIR / "hf_home"
+HF_HOME_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("HF_HOME", str(HF_HOME_DIR))
+os.environ.setdefault("TRANSFORMERS_CACHE", str(MODELS_DIR))
+os.environ.setdefault("HF_HUB_CACHE", str(HF_HOME_DIR / "hub"))
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -58,3 +88,6 @@ CPU_LLM_MAX_TARGET = int(os.environ.get("CPU_LLM_MAX_TARGET", "2"))
 CPU_LLM_MAX_ATTEMPTS = int(os.environ.get("CPU_LLM_MAX_ATTEMPTS", "3"))
 CPU_LLM_MAX_NEW_TOKENS = int(os.environ.get("CPU_LLM_MAX_NEW_TOKENS", "140"))
 CPU_LLM_DISABLE_THRESHOLD = int(os.environ.get("CPU_LLM_DISABLE_THRESHOLD", "8"))
+
+# Startup behavior
+PRELOAD_MODEL_ON_STARTUP = _env_bool("PRELOAD_MODEL_ON_STARTUP", True)

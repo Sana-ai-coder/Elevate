@@ -204,6 +204,53 @@ def test_create_test_reuses_preview_questions(client, monkeypatch):
         assert OrmTestQuestion.query.count() == 2
 
 
+def test_create_test_passes_title_and_description_to_topic_service(client, monkeypatch):
+    token = make_teacher(client, email="teacher-context@example.com")
+    captured = {}
+
+    def fake_topic_service(**kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "status_code": 200,
+            "error": None,
+            "questions": [
+                {
+                    "text": "Which quantity is measured in newtons?",
+                    "options": ["Force", "Velocity", "Mass", "Energy"],
+                    "correct_index": 0,
+                    "topic": "motion",
+                    "hint": "Think SI unit of force.",
+                    "explanation": "Newton is the SI unit of force.",
+                }
+            ],
+            "meta": {"llm_count": 1, "template_count": 0, "cache_hit": False},
+            "service_url": "http://127.0.0.1:7860",
+        }
+
+    monkeypatch.setattr("backend.routes.teacher.generate_topic_mcqs", fake_topic_service)
+
+    response = client.post(
+        "/api/teacher/tests",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "title": "Motion Unit Test",
+            "description": "Focus on equations of motion and force applications.",
+            "subject": "science",
+            "grade": "high",
+            "difficulty": "medium",
+            "topic": "motion",
+            "question_count": 1,
+            "time_limit": 20,
+            "llm_only": True,
+        },
+    )
+
+    assert response.status_code == 201
+    assert captured.get("test_title") == "Motion Unit Test"
+    assert captured.get("test_description") == "Focus on equations of motion and force applications."
+
+
 def test_question_bank_returns_503_when_topic_service_is_down(client, monkeypatch):
     token = make_teacher(client, email="teacher-unavailable@example.com")
 

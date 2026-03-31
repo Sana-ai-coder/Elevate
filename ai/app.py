@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 import sys
 import time
@@ -22,9 +23,9 @@ load_dotenv(AI_ROOT.parent / ".env", override=False)
 
 from mcq.generator import get_mcq_generator
 from mcq.validator import MCQValidator
+from config import PRELOAD_MODEL_ON_STARTUP
 
 
-app = FastAPI(title="Elevate Topic MCQ Service", version="1.0.0")
 _MODEL_READY = False
 
 
@@ -33,6 +34,26 @@ def _ensure_generator_loaded():
     generator = get_mcq_generator()
     _MODEL_READY = True
     return generator
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    if PRELOAD_MODEL_ON_STARTUP:
+        started = time.perf_counter()
+        try:
+            _ensure_generator_loaded()
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            print(f"[topic-mcq] model preloaded in {elapsed_ms}ms")
+        except Exception as exc:
+            # Keep service alive; health endpoint will show model_ready=false until first successful load.
+            print(f"[topic-mcq] preload warning: {exc}")
+    else:
+        print("[topic-mcq] model preload disabled by PRELOAD_MODEL_ON_STARTUP=0")
+
+    yield
+
+
+app = FastAPI(title="Elevate Topic MCQ Service", version="1.0.0", lifespan=lifespan)
 
 
 def _get_required_service_token() -> str:
@@ -75,6 +96,8 @@ class GenerateMCQRequest(BaseModel):
     grade: str = Field(default="high")
     seed: Optional[int] = None
     llm_only: Optional[bool] = None
+    test_title: Optional[str] = None
+    test_description: Optional[str] = None
 
 
 class ScoreMCQRequest(BaseModel):
@@ -84,8 +107,19 @@ class ScoreMCQRequest(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "service": "topic-mcq", "model_ready": _MODEL_READY}
+    model_device = None
+    if _MODEL_READY:
+        try:
+            model_device = str(get_mcq_generator().llm.device)
+        except Exception:
+            model_device = None
 
+    return {
+        "status": "ok",
+        "service": "topic-mcq",
+        "model_ready": _MODEL_READY,
+        "device": model_device,
+    }
 
 @app.post("/warmup")
 def warmup(authorization: Optional[str] = Header(default=None, alias="Authorization")) -> dict:
@@ -122,6 +156,8 @@ def generate_mcqs(
             grade=payload.grade,
             seed=payload.seed,
             llm_only=payload.llm_only,
+            test_title=payload.test_title,
+            test_description=payload.test_description,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"MCQ generation failed: {exc}") from exc

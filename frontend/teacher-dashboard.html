@@ -80,7 +80,7 @@
           <div class="teacher-card">
             <div class="teacher-card-head">
               <h3><i class="fas fa-wand-magic-sparkles"></i> AI Test Builder</h3>
-              <p>Create tests and preview generated questions before publishing.</p>
+              <p>Create curriculum-aligned tests directly from the selected requirements.</p>
             </div>
             <div class="teacher-section-grid teacher-section-grid-create">
               <div class="teacher-panel teacher-panel-form">
@@ -95,25 +95,11 @@
                   <div class="col-md-6"><label class="form-label" for="testTopic">Sub Topic (optional)</label><select id="testTopic" class="form-control"></select></div>
                   <div class="col-md-3"><label class="form-label" for="testSeed">Seed (optional)</label><input id="testSeed" class="form-control" type="number" /></div>
                   <div class="col-md-6 create-test-actions">
-                    <button type="button" class="btn btn-outline-primary w-100" id="previewQuestionsBtn"><i class="fas fa-eye me-1"></i> Preview AI Questions</button>
                     <button type="submit" class="btn btn-primary w-100" id="createTestBtn"><i class="fas fa-plus me-1"></i> Create Test</button>
                   </div>
                 </form>
               </div>
-              <div class="teacher-panel teacher-panel-preview">
-                <div id="aiPreviewWrap" class="ai-preview-wrap hidden">
-                  <div class="preview-head">
-                    <strong>Generated Questions Preview</strong>
-                    <span id="previewMeta" class="text-muted small"></span>
-                  </div>
-                  <div class="table-responsive">
-                    <table class="table table-sm align-middle">
-                      <thead><tr><th>#</th><th>Question</th><th>Options</th><th>Answer</th></tr></thead>
-                      <tbody id="aiPreviewTableBody"></tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
+
             </div>
           </div>
         </section>

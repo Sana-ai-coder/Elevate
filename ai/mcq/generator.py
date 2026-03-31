@@ -54,6 +54,8 @@ class MCQGenerator:
         grade: str,
         seed: Optional[int],
         llm_only: bool,
+        test_title: str,
+        test_description: str,
     ) -> tuple:
         return (
             str(topic or "").strip().lower(),
@@ -63,6 +65,8 @@ class MCQGenerator:
             str(grade or "high").strip().lower(),
             int(seed) if seed is not None else None,
             bool(llm_only),
+            str(test_title or "").strip().lower()[:160],
+            str(test_description or "").strip().lower()[:320],
         )
 
     def _get_cached(self, key: tuple) -> Optional[List[Dict]]:
@@ -90,8 +94,16 @@ class MCQGenerator:
         grade: str = "high",
         seed: Optional[int] = None,
         llm_only: Optional[bool] = None,
+        test_title: Optional[str] = None,
+        test_description: Optional[str] = None,
     ) -> List[Dict]:
-        safe_topic = str(topic or "").strip() or "general science"
+        safe_topic = str(topic or "").strip()
+        safe_test_title = str(test_title or "").strip()
+        safe_test_description = str(test_description or "").strip()
+        if not safe_topic:
+            inferred_topic = " ".join(part for part in [safe_test_title, safe_test_description] if part).strip()
+            safe_topic = inferred_topic or "general science"
+
         requested_count = int(max(1, min(num_questions, 50)))
         effective_llm_only = LLM_ONLY_MODE if llm_only is None else bool(llm_only)
         rng = random.Random(seed)
@@ -104,6 +116,8 @@ class MCQGenerator:
             grade=grade,
             seed=seed,
             llm_only=effective_llm_only,
+            test_title=safe_test_title,
+            test_description=safe_test_description,
         )
 
         cached_rows = self._get_cached(cache_key)
@@ -148,6 +162,8 @@ class MCQGenerator:
             requested_count=llm_target,
             facts=facts,
             strict_llm=effective_llm_only,
+            test_title=safe_test_title,
+            test_description=safe_test_description,
         )
 
         accepted = [row for row in llm_rows if self._is_quality_question(row)]
@@ -165,6 +181,7 @@ class MCQGenerator:
                 "fallback_used": False,
                 "llm_shortfall": max(0, requested_count - len(final_rows)),
                 "cache_hit": False,
+                "test_context_used": bool(safe_test_title or safe_test_description),
             }
             self._set_cached(cache_key, final_rows)
             return final_rows
@@ -200,10 +217,46 @@ class MCQGenerator:
             "llm_only_mode": False,
             "fallback_used": len([q for q in final_rows if q.get("source") == "template"]) > 0,
             "cache_hit": False,
+            "test_context_used": bool(safe_test_title or safe_test_description),
         }
 
         self._set_cached(cache_key, final_rows)
         return final_rows
+
+    def _grade_guidance(self, grade: str) -> str:
+        grade_key = str(grade or "").strip().lower()
+        if grade_key == "elementary":
+            return "Use concrete, simple wording and foundational concepts suitable for young learners."
+        if grade_key == "middle":
+            return "Use school-level academic wording and moderate reasoning steps suitable for middle school."
+        if grade_key == "high":
+            return "Use exam-style high-school rigor with clear conceptual and applied reasoning."
+        if grade_key == "college":
+            return "Use concise technical language and deeper conceptual reasoning expected in introductory college assessments."
+        return "Match question wording and reasoning depth to the provided grade level."
+
+    def _difficulty_guidance(self, difficulty: str) -> str:
+        difficulty_key = str(difficulty or "").strip().lower()
+        if difficulty_key == "easy":
+            return "Prioritize direct concept checks and one-step reasoning."
+        if difficulty_key == "medium":
+            return "Use moderate multi-step reasoning and common exam-style distractors."
+        if difficulty_key == "hard":
+            return "Use deeper conceptual traps and higher-order reasoning while keeping one unambiguous correct answer."
+        return "Align challenge level to the requested difficulty."
+
+    def _test_context_block(self, test_title: str, test_description: str) -> str:
+        title = str(test_title or "").strip()
+        description = str(test_description or "").strip()
+        if not title and not description:
+            return ""
+
+        parts = []
+        if title:
+            parts.append(f"Assessment Title: {title}")
+        if description:
+            parts.append(f"Assessment Description: {description}")
+        return "\n".join(parts)
 
     def _create_llm_prompt(
         self,
@@ -214,9 +267,14 @@ class MCQGenerator:
         num_questions: int,
         difficulty: str,
         facts: List[str],
+        test_title: str = "",
+        test_description: str = "",
         existing_questions: Optional[List[str]] = None,
     ) -> str:
         fact_lines = "\n".join(f"- {fact}" for fact in facts[:18])
+        test_context = self._test_context_block(test_title, test_description)
+        grade_guidance = self._grade_guidance(grade)
+        difficulty_guidance = self._difficulty_guidance(difficulty)
         avoid_repeat = ""
         if existing_questions:
             history = "\n".join(f"- {q}" for q in existing_questions[:12] if q)
@@ -228,6 +286,7 @@ class MCQGenerator:
 
         return (
             "Generate factual multiple-choice questions from only the provided facts.\n"
+            "Write questions that look like real school exam questions for the requested grade.\n"
             "Return ONLY valid JSON as an array of objects with keys: question, options, answer, explanation.\n"
             "Use ONLY option keys A, B, C, D. Never output E or F options.\n"
             "If you cannot satisfy the rules, output [] exactly.\n"
@@ -235,7 +294,7 @@ class MCQGenerator:
             "1) options must be exactly 4 unique strings.\n"
             "2) answer must be one of A, B, C, D and must match options.\n"
             "3) Avoid vague or conversational wording.\n"
-            "4) Questions must be factual and specific.\n"
+            "4) Questions must be factual, specific, and grade-appropriate.\n"
             "5) Explanations must be short and evidence-oriented.\n\n"
             "Schema example:\n"
             "[\n"
@@ -251,6 +310,9 @@ class MCQGenerator:
             f"Difficulty: {difficulty}\n"
             f"Topic: {topic}\n"
             f"Required Questions: {num_questions}\n\n"
+            f"Grade Guidance: {grade_guidance}\n"
+            f"Difficulty Guidance: {difficulty_guidance}\n"
+            f"{test_context}\n\n"
             f"{avoid_repeat}"
             "Facts:\n"
             f"{fact_lines}\n"
@@ -264,9 +326,14 @@ class MCQGenerator:
         grade: str,
         difficulty: str,
         facts: List[str],
+        test_title: str = "",
+        test_description: str = "",
         existing_questions: Optional[List[str]] = None,
     ) -> str:
         fact_lines = "\n".join(f"- {fact}" for fact in facts[:12])
+        test_context = self._test_context_block(test_title, test_description)
+        grade_guidance = self._grade_guidance(grade)
+        difficulty_guidance = self._difficulty_guidance(difficulty)
         avoid_repeat = ""
         if existing_questions:
             history = "\n".join(f"- {q}" for q in existing_questions[:8] if q)
@@ -288,6 +355,9 @@ class MCQGenerator:
             f"Grade: {grade}\n"
             f"Difficulty: {difficulty}\n"
             f"Topic: {topic}\n\n"
+            f"Grade Guidance: {grade_guidance}\n"
+            f"Difficulty Guidance: {difficulty_guidance}\n"
+            f"{test_context}\n\n"
             f"{avoid_repeat}"
             "Facts:\n"
             f"{fact_lines}\n"
@@ -538,6 +608,8 @@ class MCQGenerator:
         requested_count: int,
         facts: List[str],
         strict_llm: bool = False,
+        test_title: str = "",
+        test_description: str = "",
     ) -> List[Dict]:
         if requested_count <= 0:
             return []
@@ -577,6 +649,8 @@ class MCQGenerator:
                     grade=grade,
                     difficulty=difficulty,
                     facts=facts,
+                    test_title=test_title,
+                    test_description=test_description,
                     existing_questions=existing_questions,
                 )
             else:
@@ -587,6 +661,8 @@ class MCQGenerator:
                     num_questions=batch_size,
                     difficulty=difficulty,
                     facts=facts,
+                    test_title=test_title,
+                    test_description=test_description,
                     existing_questions=existing_questions,
                 )
 

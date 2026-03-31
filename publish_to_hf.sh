@@ -32,6 +32,19 @@ if [ -f "$SOURCE_DIR/.dockerignore" ] && grep -E '^models/?$' "$SOURCE_DIR/.dock
   exit 1
 fi
 
+# Generate tar exclude patterns from .dockerignore
+TAR_EXCLUDES=""
+if [ -f "$SOURCE_DIR/.dockerignore" ]; then
+    echo "Processing .dockerignore for tar exclusions..."
+    while IFS= read -r line; do
+        # Strip comments and trim whitespace
+        line=$(echo "$line" | sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        if [ -n "$line" ]; then
+            TAR_EXCLUDES+=" --exclude='$line'"
+        fi
+    done < "$SOURCE_DIR/.dockerignore"
+fi
+
 TMP_DIR=""
 cleanup() {
   if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
@@ -44,7 +57,7 @@ TMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t hfspace)
 echo "--- Preparing temporary workspace: $TMP_DIR ---"
 
 # Copy source contents (including dotfiles) into temp workspace.
-(cd "$SOURCE_DIR" && tar -cf - .) | (cd "$TMP_DIR" && tar -xf -)
+(cd "$SOURCE_DIR" && tar -cf - . $TAR_EXCLUDES) | (cd "$TMP_DIR" && tar -xf -)
 
 # Ensure no nested git metadata is carried over.
 if [ -d "$TMP_DIR/.git" ]; then
@@ -53,6 +66,11 @@ fi
 
 echo "Initializing temporary git repository..."
 git -C "$TMP_DIR" init
+
+echo "Setting temporary git author for this deployment..."
+git -C "$TMP_DIR" config user.name "Sana-ai-coder"
+git -C "$TMP_DIR" config user.email "sanagirish0@gmail.com"
+
 git -C "$TMP_DIR" remote add origin "$HF_SPACE_URL"
 git -C "$TMP_DIR" add -A
 

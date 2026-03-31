@@ -11,12 +11,6 @@ const teacherCache = {
   reportRows: [],
 };
 
-const previewReuseState = {
-  fingerprint: null,
-  signature: null,
-  questions: [],
-};
-
 function getKnownStudents() {
   const byId = new Map();
 
@@ -1202,115 +1196,6 @@ function collectBuilderPayload() {
   return payload;
 }
 
-function buildPreviewFingerprint(payload) {
-  return JSON.stringify({
-    subject: String(payload?.subject || '').trim().toLowerCase(),
-    grade: String(payload?.grade || '').trim().toLowerCase(),
-    difficulty: String(payload?.difficulty || '').trim().toLowerCase(),
-    topic: String(payload?.topic || '').trim().toLowerCase(),
-    question_count: Number(payload?.question_count || 0),
-    seed: payload?.seed ?? null,
-  });
-}
-
-function resetPreviewReuseState() {
-  previewReuseState.fingerprint = null;
-  previewReuseState.signature = null;
-  previewReuseState.questions = [];
-}
-
-async function previewAIQuestions() {
-  const button = document.getElementById('previewQuestionsBtn');
-  const createSection = document.getElementById('createSection');
-  setBusy(button, 'Generating');
-  try {
-    const payload = collectBuilderPayload();
-    const result = await api.teacher.generateQuestionBank({
-      subject: payload.subject,
-      grade: payload.grade,
-      difficulty: payload.difficulty,
-      count: payload.question_count,
-      topic: payload.topic,
-      seed: payload.seed,
-      persist: false,
-    });
-
-    const previewWrap = document.getElementById('aiPreviewWrap');
-    const previewBody = document.getElementById('aiPreviewTableBody');
-    const previewMeta = document.getElementById('previewMeta');
-    const rows = Array.isArray(result.questions) ? result.questions : [];
-    const diagnostics = formatGenerationDiagnostics(result.generation_status);
-    const reusableQuestions = rows
-      .map(item => {
-        const options = Array.isArray(item?.options) ? item.options.filter(opt => String(opt || '').trim()) : [];
-        const text = String(item?.text || '').trim();
-        if (!text || options.length < 2) return null;
-
-        const parsedCorrectIndex = Number(item?.correct_index || 0);
-        const boundedCorrectIndex = Number.isFinite(parsedCorrectIndex)
-          ? Math.max(0, Math.min(parsedCorrectIndex, options.length - 1))
-          : 0;
-
-        return {
-          text,
-          options,
-          correct_index: boundedCorrectIndex,
-          hint: item?.hint || null,
-          explanation: item?.explanation || null,
-          topic: item?.topic || payload.topic || null,
-          source: item?.source || 'topic_ai_service',
-        };
-      })
-      .filter(Boolean)
-      .slice(0, Math.max(0, Number(payload.question_count || 0)));
-
-    if (reusableQuestions.length > 0) {
-      previewReuseState.fingerprint = buildPreviewFingerprint(payload);
-      previewReuseState.signature = result?.preview_signature || null;
-      previewReuseState.questions = reusableQuestions;
-    } else {
-      resetPreviewReuseState();
-    }
-
-    if (previewWrap) previewWrap.classList.remove('hidden');
-    if (createSection) createSection.classList.add('has-preview');
-    if (previewMeta) {
-      const seedSuffix = result.seed !== null && result.seed !== undefined ? ` with seed ${result.seed}` : '';
-      const endpointSuffix = diagnostics.endpoint ? ` | ${diagnostics.endpoint}` : '';
-      const errorSuffix = diagnostics.error ? ` | ${diagnostics.error}` : '';
-      previewMeta.textContent = `${rows.length} question(s) generated${seedSuffix}. ${diagnostics.summary}${endpointSuffix}${errorSuffix}`;
-    }
-    if (previewBody) {
-      previewBody.innerHTML = rows.map((item, idx) => {
-        const options = (item.options || []).map((opt, i) => `${i + 1}. ${escapeHtml(opt)}`).join('<br/>');
-        const answer = item.options && item.options[item.correct_index] ? item.options[item.correct_index] : '-';
-        return `
-          <tr>
-            <td>${idx + 1}</td>
-            <td>${escapeHtml(item.text)}</td>
-            <td class="small">${options}</td>
-            <td>${escapeHtml(answer)}</td>
-          </tr>
-        `;
-      }).join('');
-    }
-
-    if (result.warning) {
-      utils.showNotification(result.warning, 'warning');
-    }
-  } catch (error) {
-    console.error(error);
-    resetPreviewReuseState();
-    const diagnostics = formatGenerationDiagnostics(error?.payload?.generation_status);
-    if (diagnostics.summary || diagnostics.error) {
-      utils.showNotification(`Generation diagnostics: ${diagnostics.summary}${diagnostics.error ? ` | ${diagnostics.error}` : ''}`, 'warning');
-    }
-    utils.showNotification(error.message || 'Failed to generate preview', 'error');
-  } finally {
-    clearBusy(button);
-  }
-}
-
 async function createTest(event) {
   event.preventDefault();
   const button = document.getElementById('createTestBtn');
@@ -1320,20 +1205,6 @@ async function createTest(event) {
     if (!payload.title || !payload.subject) {
       utils.showNotification('Title and subject are required.', 'warning');
       return;
-    }
-
-    const previewFingerprint = buildPreviewFingerprint(payload);
-    const canReusePreview = (
-      previewReuseState.fingerprint === previewFingerprint
-      && Array.isArray(previewReuseState.questions)
-      && previewReuseState.questions.length >= payload.question_count
-    );
-
-    if (canReusePreview) {
-      payload.preview_questions = previewReuseState.questions.slice(0, payload.question_count);
-      if (previewReuseState.signature) {
-        payload.preview_signature = previewReuseState.signature;
-      }
     }
 
     const result = await api.teacher.createTest(payload);
@@ -1350,18 +1221,8 @@ async function createTest(event) {
       utils.showNotification(`Generation diagnostics: ${diagnostics.summary}${endpointSuffix}${errorSuffix}`, 'info');
     }
 
-    if (Number(result?.generation_status?.preview_reused_count || 0) > 0) {
-      utils.showNotification('Created test using previewed questions (no second AI generation needed).', 'success');
-    }
-
     await Promise.all([loadOverview(), loadTests()]);
     syncAssignmentFormOptions();
-
-    resetPreviewReuseState();
-    const previewWrap = document.getElementById('aiPreviewWrap');
-    const createSection = document.getElementById('createSection');
-    if (previewWrap) previewWrap.classList.add('hidden');
-    if (createSection) createSection.classList.remove('has-preview');
   } catch (error) {
     console.error(error);
     const diagnostics = formatGenerationDiagnostics(error?.payload?.generation_status);
@@ -1395,11 +1256,6 @@ async function loadAllTeacherData() {
 }
 
 function bindEvents() {
-  const previewBtn = document.getElementById('previewQuestionsBtn');
-  if (previewBtn) {
-    previewBtn.addEventListener('click', previewAIQuestions);
-  }
-
   const createForm = document.getElementById('createTestForm');
   if (createForm) {
     createForm.addEventListener('submit', createTest);
@@ -1654,9 +1510,6 @@ function bindEvents() {
 async function initTeacherDashboard() {
   const session = ensureTeacherSession();
   if (!session) return;
-
-  const createSection = document.getElementById('createSection');
-  if (createSection) createSection.classList.remove('has-preview');
 
   setupProfileMenu(session);
   await initializeStemDropdowns();

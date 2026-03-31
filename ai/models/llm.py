@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from typing import Optional
 
 import torch
@@ -33,6 +34,14 @@ class LanguageModel:
     def __init__(self) -> None:
         self.device = _resolve_device()
         print(f"Loading local language model: {LLM_MODEL} on {self.device}...")
+        print(f"Model cache directory: {MODELS_DIR}")
+
+        if self.device == "cuda":
+            try:
+                gpu_name = torch.cuda.get_device_name(0)
+                print(f"Detected GPU: {gpu_name}")
+            except Exception:
+                pass
 
         try:
             cpu_count = max(1, os.cpu_count() or 1)
@@ -152,10 +161,13 @@ class LanguageModel:
 
 
 _llm_model: LanguageModel | None = None
+_llm_model_lock = threading.Lock()
 
 
 def get_llm_model() -> LanguageModel:
     global _llm_model
     if _llm_model is None:
-        _llm_model = LanguageModel()
+        with _llm_model_lock:
+            if _llm_model is None:
+                _llm_model = LanguageModel()
     return _llm_model

@@ -285,20 +285,14 @@ def _pick_or_generate_questions(
     seed=None,
     llm_only=True,
     allow_local_fallback=False,
+    test_title=None,
+    test_description=None,
 ):
-    query = Question.query.filter(
-        func.lower(Question.subject) == subject.lower(),
-        Question.grade == grade,
-        Question.difficulty == difficulty,
-    )
-    if topic:
-        query = query.filter(Question.syllabus_topic == topic)
-
-    pool = query.order_by(func.random()).limit(count).all()
+    pool = []
     generation_status = {
         "requested_count": count,
-        "existing_pool_count": len(pool),
-        "generated_count": len(pool),
+        "existing_pool_count": 0,
+        "generated_count": 0,
         "service_generated_count": 0,
         "service_llm_count": 0,
         "service_template_count": 0,
@@ -310,20 +304,19 @@ def _pick_or_generate_questions(
         "service_latency_ms": None,
         "llm_only": bool(llm_only),
         "allow_local_fallback": bool(allow_local_fallback),
+        "existing_pool_reused": False,
     }
 
-    if len(pool) >= count:
-        return pool, generation_status
-
-    needed = count - len(pool)
     service_result = generate_topic_mcqs(
         subject=subject,
         grade=grade,
         difficulty=difficulty,
         topic=topic,
-        count=needed,
+        count=count,
         seed=seed,
         llm_only=llm_only,
+        test_title=test_title,
+        test_description=test_description,
     )
 
     service_meta = service_result.get("meta") if isinstance(service_result.get("meta"), dict) else {}
@@ -362,6 +355,8 @@ def _pick_or_generate_questions(
         generation_meta_extras={
             "service_meta": service_meta,
             "llm_only": bool(llm_only),
+            "test_title": sanitize_string(test_title or "", max_length=255) or None,
+            "test_description": sanitize_string(test_description or "", max_length=1000) or None,
         },
     )
 
@@ -412,6 +407,24 @@ def _pick_or_generate_questions(
             db.session.flush()
             pool.extend(fallback_records)
         generation_status["local_fallback_count"] = len(fallback_records)
+
+    if len(pool) < count:
+        fallback_needed = count - len(pool)
+        existing_query = Question.query.filter(
+            func.lower(Question.subject) == subject.lower(),
+            Question.grade == grade,
+            Question.difficulty == difficulty,
+        )
+        if topic:
+            existing_query = existing_query.filter(Question.syllabus_topic == topic)
+        if pool:
+            existing_query = existing_query.filter(~Question.id.in_([q.id for q in pool]))
+
+        existing_rows = existing_query.order_by(func.random()).limit(fallback_needed).all()
+        if existing_rows:
+            pool.extend(existing_rows)
+            generation_status["existing_pool_count"] = len(existing_rows)
+            generation_status["existing_pool_reused"] = True
 
     generation_status["generated_count"] = len(pool)
     return pool, generation_status
@@ -531,6 +544,8 @@ def teacher_generate_question_bank():
     grade = sanitize_string(data.get("grade"), max_length=32).lower()
     difficulty = sanitize_string(data.get("difficulty"), max_length=16).lower()
     topic = sanitize_string(data.get("topic") or "", max_length=128) or None
+    test_title = sanitize_string(data.get("title") or "", max_length=255) or None
+    test_description = sanitize_string(data.get("description") or "", max_length=1000) or None
     count = _clamp_int(data.get("count", 10), 10, 1, 50)
     persist = _parse_bool_flag(data.get("persist"), False)
 
@@ -558,6 +573,8 @@ def teacher_generate_question_bank():
         count=count,
         seed=seed,
         llm_only=llm_only,
+        test_title=test_title,
+        test_description=test_description,
     )
 
     service_meta = service_result.get("meta") if isinstance(service_result.get("meta"), dict) else {}
@@ -705,6 +722,8 @@ def teacher_generate_question_bank():
             "service_url": service_result.get("service_url"),
             "llm_only": bool(llm_only),
             "allow_local_fallback": bool(allow_local_fallback),
+            "test_title": test_title,
+            "test_description": test_description,
         },
     )
 
@@ -870,6 +889,8 @@ def create_test():
                 seed=seed,
                 llm_only=llm_only,
                 allow_local_fallback=allow_local_fallback,
+                test_title=title,
+                test_description=description,
             )
             if preview_questions_raw is not None:
                 generation_status["preview_reused_count"] = 0

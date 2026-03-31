@@ -196,6 +196,8 @@ def generate_topic_mcqs(
     count: int,
     seed: int | None = None,
     llm_only: bool | None = None,
+    test_title: str | None = None,
+    test_description: str | None = None,
 ) -> Dict[str, Any]:
     requested_count = max(1, min(int(count), 50))
     effective_llm_only = topic_ai_default_llm_only_mode() if llm_only is None else bool(llm_only)
@@ -216,6 +218,13 @@ def generate_topic_mcqs(
         "seed": seed,
         "llm_only": effective_llm_only,
     }
+
+    clean_title = sanitize_string(test_title or "", max_length=255)
+    clean_description = sanitize_string(test_description or "", max_length=1000)
+    if clean_title:
+        payload["test_title"] = clean_title
+    if clean_description:
+        payload["test_description"] = clean_description
 
     request_body = json.dumps(payload).encode("utf-8")
     request_headers = {
