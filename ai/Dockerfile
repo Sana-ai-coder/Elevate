@@ -15,7 +15,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
+RUN chmod +x /app/start.sh
 
 EXPOSE 7860
 
-CMD ["sh", "-c", "python -m uvicorn app:app --host 0.0.0.0 --port ${PORT:-7860}"]
+CMD ["/app/start.sh"]

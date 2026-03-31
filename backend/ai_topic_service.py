@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import time
 from typing import Any, Dict, List
 from urllib import error as urlerror
 from urllib import request as urlrequest
+from urllib.parse import urlparse
 
 from .validation import sanitize_string
 
@@ -37,13 +39,51 @@ def _parse_bool(raw_value: Any, default: bool) -> bool:
     return default
 
 
+def _to_hf_space_subdomain(owner: str, space: str) -> str:
+    combined = f"{owner}-{space}".strip().lower().replace("_", "-")
+    combined = re.sub(r"[^a-z0-9-]", "-", combined)
+    combined = re.sub(r"-+", "-", combined).strip("-")
+    return combined
+
+
+def _normalize_topic_ai_service_url(raw_url: str) -> str:
+    candidate = str(raw_url or "").strip()
+    if not candidate:
+        return DEFAULT_TOPIC_AI_SERVICE_URL
+
+    # Allow compact "owner/space" format for convenience.
+    if "://" not in candidate and candidate.count("/") == 1 and " " not in candidate:
+        owner, space = [segment.strip() for segment in candidate.split("/", 1)]
+        if owner and space:
+            return f"https://{_to_hf_space_subdomain(owner, space)}.hf.space"
+
+    if candidate.startswith("huggingface.co/"):
+        candidate = f"https://{candidate}"
+
+    parsed = urlparse(candidate)
+    host = (parsed.netloc or "").strip().lower()
+
+    if host in {"huggingface.co", "www.huggingface.co"}:
+        segments = [segment for segment in (parsed.path or "").split("/") if segment]
+        if len(segments) >= 3 and segments[0].lower() == "spaces":
+            owner = segments[1]
+            space = segments[2]
+            return f"https://{_to_hf_space_subdomain(owner, space)}.hf.space"
+
+    if host.endswith(".hf.space"):
+        scheme = (parsed.scheme or "https").strip().lower()
+        return f"{scheme}://{host}"
+
+    return candidate.rstrip("/")
+
+
 def get_topic_ai_service_url() -> str:
-    url = (
+    raw_url = (
         os.environ.get("AI_TOPIC_SERVICE_URL")
         or os.environ.get("TOPIC_AI_SERVICE_URL")
         or DEFAULT_TOPIC_AI_SERVICE_URL
     )
-    return str(url).strip().rstrip("/")
+    return _normalize_topic_ai_service_url(raw_url)
 
 
 def get_topic_ai_timeout_seconds() -> int:

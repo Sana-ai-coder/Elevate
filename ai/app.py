@@ -6,6 +6,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 import sys
+import threading
 import time
 from typing import Dict, List, Optional
 
@@ -27,26 +28,41 @@ from config import PRELOAD_MODEL_ON_STARTUP
 
 
 _MODEL_READY = False
+_PRELOAD_STARTED = False
+_PRELOAD_ERROR: Optional[str] = None
 
 
 def _ensure_generator_loaded():
-    global _MODEL_READY
-    generator = get_mcq_generator()
-    _MODEL_READY = True
-    return generator
+    return get_mcq_generator()
+
+
+def _preload_model_background() -> None:
+    global _MODEL_READY, _PRELOAD_STARTED, _PRELOAD_ERROR
+    _PRELOAD_STARTED = True
+    started = time.perf_counter()
+    try:
+        generator = _ensure_generator_loaded()
+        if hasattr(generator, "ensure_model_loaded"):
+            generator.ensure_model_loaded()
+        _MODEL_READY = bool(getattr(generator, "is_model_loaded", lambda: True)())
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        print(f"[topic-mcq] background model preload completed in {elapsed_ms}ms")
+    except Exception as exc:
+        _MODEL_READY = False
+        _PRELOAD_ERROR = str(exc)
+        print(f"[topic-mcq] preload warning: {exc}")
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     if PRELOAD_MODEL_ON_STARTUP:
-        started = time.perf_counter()
-        try:
-            _ensure_generator_loaded()
-            elapsed_ms = int((time.perf_counter() - started) * 1000)
-            print(f"[topic-mcq] model preloaded in {elapsed_ms}ms")
-        except Exception as exc:
-            # Keep service alive; health endpoint will show model_ready=false until first successful load.
-            print(f"[topic-mcq] preload warning: {exc}")
+        thread = threading.Thread(
+            target=_preload_model_background,
+            name="topic-mcq-preload",
+            daemon=True,
+        )
+        thread.start()
+        print("[topic-mcq] background preload scheduled")
     else:
         print("[topic-mcq] model preload disabled by PRELOAD_MODEL_ON_STARTUP=0")
 
@@ -123,27 +139,39 @@ class ScoreMCQRequest(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
+    generator = _ensure_generator_loaded()
+    model_ready = bool(getattr(generator, "is_model_loaded", lambda: _MODEL_READY)())
+
     model_device = None
-    if _MODEL_READY:
-        try:
-            model_device = str(get_mcq_generator().llm.device)
-        except Exception:
-            model_device = None
+    llm = getattr(generator, "llm", None)
+    if model_ready and llm is not None:
+        model_device = str(getattr(llm, "device", "cpu"))
 
     return {
         "status": "ok",
         "service": "topic-mcq",
-        "model_ready": _MODEL_READY,
+        "model_ready": model_ready,
+        "preload_started": _PRELOAD_STARTED,
+        "preload_error": _PRELOAD_ERROR,
         "device": model_device,
     }
 
 @app.post("/warmup")
 def warmup(authorization: Optional[str] = Header(default=None, alias="Authorization")) -> dict:
+    global _MODEL_READY
     _enforce_service_auth(authorization)
     started = time.perf_counter()
-    _ensure_generator_loaded()
+    generator = _ensure_generator_loaded()
+    if hasattr(generator, "ensure_model_loaded"):
+        generator.ensure_model_loaded()
+    _MODEL_READY = bool(getattr(generator, "is_model_loaded", lambda: True)())
     elapsed_ms = int((time.perf_counter() - started) * 1000)
-    return {"status": "ready", "service": "topic-mcq", "model_ready": True, "warmup_ms": elapsed_ms}
+    return {
+        "status": "ready",
+        "service": "topic-mcq",
+        "model_ready": _MODEL_READY,
+        "warmup_ms": elapsed_ms,
+    }
 
 
 @app.post("/mcq/generate")
@@ -151,6 +179,7 @@ def generate_mcqs(
     payload: GenerateMCQRequest,
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ) -> dict:
+    global _MODEL_READY
     _enforce_service_auth(authorization)
     if payload.source_type.lower() != "topic":
         raise HTTPException(status_code=400, detail="Only source_type='topic' is supported.")
@@ -175,6 +204,7 @@ def generate_mcqs(
             test_title=payload.test_title,
             test_description=payload.test_description,
         )
+        _MODEL_READY = bool(getattr(generator, "is_model_loaded", lambda: _MODEL_READY)())
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"MCQ generation failed: {exc}") from exc
 

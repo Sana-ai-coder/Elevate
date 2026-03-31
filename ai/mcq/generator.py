@@ -7,8 +7,11 @@ from copy import deepcopy
 import json
 import random
 import re
+import threading
 import time
 from typing import Dict, List, Optional
+
+import torch
 
 from config import (
     CPU_LLM_MAX_ATTEMPTS,
@@ -39,10 +42,22 @@ STOPWORDS = {
 
 class MCQGenerator:
     def __init__(self) -> None:
-        self.llm = get_llm_model()
+        self.llm = None
+        self._llm_lock = threading.Lock()
         self._result_cache: OrderedDict[tuple, List[Dict]] = OrderedDict()
         self._cache_limit = 128
         self.last_generation_meta: Dict = {}
+
+    def ensure_model_loaded(self):
+        if self.llm is not None:
+            return self.llm
+        with self._llm_lock:
+            if self.llm is None:
+                self.llm = get_llm_model()
+        return self.llm
+
+    def is_model_loaded(self) -> bool:
+        return self.llm is not None
 
     def _cache_key(
         self,
@@ -83,7 +98,9 @@ class MCQGenerator:
             self._result_cache.popitem(last=False)
 
     def _is_cpu_runtime(self) -> bool:
-        return str(getattr(self.llm, "device", "cpu")).lower() != "cuda"
+        if self.llm is not None:
+            return str(getattr(self.llm, "device", "cpu")).lower() != "cuda"
+        return not torch.cuda.is_available()
 
     def generate_from_topic(
         self,
@@ -614,7 +631,8 @@ class MCQGenerator:
         if requested_count <= 0:
             return []
 
-        is_cpu = self._is_cpu_runtime()
+        llm = self.ensure_model_loaded()
+        is_cpu = str(getattr(llm, "device", "cpu")).lower() != "cuda"
         collected: List[Dict] = []
         attempts = 0
         max_attempts = max(2, requested_count)
@@ -679,7 +697,7 @@ class MCQGenerator:
             if strict_llm and is_cpu:
                 max_time = min(max_time, 10.0)
 
-            response = self.llm.generate(
+            response = llm.generate(
                 prompt=prompt,
                 max_new_tokens=token_cap,
                 temperature=temperature,
@@ -954,10 +972,13 @@ class MCQGenerator:
 
 
 _mcq_generator: MCQGenerator | None = None
+_mcq_generator_lock = threading.Lock()
 
 
 def get_mcq_generator() -> MCQGenerator:
     global _mcq_generator
     if _mcq_generator is None:
-        _mcq_generator = MCQGenerator()
+        with _mcq_generator_lock:
+            if _mcq_generator is None:
+                _mcq_generator = MCQGenerator()
     return _mcq_generator
