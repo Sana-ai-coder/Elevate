@@ -126,6 +126,13 @@ def create_app(config_name: str | None = None) -> Flask:
 
     return app
 
+import logging
+# Mute Werkzeug health check spam
+log = logging.getLogger('werkzeug')
+class HealthCheckFilter(logging.Filter):
+    def filter(self, record):
+        return 'GET /health' not in record.getMessage()
+log.addFilter(HealthCheckFilter())
 
 if __name__ == "__main__":
     env_name = os.environ.get("FLASK_ENV", "development")

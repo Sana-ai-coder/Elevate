@@ -110,40 +110,23 @@ class MCQGenerator:
         safe_test_title = str(test_title or "").strip()
         safe_test_description = str(test_description or "").strip()
         if not safe_topic:
-            inferred_topic = " ".join(part for part in [safe_test_title, safe_test_description] if part).strip()
-            safe_topic = inferred_topic or "general science"
+            safe_topic = " ".join(part for part in [safe_test_title, safe_test_description] if part).strip() or "general science"
 
         requested_count = int(max(1, min(num_questions, 50)))
-
         cache_key = self._cache_key(
-            topic=safe_topic,
-            num_questions=requested_count,
-            difficulty=difficulty,
-            subject=subject,
-            grade=grade,
-            seed=seed,
-            test_title=safe_test_title,
-            test_description=safe_test_description,
+            topic=safe_topic, num_questions=requested_count, difficulty=difficulty,
+            subject=subject, grade=grade, seed=seed, test_title=safe_test_title, test_description=safe_test_description,
         )
 
         cached_rows = self._get_cached(cache_key)
         if cached_rows is not None:
-            final_cached = cached_rows[:requested_count]
-            self.last_generation_meta = {
-                "requested": requested_count,
-                "produced": len(final_cached),
-                "llm_count": len([q for q in final_cached if q.get("source") == "llm"]),
-                "template_count": len([q for q in final_cached if q.get("source") == "template"]),
-                "strict_llm_mode": True,
-                "fallback_used": any(q.get("source") == "template" for q in final_cached),
-                "cache_hit": True,
-            }
-            return final_cached
+            return cached_rows[:requested_count]
 
         context = build_topic_web_context(safe_topic)
         facts = self._extract_facts(context, safe_topic)
 
-        llm_rows = self._generate_llm_mcqs(
+        # 100% LLM Generation. No template fallbacks.
+        final_rows = self._generate_llm_mcqs(
             topic=safe_topic,
             subject=subject,
             grade=grade,
@@ -154,26 +137,94 @@ class MCQGenerator:
             test_description=safe_test_description,
         )
 
-        accepted = [row for row in llm_rows if self._is_quality_question(row)]
-        accepted = self._dedupe_questions(accepted)
-
-        final_rows = accepted[:requested_count]
-
         self.last_generation_meta = {
             "requested": requested_count,
             "produced": len(final_rows),
-            "llm_count": len([q for q in final_rows if q.get("source") == "llm"]),
-            "template_count": len([q for q in final_rows if q.get("source") == "template"]),
+            "llm_count": len(final_rows),
+            "template_count": 0, # Hardcoded to 0 because we removed templates
             "facts_count": len(facts),
             "strict_llm_mode": True,
-            "fallback_used": False,
+            "fallback_used": False, # Never uses fallbacks anymore
             "llm_shortfall": max(0, requested_count - len(final_rows)),
             "cache_hit": False,
-            "test_context_used": bool(safe_test_title or safe_test_description),
         }
 
         self._set_cached(cache_key, final_rows)
         return final_rows
+
+    def _create_llm_prompt(
+        self,
+        *,
+        topic: str,
+        subject: str,
+        grade: str,
+        num_questions: int,
+        difficulty: str,
+        facts: List[str],
+        test_title: str = "",
+        test_description: str = "",
+        existing_questions: Optional[List[str]] = None,
+    ) -> str:
+        # Feed exactly 10 facts so the model reads quickly and responds instantly
+        fact_lines = "\n".join(f"- {fact}" for fact in facts[:10])
+        return (
+            f"Generate EXACTLY {num_questions} multiple-choice questions about '{topic}'.\n"
+            "Use ONLY the facts below. DO NOT output JSON. Use exactly this text format for each question:\n\n"
+            "Question: <the question>\n"
+            "A) <option 1>\n"
+            "B) <option 2>\n"
+            "C) <option 3>\n"
+            "D) <option 4>\n"
+            "Answer: <A, B, C, or D>\n"
+            "Explanation: <one short sentence>\n\n"
+            "Facts:\n"
+            f"{fact_lines}\n"
+        )
+
+    def _generate_llm_mcqs(
+        self,
+        *,
+        topic: str,
+        subject: str,
+        grade: str,
+        difficulty: str,
+        requested_count: int,
+        facts: List[str],
+        test_title: str = "",
+        test_description: str = "",
+    ) -> List[Dict]:
+        llm = self.ensure_model_loaded()
+        collected: List[Dict] = []
+        attempts = 0
+        started = time.perf_counter()
+
+        # Try up to 3 times, but force a hard stop at 85 seconds so Render NEVER times out (504/502 error)
+        while len(collected) < requested_count and attempts < 3:
+            if (time.perf_counter() - started) >= 85.0:
+                break
+
+            remaining = requested_count - len(collected)
+            prompt = self._create_llm_prompt(
+                topic=topic, subject=subject, grade=grade, num_questions=remaining,
+                difficulty=difficulty, facts=facts, test_title=test_title, test_description=test_description
+            )
+
+            response = llm.generate(
+                prompt=prompt,
+                max_new_tokens=1000, # Give it massive room to write everything
+                temperature=0.1,
+                top_p=0.95,
+                max_time=45.0, # 45 seconds per attempt. Lightning fast for plain text.
+            )
+            
+            parsed = self._parse_llm_output(response, difficulty, topic)
+            if parsed:
+                collected.extend(parsed)
+                collected = self._dedupe_questions(collected)
+
+            attempts += 1
+
+        return collected[:requested_count]
 
     def _grade_guidance(self, grade: str) -> str:
         grade_key = str(grade or "").strip().lower()
@@ -210,36 +261,6 @@ class MCQGenerator:
             parts.append(f"Assessment Description: {description}")
         return "\n".join(parts)
 
-    def _create_llm_prompt(
-        self,
-        *,
-        topic: str,
-        subject: str,
-        grade: str,
-        num_questions: int,
-        difficulty: str,
-        facts: List[str],
-        test_title: str = "",
-        test_description: str = "",
-        existing_questions: Optional[List[str]] = None,
-    ) -> str:
-        # We only feed the top 10 facts to reduce reading time for the LLM
-        fact_lines = "\n".join(f"- {fact}" for fact in facts[:10])
-        
-        return (
-            f"Generate exactly {num_questions} multiple-choice questions about {topic}.\n"
-            "Use ONLY these facts:\n"
-            f"{fact_lines}\n\n"
-            "Return ONLY a JSON array. No markdown, no intro. Use this exact schema:\n"
-            "[\n"
-            "  {\n"
-            "    \"question\": \"<question text>\",\n"
-            "    \"options\": [\"<opt1>\", \"<opt2>\", \"<opt3>\", \"<opt4>\"],\n"
-            "    \"answer\": \"<A, B, C, or D>\",\n"
-            "    \"explanation\": \"<short explanation>\"\n"
-            "  }\n"
-            "]"
-        )
 
     def _create_llm_plain_prompt(
         self,
@@ -514,61 +535,7 @@ class MCQGenerator:
 
         return candidates
 
-    def _generate_llm_mcqs(
-        self,
-        *,
-        topic: str,
-        subject: str,
-        grade: str,
-        difficulty: str,
-        requested_count: int,
-        facts: List[str],
-        test_title: str = "",
-        test_description: str = "",
-    ) -> List[Dict]:
-        if requested_count <= 0:
-            return []
-
-        llm = self.ensure_model_loaded()
-        collected: List[Dict] = []
-        attempts = 0
-        max_attempts = 2 # Max 2 attempts to guarantee we don't timeout
-        started = time.perf_counter()
-
-        while len(collected) < requested_count and attempts < max_attempts:
-            # STRICT 85-second kill-switch. Ensure we return to backend before the 120s timeout!
-            if (time.perf_counter() - started) >= 85.0:
-                break
-
-            remaining = requested_count - len(collected)
-            
-            prompt = self._create_llm_prompt(
-                topic=topic,
-                subject=subject,
-                grade=grade,
-                num_questions=remaining, # Ask for all remaining questions at once
-                difficulty=difficulty,
-                facts=facts,
-                test_title=test_title,
-                test_description=test_description,
-            )
-
-            response = llm.generate(
-                prompt=prompt,
-                max_new_tokens=600,
-                temperature=0.1,
-                top_p=0.95,
-                max_time=40.0, # Limit each LLM generation attempt to 40 seconds
-            )
-            
-            parsed = self._parse_llm_output(response, difficulty, topic)
-            if parsed:
-                collected.extend(parsed)
-                collected = self._dedupe_questions(collected)
-
-            attempts += 1
-
-        return collected[:requested_count]
+    
 
     def _extract_facts(self, context: str, topic: str) -> List[str]:
         text = str(context or "").replace("\r", " ").strip()
