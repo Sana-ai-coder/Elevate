@@ -58,14 +58,14 @@ if HF_TOKEN:
 
 # Strict behavior defaults
 LLM_MAX_ATTEMPTS = int(os.environ.get("LLM_MAX_ATTEMPTS", "8"))
-LLM_TOTAL_TIME_BUDGET_SECONDS = float(os.environ.get("LLM_TOTAL_TIME_BUDGET_SECONDS", "28"))
+LLM_TOTAL_TIME_BUDGET_SECONDS = float(os.environ.get("LLM_TOTAL_TIME_BUDGET_SECONDS", "38"))
 
 # Generation controls
-MAX_PROMPT_TOKENS = int(os.environ.get("MAX_PROMPT_TOKENS", "1200"))
-MAX_NEW_TOKENS = int(os.environ.get("MAX_NEW_TOKENS", "280"))
+MAX_PROMPT_TOKENS = int(os.environ.get("MAX_PROMPT_TOKENS", "800"))
+MAX_NEW_TOKENS = int(os.environ.get("MAX_NEW_TOKENS", "1800"))
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.3"))
 TOP_P = float(os.environ.get("TOP_P", "0.92"))
-LLM_GENERATE_MAX_TIME_SECONDS = float(os.environ.get("LLM_GENERATE_MAX_TIME_SECONDS", "8"))
+LLM_GENERATE_MAX_TIME_SECONDS = float(os.environ.get("LLM_GENERATE_MAX_TIME_SECONDS", "35.0"))
 
 # Context retrieval
 WEB_CONTEXT_MAX_CHARS = int(os.environ.get("WEB_CONTEXT_MAX_CHARS", "3200"))

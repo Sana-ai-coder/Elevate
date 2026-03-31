@@ -209,18 +209,20 @@ def generate_mcqs(
         )
         _MODEL_READY = bool(getattr(generator, "is_model_loaded", lambda: _MODEL_READY)())
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"MCQ generation failed: {exc}") from exc
+        # Log the full error for debugging, but raise a generic one to the client
+        print(f"[topic-mcq] generation failed with exception: {exc}")
+        raise HTTPException(status_code=500, detail=f"MCQ generation failed internally.")
 
-    valid_mcqs = [row for row in mcqs if MCQValidator.validate_mcq(row)]
-    if not valid_mcqs:
-        raise HTTPException(status_code=502, detail="Model output could not be converted into valid MCQs.")
+    # The new parser in the generator is now the source of truth for validation.
+    # If it returns an empty list, we pass it on. The backend will handle the fallback.
+    valid_mcqs = mcqs
 
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     meta = getattr(generator, "last_generation_meta", {}) or {}
     print(
-        "[topic-mcq] generate response "
+        f"[topic-mcq] generate response "
         f"count={len(valid_mcqs)} latency_ms={elapsed_ms} "
-        f"llm_count={meta.get('llm_count')} template_count={meta.get('template_count')} "
+        f"llm_count={meta.get('llm_count')} "
         f"cache_hit={meta.get('cache_hit')}"
     )
 

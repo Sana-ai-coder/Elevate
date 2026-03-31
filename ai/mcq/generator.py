@@ -77,23 +77,21 @@ class MCQGenerator:
         test_title: Optional[str] = None,
         test_description: Optional[str] = None,
     ) -> List[Dict]:
-        """
-        Main entry point for question generation.
-        Handles caching, context fetching, and orchestration of the generation process.
-        """
         self.ensure_model_loaded()
 
         safe_topic = str(topic or "").strip()
         safe_test_title = str(test_title or "").strip()
         safe_test_description = str(test_description or "").strip()
-        # If no specific topic is given, derive one from the test title or description
         if not safe_topic:
-            safe_topic = " ".join(part for part in [safe_test_title, safe_test_description] if part).strip() or "general science"
+            safe_topic = " ".join(
+                part for part in [safe_test_title, safe_test_description] if part
+            ).strip() or "general science"
 
         requested_count = int(max(1, min(num_questions, 50)))
         cache_key = self._cache_key(
             topic=safe_topic, num_questions=requested_count, difficulty=difficulty,
-            subject=subject, grade=grade, seed=seed, test_title=safe_test_title, test_description=safe_test_description,
+            subject=subject, grade=grade, seed=seed,
+            test_title=safe_test_title, test_description=safe_test_description,
         )
 
         cached_rows = self._result_cache.get(cache_key)
@@ -101,20 +99,29 @@ class MCQGenerator:
             self._result_cache.move_to_end(cache_key)
             return deepcopy(cached_rows[:requested_count])
 
-        # Fetch external web context to ground the model in facts
-        context = build_topic_web_context(safe_topic)
-        facts = self._extract_facts(context, safe_topic)
+        # Fetch web context with a hard 3-second timeout so it never blocks generation
+        facts: List[str] = []
+        try:
+            import signal
 
-        # Generate questions using the language model
+            def _timeout_handler(signum, frame):
+                raise TimeoutError("web context timed out")
+            if hasattr(signal, 'SIGALRM'):
+                signal.signal(signal.SIGALRM, _timeout_handler)
+                signal.alarm(3)
+            try:
+                context = build_topic_web_context(safe_topic)
+                facts = self._extract_facts(context, safe_topic)
+            finally:
+                signal.alarm(0)
+        except Exception:
+            # Web context is optional — fall back to topic name as a fact
+            facts = [f"{safe_topic} is an important concept in {subject}."]
+
         final_rows = self._generate_llm_mcqs(
-            topic=safe_topic,
-            subject=subject,
-            grade=grade,
-            difficulty=difficulty,
-            requested_count=requested_count,
-            facts=facts,
-            test_title=safe_test_title,
-            test_description=safe_test_description,
+            topic=safe_topic, subject=subject, grade=grade, difficulty=difficulty,
+            requested_count=requested_count, facts=facts,
+            test_title=safe_test_title, test_description=safe_test_description,
             seed=seed,
         )
 
@@ -127,7 +134,6 @@ class MCQGenerator:
             "cache_hit": False,
         }
 
-        # Cache the result
         if final_rows:
             self._result_cache[cache_key] = deepcopy(final_rows)
             if len(self._result_cache) > self._cache_limit:
@@ -159,6 +165,58 @@ class MCQGenerator:
             return "Require synthesis of multiple concepts or nuanced, multi-step reasoning. Distractors should target common misconceptions."
         return "Align the question's challenge level to the requested difficulty."
 
+    # def _create_llm_prompt(
+    #     self,
+    #     *,
+    #     topic: str,
+    #     subject: str,
+    #     grade: str,
+    #     num_questions: int,
+    #     difficulty: str,
+    #     facts: List[str],
+    #     test_title: str = "",
+    #     test_description: str = "",
+    # ) -> str:
+    #     """
+    #     Engineers a detailed, context-rich prompt for the language model.
+    #     This is the core of the AI's "intelligence".
+    #     """
+    #     grade_guidance = self._grade_guidance(grade)
+    #     difficulty_guidance = self._difficulty_guidance(difficulty)
+
+    #     # Create a context block for the test, if provided
+    #     test_context_parts = []
+    #     if test_title:
+    #         test_context_parts.append(f"The test is titled '{test_title}'.")
+    #     if test_description:
+    #         test_context_parts.append(f"Its description is: '{test_description}'.")
+    #     test_context = " ".join(test_context_parts)
+
+    #     # Provide a limited number of facts to keep the prompt focused
+    #     fact_lines = "\n".join(f"- {fact}" for fact in facts[:15])
+
+    #     # The main instruction block, framed as a persona
+    #     return (
+    #         f"You are an expert {subject} curriculum developer creating an assessment for {grade} students.\n"
+    #         f"Your task is to generate {num_questions} high-quality multiple-choice questions about '{topic}'.\n"
+    #         f"{test_context}\n"
+    #         f"Adhere to these rules:\n"
+    #         f"1. Grade Level: {grade_guidance}\n"
+    #         f"2. Difficulty: {difficulty_guidance}\n"
+    #         f"3. Grounding: Base questions on the provided facts. Do not invent information.\n"
+    #         f"4. Format: For each question, you must strictly follow the format shown in the example below, with no extra text.\n\n"
+    #         f"Here is a perfect example of the required format:\n"
+    #         "Question: What is the primary function of the mitochondria in a cell?\n"
+    #         "A) To store genetic information\n"
+    #         "B) To produce energy through cellular respiration\n"
+    #         "C) To synthesize proteins\n"
+    #         "D) To control cell division\n"
+    #         "Answer: B\n"
+    #         "Explanation: Mitochondria are known as the powerhouses of the cell because they generate most of the cell's supply of adenosine triphosphate (ATP).\n\n"
+    #         f"Begin now. Generate {num_questions} questions. Here are the facts to use:\n"
+    #         f"{fact_lines}\n"
+    #     )
+
     def _create_llm_prompt(
         self,
         *,
@@ -171,43 +229,29 @@ class MCQGenerator:
         test_title: str = "",
         test_description: str = "",
     ) -> str:
-        """
-        Engineers a detailed, context-rich prompt for the language model.
-        This is the core of the AI's "intelligence".
-        """
         grade_guidance = self._grade_guidance(grade)
         difficulty_guidance = self._difficulty_guidance(difficulty)
 
-        # Create a context block for the test, if provided
-        test_context_parts = []
-        if test_title:
-            test_context_parts.append(f"The test is titled '{test_title}'.")
-        if test_description:
-            test_context_parts.append(f"Its description is: '{test_description}'.")
-        test_context = " ".join(test_context_parts)
+        # Keep fact list very short to save prompt tokens
+        fact_lines = "\n".join(f"- {fact}" for fact in facts[:6])
 
-        # Provide a limited number of facts to keep the prompt focused
-        fact_lines = "\n".join(f"- {fact}" for fact in facts[:15])
-
-        # The main instruction block, framed as a persona
         return (
-            f"You are an expert {subject} curriculum developer creating an assessment for {grade} students.\n"
-            f"Your task is to generate {num_questions} high-quality multiple-choice questions about '{topic}'.\n"
-            f"{test_context}\n"
-            f"Adhere to these rules:\n"
-            f"1. Grade Level: {grade_guidance}\n"
-            f"2. Difficulty: {difficulty_guidance}\n"
-            f"3. Grounding: Base questions on the provided facts. Do not invent information.\n"
-            f"4. Format: For each question, you must strictly follow this format, with no extra text:\n"
-            "Question: <The question text ending with a question mark>\n"
-            "A) <Option A text>\n"
-            "B) <Option B text>\n"
-            "C) <Option C text>\n"
-            "D) <Option D text>\n"
-            "Answer: <The correct option letter, e.g., A>\n"
-            "Explanation: <A single, concise sentence explaining why the answer is correct>\n\n"
-            f"Begin now. Here are the facts to use:\n"
-            f"{fact_lines}\n"
+            f"You are an expert {subject} teacher. Output ONLY a valid JSON array. No prose, no markdown, no explanation outside the JSON.\n"
+            f"Generate exactly {num_questions} multiple-choice questions about '{topic}' for {grade} students.\n"
+            f"Difficulty: {difficulty_guidance}\n"
+            f"Grade guidance: {grade_guidance}\n"
+            f"Facts to use:\n{fact_lines}\n\n"
+            f"Output format — a JSON array of exactly {num_questions} objects, each with these keys:\n"
+            '  "question": string (must end with ?)\n'
+            '  "options": array of exactly 4 strings [A_text, B_text, C_text, D_text]\n'
+            '  "answer": one of "A", "B", "C", or "D"\n'
+            '  "explanation": one sentence explaining why the answer is correct\n\n'
+            "Rules:\n"
+            "- Output ONLY the JSON array starting with [ and ending with ]\n"
+            "- Do NOT include ```json or any markdown\n"
+            "- All 4 options must be non-empty and distinct\n"
+            "- Every object must have all 4 keys\n\n"
+            "JSON array:\n"
         )
 
     def _generate_llm_mcqs(
@@ -223,81 +267,151 @@ class MCQGenerator:
         test_description: str = "",
         seed: Optional[int] = None,
     ) -> List[Dict]:
-        """
-        Calls the language model and parses its output.
-        Includes a timeout to ensure service reliability.
-        """
         if self.llm is None:
             return []
-        
-        # Set a seed for reproducibility if provided
+
         if seed is not None:
             torch.manual_seed(seed)
             random.seed(seed)
 
+        # Token budget: ~120 tokens per question + 80 buffer
+        tokens_needed = min(1800, max(512, requested_count * 130 + 80))
+
         prompt = self._create_llm_prompt(
             topic=topic, subject=subject, grade=grade, num_questions=requested_count,
-            difficulty=difficulty, facts=facts, test_title=test_title, test_description=test_description
+            difficulty=difficulty, facts=facts, test_title=test_title,
+            test_description=test_description,
         )
-        
-        # The generation has a hard timeout to prevent the service from crashing.
-        # 30 seconds is a safe but generous limit for this task.
-        response = self.llm.generate(
-            prompt=prompt,
-            max_new_tokens=2048,  # Generous token limit
-            temperature=0.2,     # Low temperature for more focused, factual output
-            top_p=0.95,
-            max_time=30.0,
-        )
-        
-        return self._parse_llm_output(response, difficulty, topic)
 
-    def _parse_llm_output(self, response: str, difficulty: str, topic: str) -> List[Dict]:
-        """
-        Parses the plain text output from the LLM into a structured list of question dictionaries.
-        This function is designed to be robust to minor formatting errors from the model.
-        """
-        candidates: List[Dict] = []
+        for attempt in range(2):  # max 2 attempts
+            try:
+                response = self.llm.generate(
+                    prompt=prompt,
+                    max_new_tokens=tokens_needed,
+                    temperature=0.15 if attempt == 0 else 0.05,  # more deterministic on retry
+                    top_p=0.92,
+                    max_time=35.0,
+                )
+                parsed = self._parse_json_output(response, difficulty, topic)
+                if parsed:
+                    return parsed
+                # If parse failed, tighten the prompt on retry
+                prompt = (
+                    f"Output ONLY a JSON array of {requested_count} MCQ objects. "
+                    f"Topic: {topic}. Subject: {subject}. Grade: {grade}. Difficulty: {difficulty}.\n"
+                    'Each object: {"question":"...?","options":["A text","B text","C text","D text"],"answer":"A","explanation":"..."}\n'
+                    "JSON array:\n"
+                )
+            except Exception as exc:
+                print(f"[generator] attempt {attempt + 1} failed: {exc}")
+                if attempt == 1:
+                    raise
+
+        return []
+
+    # def _parse_llm_output(self, response: str, difficulty: str, topic: str) -> List[Dict]:
+    #     """
+    #     Parses the plain text output from the LLM into a structured list of question dictionaries.
+    #     This function is designed to be robust to minor formatting errors from the model.
+    #     """
+    #     candidates: List[Dict] = []
+    #     text = str(response or "").strip()
+
+    #     # Split the entire response into blocks, where each block starts with "Question:"
+    #     question_blocks = re.split(r"(?=^Question:)", text, flags=re.MULTILINE)
+
+    #     for block in question_blocks:
+    #         block = block.strip()
+    #         if not block:
+    #             continue
+
+    #         try:
+    #             question_match = re.search(r"^Question:\s*(.+)", block, re.MULTILINE)
+    #             options_matches = re.findall(r"^[A-D]\)\s*(.+)", block, re.MULTILINE)
+    #             answer_match = re.search(r"^Answer:\s*([A-D])", block, re.MULTILINE)
+    #             explanation_match = re.search(r"^Explanation:\s*(.+)", block, re.MULTILINE)
+
+    #             if question_match and len(options_matches) == 4 and answer_match and explanation_match:
+    #                 question = question_match.group(1).strip()
+    #                 options = [opt.strip() for opt in options_matches]
+    #                 answer = answer_match.group(1).strip()
+    #                 explanation = explanation_match.group(1).strip()
+                    
+    #                 normalized = self._normalize_candidate(
+    #                     item={
+    #                         "question": question,
+    #                         "options": options,
+    #                         "answer": answer,
+    #                         "explanation": explanation,
+    #                     },
+    #                     difficulty=difficulty,
+    #                     topic=topic,
+    #                     source="llm_v2"
+    #                 )
+    #                 if normalized:
+    #                     candidates.append(normalized)
+
+    #         except Exception:
+    #             # Ignore blocks that fail to parse
+    #             continue
+                
+    #     return self._dedupe_questions(candidates)
+
+
+    def _parse_json_output(self, response: str, difficulty: str, topic: str) -> List[Dict]:
+        """Parse JSON array output from the LLM. Robust to common model quirks."""
+    
         text = str(response or "").strip()
 
-        # Split the entire response into blocks, where each block starts with "Question:"
-        question_blocks = re.split(r"(?=^Question:)", text, flags=re.MULTILINE)
+        # Strip markdown fences if model added them anyway
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
+        text = re.sub(r"\s*```$", "", text, flags=re.MULTILINE)
+        text = text.strip()
 
-        for block in question_blocks:
-            block = block.strip()
-            if not block:
-                continue
+        # Extract the first [...] block
+        start = text.find("[")
+        end = text.rfind("]")
+        if start == -1 or end == -1 or end <= start:
+            print(f"[parser] No JSON array found in output. First 200 chars: {text[:200]}")
+            return []
 
+        json_str = text[start:end + 1]
+
+        # Attempt 1: direct parse
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError:
+            # Attempt 2: fix common model errors — trailing commas, single quotes
+            json_str_fixed = re.sub(r",\s*([\]}])", r"\1", json_str)  # trailing commas
+            json_str_fixed = json_str_fixed.replace("'", '"')           # single → double quotes
+            # Fix unescaped newlines inside strings
+            json_str_fixed = re.sub(r'(?<!\\)\n(?=[^"]*")', ' ', json_str_fixed)
             try:
-                question_match = re.search(r"^Question:\s*(.+)", block, re.MULTILINE)
-                options_matches = re.findall(r"^[A-D]\)\s*(.+)", block, re.MULTILINE)
-                answer_match = re.search(r"^Answer:\s*([A-D])", block, re.MULTILINE)
-                explanation_match = re.search(r"^Explanation:\s*(.+)", block, re.MULTILINE)
+                data = json.loads(json_str_fixed)
+            except json.JSONDecodeError as e:
+                print(f"[parser] JSON decode failed after fix attempt: {e}. Snippet: {json_str[:300]}")
+                return []
 
-                if question_match and len(options_matches) == 4 and answer_match and explanation_match:
-                    question = question_match.group(1).strip()
-                    options = [opt.strip() for opt in options_matches]
-                    answer = answer_match.group(1).strip()
-                    explanation = explanation_match.group(1).strip()
-                    
-                    normalized = self._normalize_candidate(
-                        item={
-                            "question": question,
-                            "options": options,
-                            "answer": answer,
-                            "explanation": explanation,
-                        },
-                        difficulty=difficulty,
-                        topic=topic,
-                        source="llm_v2"
-                    )
-                    if normalized:
-                        candidates.append(normalized)
+        if not isinstance(data, list):
+            # Model may have returned {"questions": [...]}
+            if isinstance(data, dict):
+                for key in ("questions", "mcqs", "items", "data"):
+                    if isinstance(data.get(key), list):
+                        data = data[key]
+                        break
+            if not isinstance(data, list):
+                return []
 
-            except Exception:
-                # Ignore blocks that fail to parse
+        candidates: List[Dict] = []
+        for item in data:
+            if not isinstance(item, dict):
                 continue
-                
+            normalized = self._normalize_candidate(
+                item=item, difficulty=difficulty, topic=topic, source="llm_json"
+            )
+            if normalized:
+                candidates.append(normalized)
+
         return self._dedupe_questions(candidates)
 
     def _normalize_candidate(self, item: Dict, difficulty: str, topic: str, source: str) -> Optional[Dict]:
@@ -310,7 +424,7 @@ class MCQGenerator:
         if not isinstance(options, list) or len(options) != 4:
             return None
         
-        answer = str(item.get("answer") or "").strip().upper()
+        answer = str(item.get("answer") or item.get("correct_answer") or "").strip().upper()
         if answer not in ["A", "B", "C", "D"]:
             return None
             
