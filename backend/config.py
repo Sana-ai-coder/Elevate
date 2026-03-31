@@ -42,6 +42,19 @@ def _build_supabase_direct_url(project_url: str) -> str | None:
 
 
 def normalize_database_url(raw_value: str | None) -> str:
+    # First, check for the recommended environment variable for Supabase deployments.
+    # This provides a direct path for production and preview environments, bypassing
+    # complex normalization logic that might fail in containerized/serverless runtimes.
+    pooler_url = _first_non_empty_env("SUPABASE_POOLER_CONNECTION_STRING")
+    if pooler_url:
+        if pooler_url.startswith("postgres://"):
+            return pooler_url.replace("postgres://", "postgresql://", 1)
+        if pooler_url.startswith("postgresql://"):
+            return pooler_url
+        raise ValueError(
+            "Invalid SUPABASE_POOLER_CONNECTION_STRING: Must start with 'postgresql://' or 'postgres://'"
+        )
+
     value = (raw_value or "").strip()
     if not value:
         value = _first_non_empty_env(

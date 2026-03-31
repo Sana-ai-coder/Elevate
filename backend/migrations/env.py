@@ -11,6 +11,10 @@ from alembic import context
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from backend.models import db
+# This import is essential for Alembic to 'see' the models.
+# It executes the backend/models.py file, which registers the model
+# classes (User, School, etc.) with the `db.metadata` object.
+import backend.models
 from backend.config import normalize_database_url
 
 # this is the Alembic Config object, which provides
@@ -42,7 +46,11 @@ if config.config_file_name is not None:
 
 # add your model's MetaData object here
 # for 'autogenerate' support
-target_metadata = db.metadata
+# target_metadata = db.metadata
+from backend.app import create_app
+app = create_app(os.getenv("FLASK_ENV") or "development")
+with app.app_context():
+    target_metadata = db.metadata
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:

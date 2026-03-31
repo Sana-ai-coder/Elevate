@@ -69,9 +69,9 @@ def create_app(config_name: str | None = None) -> Flask:
 
     db.init_app(app)
 
-    with app.app_context():
-        db.create_all()
-        app.logger.info("Database tables created/verified")
+    # with app.app_context():
+    #     db.create_all()
+    #     app.logger.info("Database tables created/verified")
 
     app.url_map.strict_slashes = False
 
