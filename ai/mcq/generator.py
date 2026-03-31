@@ -223,40 +223,25 @@ class MCQGenerator:
         test_description: str = "",
         existing_questions: Optional[List[str]] = None,
     ) -> str:
-        fact_lines = "\n".join(f"- {fact}" for fact in facts[:18])
+        fact_lines = "\n".join(f"- {fact}" for fact in facts[:15])
         test_context = self._test_context_block(test_title, test_description)
         grade_guidance = self._grade_guidance(grade)
         difficulty_guidance = self._difficulty_guidance(difficulty)
-        avoid_repeat = ""
-        if existing_questions:
-            history = "\n".join(f"- {q}" for q in existing_questions[:12] if q)
-            if history:
-                avoid_repeat = (
-                    "Do not repeat or paraphrase the following already generated questions:\n"
-                    f"{history}\n\n"
-                )
-
+        
         return (
-            "Generate high-quality exam-style multiple-choice questions using only the facts below.\n"
-            "Return ONLY valid JSON as an array with keys: question, options, answer, explanation.\n"
-            "Use ONLY option keys A, B, C, D. Never output E or F options.\n"
-            "If you cannot satisfy the rules, output [] exactly.\n"
+            f"Generate exactly {num_questions} high-quality exam-style multiple-choice questions using only the facts below.\n"
+            "Do NOT output JSON. Use EXACTLY this compact format for EACH question:\n\n"
+            "Question: <text ending with ?>\n"
+            "A) <option>\n"
+            "B) <option>\n"
+            "C) <option>\n"
+            "D) <option>\n"
+            "Answer: <A|B|C|D>\n"
+            "Explanation: <one short sentence>\n\n"
             "Rules:\n"
-            "1) Each question must be clear, readable, and end with a question mark.\n"
-            "2) options must be exactly 4 unique, sensible, and concise choices.\n"
-            "3) answer must be one of A, B, C, D and must match options.\n"
-            "4) Avoid trick wording, vague language, and duplicate options.\n"
-            "5) explanation must be one short sentence (max 20 words).\n"
-            "6) Questions must be factual, specific, and grade-appropriate.\n\n"
-            "Schema example:\n"
-            "[\n"
-            "  {\n"
-            "    \"question\": \"Which statement about Newton's second law is correct?\",\n"
-            "    \"options\": {\"A\": \"Force equals mass times acceleration.\", \"B\": \"Energy equals mass times acceleration.\", \"C\": \"Momentum equals force times velocity.\", \"D\": \"Power equals force times distance.\"},\n"
-            "    \"answer\": \"A\",\n"
-            "    \"explanation\": \"Newton's second law is F = m * a.\"\n"
-            "  }\n"
-            "]\n\n"
+            "1) Output all 4 options.\n"
+            "2) Separate each question with a blank line.\n"
+            "3) Do not include any intro or outro text.\n\n"
             f"Subject: {subject}\n"
             f"Grade: {grade}\n"
             f"Difficulty: {difficulty}\n"
@@ -265,7 +250,6 @@ class MCQGenerator:
             f"Grade Guidance: {grade_guidance}\n"
             f"Difficulty Guidance: {difficulty_guidance}\n"
             f"{test_context}\n\n"
-            f"{avoid_repeat}"
             "Facts:\n"
             f"{fact_lines}\n"
         )
@@ -559,80 +543,53 @@ class MCQGenerator:
             return []
 
         llm = self.ensure_model_loaded()
-        is_cpu = str(getattr(llm, "device", "cpu")).lower() != "cuda"
         collected: List[Dict] = []
         attempts = 0
-        max_attempts = max(LLM_MAX_ATTEMPTS, requested_count * 3)
-        if is_cpu:
-            max_attempts = min(max_attempts, max(CPU_LLM_MAX_ATTEMPTS, requested_count * 4))
-
+        max_attempts = 3
         started = time.perf_counter()
-        consecutive_empty = 0
 
         while len(collected) < requested_count and attempts < max_attempts:
-            if (time.perf_counter() - started) >= max(8.0, LLM_TOTAL_TIME_BUDGET_SECONDS):
+            if (time.perf_counter() - started) >= 110.0:
                 break
 
             remaining = requested_count - len(collected)
-            if is_cpu:
-                batch_size = min(1, remaining)
-            else:
-                batch_size = min(LLM_BATCH_SIZE, remaining)
+            
+            # REMOVED the CPU batch size restriction. Ask for all remaining questions at once!
+            batch_size = remaining 
 
             existing_questions = [str(row.get("question") or "") for row in collected if row.get("question")]
-            if batch_size == 1:
-                prompt = self._create_llm_plain_prompt(
-                    topic=topic,
-                    subject=subject,
-                    grade=grade,
-                    difficulty=difficulty,
-                    facts=facts,
-                    test_title=test_title,
-                    test_description=test_description,
-                    existing_questions=existing_questions,
-                )
-            else:
-                prompt = self._create_llm_prompt(
-                    topic=topic,
-                    subject=subject,
-                    grade=grade,
-                    num_questions=batch_size,
-                    difficulty=difficulty,
-                    facts=facts,
-                    test_title=test_title,
-                    test_description=test_description,
-                    existing_questions=existing_questions,
-                )
+            
+            prompt = self._create_llm_prompt(
+                topic=topic,
+                subject=subject,
+                grade=grade,
+                num_questions=batch_size,
+                difficulty=difficulty,
+                facts=facts,
+                test_title=test_title,
+                test_description=test_description,
+                existing_questions=existing_questions,
+            )
 
-            token_cap = min(max(160, batch_size * 85), 360)
-            if is_cpu:
-                cpu_token_cap = max(32, CPU_LLM_MAX_NEW_TOKENS)
-                cpu_token_cap = max(cpu_token_cap, 200)
-                token_cap = min(token_cap, cpu_token_cap)
+            # A 5-question text block takes about 350-450 tokens. 
+            # We give the CPU enough tokens to finish the whole batch in one try.
+            token_cap = 500 
 
-            temperature = 0.0 if attempts == 0 else 0.1
-            top_p = 0.95 if attempts == 0 else 0.98
-            max_time = LLM_GENERATE_MAX_TIME_SECONDS
-            if is_cpu:
-                max_time = min(max_time, 10.0)
+            # Let the CPU think for up to 45 seconds for the single batch
+            max_time = 45.0 
 
             response = llm.generate(
                 prompt=prompt,
                 max_new_tokens=token_cap,
-                temperature=temperature,
-                top_p=top_p,
+                temperature=0.1,
+                top_p=0.95,
                 max_time=max_time,
             )
+            
             parsed = self._parse_llm_output(response, difficulty, topic)
             if parsed:
                 collected.extend(parsed)
                 collected = self._dedupe_questions(collected)
-                consecutive_empty = 0
-            else:
-                consecutive_empty += 1
-
-            if consecutive_empty >= 3 and len(collected) > 0:
-                break
 
             attempts += 1
 
