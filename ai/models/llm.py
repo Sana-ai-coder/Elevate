@@ -18,7 +18,7 @@ class LanguageModel:
             or os.environ.get("INFERENCE_API_MODEL")
             or DEFAULT_INFERENCE_API_MODEL
         )
-        self.api_url = f"https://api-inference.huggingface.co/models/{self.model_id}"
+        self.api_url = f"https://router.huggingface.co/models/{self.model_id}"
         
         # 1. FIX: Properly handle missing tokens
         self.api_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
