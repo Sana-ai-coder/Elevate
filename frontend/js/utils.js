@@ -124,7 +124,8 @@ export const utils = {
       confused: '😕',
       focused: '🧠',
       bored: '😑',
-      angry: '😠'
+      angry: '😠',
+      surprised: '😮'
     };
 
     icon.textContent = icons[type] || icons.info;

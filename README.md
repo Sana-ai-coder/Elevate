@@ -277,8 +277,9 @@ Elevate shifts the paradigm from simple CRUD operations to an intelligent, state
 * **Item Response Theory (IRT) Integration:** Questions are served dynamically based on their mathematical difficulty and the student's demonstrated skill boundary, preventing frustration or boredom.
 
 ### 2. Affective Computing Engine (Emotion-Aware Routing)
-* **Real-Time Webcam Tracking:** Integrates lightweight browser-based computer vision (via MediaPipe/TensorFlow.js) to track user engagement and emotional states (frustration, focus, confusion) during testing.
+* **Real-Time Webcam Tracking:** Integrates lightweight browser-based computer vision (via MediaPipe/TensorFlow.js) to track seven core states during learning: happy, angry, neutral, confused, bored, focused, and surprised.
 * **Contextual Adaptation:** If high frustration is detected alongside repeated failures, the system automatically down-scales difficulty or triggers the AI Tutor.
+* **Dataset Setup Guide:** See [EMOTION_DATASET_GUIDE.md](EMOTION_DATASET_GUIDE.md) for class-folder layout, balancing targets, and distribution guidance.
 
 ### 3. Predictive Analytics for Educators
 * **At-Risk Modeling:** Utilizes tabular ML classifiers (e.g., Random Forest/XGBoost) trained on historical interaction data (time-per-question, emotion logs, scores) to flag students at high risk of failing upcoming modules.

@@ -2012,8 +2012,10 @@ function normalizeSubjectRows(subjectRows) {
 
 function normalizeEmotionDistribution(emotionsData) {
   const emotionAliasMap = {
-    surprise: 'bored',
-    surprised: 'bored',
+    surprise: 'surprised',
+    surprised: 'surprised',
+    amazement: 'surprised',
+    amazed: 'surprised',
     confusing: 'confused',
     confused: 'confused',
     frustration: 'confused',

@@ -1,9 +1,9 @@
 /**
  * emotion-detector-tfjs.js  — Elevate Emotion Detection Engine
  * ==============================================================
- * Model: HOG(48×48) → Dense(512,relu) → Dense(128,relu) → Dense(6,softmax)
+ * Model: HOG(48×48) → Dense(512,relu) → Dense(128,relu) → Dense(N,softmax)
  * Trained by: train_emotion_fast.py
- * Classes: happy | bored | focused | confused | neutral | angry
+ * Canonical classes: happy | bored | focused | confused | neutral | angry | surprised
  *
  * BUGS FIXED IN THIS VERSION
  * ──────────────────────────
@@ -33,7 +33,7 @@
  * FIX 5 — Temperature scaling removed (mathematically wrong post-softmax).
  *   Class balance weights handle sharpening correctly.
  *
- * FIX 6 — FaceMesh throttled to 10fps; inference at 2.5fps.
+ * FIX 6 — FaceMesh throttled and inference loop overlap prevention.
  *   Root cause: FaceMesh ran every rAF frame (30fps) burning CPU unnecessarily.
  */
 
@@ -46,11 +46,34 @@ const MODE_TFJS   = 'tfjs';
 const MODE_SIM    = 'simulation';
 
 // Class names — MUST match train_emotion_fast.py CLASS_NAMES order exactly
-const CLASS_NAMES = ['happy', 'bored', 'focused', 'confused', 'neutral', 'angry'];
+const CLASS_NAMES = ['happy', 'bored', 'focused', 'confused', 'neutral', 'angry', 'surprised'];
+const LEGACY_CLASS_NAMES_6 = ['happy', 'bored', 'focused', 'confused', 'neutral', 'angry'];
+const LEGACY_CLASS_NAMES_4 = ['angry', 'confused', 'happy', 'neutral'];
+
+const CLASS_NAME_ALIASES = {
+  surprise: 'surprised',
+  surprised: 'surprised',
+  amazement: 'surprised',
+  amazed: 'surprised',
+  joy: 'happy',
+  happiness: 'happy',
+  happy: 'happy',
+  anger: 'angry',
+  angry: 'angry',
+  focus: 'focused',
+  focused: 'focused',
+  confusion: 'confused',
+  confused: 'confused',
+  confusing: 'confused',
+  calm: 'neutral',
+  neutral: 'neutral',
+  bore: 'bored',
+  bored: 'bored',
+};
 
 const EMOTION_EMOJI = {
   happy: '😊', bored: '😑', focused: '🧠',
-  confused: '😕', neutral: '😐', angry: '😠',
+  confused: '😕', neutral: '😐', angry: '😠', surprised: '😮',
 };
 
 // HOG parameters — MUST match train_emotion_fast.py exactly
@@ -77,25 +100,32 @@ const SMOOTH_LEAK  = 0.02;
 
 // FIX 4: Class balance weights from 1/recall, normalised to mean=1
 // Source: training console output test metrics
-const CLASS_BALANCE_WEIGHTS = {
-  happy: 0.985, bored: 0.731, focused: 0.733,
-  confused: 0.854, neutral: 1.299, angry: 1.398,
+const DEFAULT_CLASS_BALANCE_WEIGHTS = {
+  happy: 0.99,
+  bored: 0.90,
+  focused: 0.92,
+  confused: 1.00,
+  neutral: 1.08,
+  angry: 0.86,
+  surprised: 1.05,
 };
 const CLASS_WEIGHT_MIN = 0.78;
 const CLASS_WEIGHT_MAX = 1.32;
 
-const CLASS_PRIOR_MULTIPLIERS = {
+const DEFAULT_CLASS_PRIOR_MULTIPLIERS = {
   happy: 1.0,
   bored: 1.0,
   focused: 1.03,
   confused: 1.02,
   neutral: 1.04,
   angry: 0.94,
+  surprised: 1.02,
 };
 
-// FIX 6: Separate timers for FaceMesh and inference
-const FACEMESH_INTERVAL_MS  = 100;  // ~10fps
-const INFERENCE_INTERVAL_MS = 400;  // ~2.5fps
+// Low-latency schedule with overlap guards
+const FACEMESH_INTERVAL_MS  = 85;   // ~12fps face tracking
+const INFERENCE_INTERVAL_MS = 300;  // ~3.3fps emotion inference
+const SERVER_INFERENCE_TIMEOUT_MS = 1800;
 
 
 export const emotionDetector = {
@@ -110,10 +140,14 @@ export const emotionDetector = {
   // FIX 1: Populated from model.getWeights()[6] and [7]
   _scalerMean: null,
   _scalerStd:  null,
+  _modelClassNames: CLASS_NAMES.slice(),
+  _classBalanceWeights: { ...DEFAULT_CLASS_BALANCE_WEIGHTS },
+  _classPriorMultipliers: { ...DEFAULT_CLASS_PRIOR_MULTIPLIERS },
 
   inferenceMode:         MODE_SIM,
   detectionActive:       false,
   isRunningFacemesh:     false,
+  isRunningInference:    false,
   serverModelAvailable:  false,
   serverStatusChecked:   false,
 
@@ -261,7 +295,7 @@ export const emotionDetector = {
       return;
     }
 
-    // FIX 6: FaceMesh at 10fps, inference at 2.5fps — separate timers
+    // Face tracking and inference run on separate guarded timers.
     this._facemeshTimer = setInterval(async () => {
       if (!this.detectionActive || this.isRunningFacemesh) return;
       this.isRunningFacemesh = true;
@@ -270,8 +304,10 @@ export const emotionDetector = {
     }, FACEMESH_INTERVAL_MS);
 
     this._inferenceTimer = setInterval(async () => {
-      if (!this.detectionActive) return;
-      await this._runInference();
+      if (!this.detectionActive || this.isRunningInference) return;
+      this.isRunningInference = true;
+      try { await this._runInference(); }
+      finally { this.isRunningInference = false; }
     }, INFERENCE_INTERVAL_MS);
   },
 
@@ -288,6 +324,7 @@ export const emotionDetector = {
       this.animationFrameId = null;
     }
     this.isRunningFacemesh = false;
+    this.isRunningInference = false;
     this.isDetectingFrame  = false;
   },
 
@@ -343,8 +380,8 @@ export const emotionDetector = {
    *   [1] dense_1/bias    (512,)
    *   [2] dense_2/kernel  (512, 128)
    *   [3] dense_2/bias    (128,)
-   *   [4] dense_3/kernel  (128, 6)
-   *   [5] dense_3/bias    (6,)
+  *   [4] dense_3/kernel  (128, N)
+  *   [5] dense_3/bias    (N,)
    *   [6] scaler/mean     (1764,)   ← StandardScaler mean
    *   [7] scaler/std      (1764,)   ← StandardScaler scale
    */
@@ -380,6 +417,8 @@ export const emotionDetector = {
               console.warn('[EmotionDetector] Scaler unavailable for two-head TF.js model; accuracy may degrade');
             }
 
+            this._ensureModelClassNames();
+
             this.inferenceMode = MODE_TFJS;
             console.info('[EmotionDetector] TF.js two-head models loaded');
             return true;
@@ -404,6 +443,8 @@ export const emotionDetector = {
       if (!scalerLoaded) {
         console.warn('[EmotionDetector] Scaler unavailable for single-head TF.js model; accuracy may degrade');
       }
+
+      this._ensureModelClassNames();
 
       this.inferenceMode = MODE_TFJS;
       console.info('[EmotionDetector] TF.js single-head model loaded');
@@ -445,7 +486,7 @@ export const emotionDetector = {
 
   async _hydrateScalerFromModelMeta(modelUrl) {
     if (!modelUrl) return false;
-    if (this._scalerMean && this._scalerStd) return true;
+    if (this._scalerMean && this._scalerStd && this._modelMetaCache?.url === modelUrl) return true;
     if (this._modelMetaCache && this._modelMetaCache.url === modelUrl) {
       return Boolean(this._modelMetaCache.loaded);
     }
@@ -456,7 +497,9 @@ export const emotionDetector = {
         return false;
       }
       const json = await resp.json();
-      const loaded = this._applyScalerFromMeta(json?.elevate_meta);
+      const meta = json?.elevate_meta || {};
+      this._applyModelMetadata(meta);
+      const loaded = this._applyScalerFromMeta(meta);
       this._modelMetaCache = { url: modelUrl, loaded };
       return loaded;
     } catch (err) {
@@ -515,6 +558,80 @@ export const emotionDetector = {
     return false;
   },
 
+  _canonicalEmotionName(value) {
+    const key = String(value || '').trim().toLowerCase();
+    return CLASS_NAME_ALIASES[key] || key;
+  },
+
+  _applyModelMetadata(metaSection) {
+    if (!metaSection || typeof metaSection !== 'object') {
+      return;
+    }
+
+    const rawClassNames = Array.isArray(metaSection.class_names)
+      ? metaSection.class_names.map((name) => this._canonicalEmotionName(name)).filter(Boolean)
+      : [];
+
+    if (rawClassNames.length) {
+      this._modelClassNames = rawClassNames;
+    }
+
+    const sanitiseMap = (candidateMap, defaults) => {
+      if (!candidateMap || typeof candidateMap !== 'object') {
+        return { ...defaults };
+      }
+
+      const merged = {};
+      for (const className of CLASS_NAMES) {
+        const rawValue = Number(candidateMap[className]);
+        merged[className] = Number.isFinite(rawValue) && rawValue > 0
+          ? rawValue
+          : defaults[className];
+      }
+      return merged;
+    };
+
+    this._classBalanceWeights = sanitiseMap(
+      metaSection.class_balance_weights,
+      DEFAULT_CLASS_BALANCE_WEIGHTS,
+    );
+    this._classPriorMultipliers = sanitiseMap(
+      metaSection.class_prior_multipliers,
+      DEFAULT_CLASS_PRIOR_MULTIPLIERS,
+    );
+  },
+
+  _ensureModelClassNames() {
+    const sourceModel = this.tfjsEmotionHeadModel || this.tfjsModel;
+    const units = Number(
+      sourceModel?.outputs?.[0]?.shape?.[1]
+      || sourceModel?.outputShape?.[1]
+      || 0
+    );
+
+    if (Array.isArray(this._modelClassNames)
+      && this._modelClassNames.length
+      && (units <= 0 || this._modelClassNames.length === units)) {
+      return;
+    }
+
+    if (units === CLASS_NAMES.length) {
+      this._modelClassNames = CLASS_NAMES.slice();
+      return;
+    }
+    if (units === LEGACY_CLASS_NAMES_6.length) {
+      this._modelClassNames = LEGACY_CLASS_NAMES_6.slice();
+      return;
+    }
+    if (units === LEGACY_CLASS_NAMES_4.length) {
+      this._modelClassNames = LEGACY_CLASS_NAMES_4.slice();
+      return;
+    }
+
+    const fallbackSize = Math.max(1, Math.min(units || CLASS_NAMES.length, CLASS_NAMES.length));
+    this._modelClassNames = CLASS_NAMES.slice(0, fallbackSize);
+  },
+
 
   // ═══════════════════════════════════════════
   //  DETECTION LOOPS
@@ -547,16 +664,18 @@ export const emotionDetector = {
   async _runInference() {
     if (!this._lastFacePrediction && !this.serverModelAvailable) return;
     let result = null;
+    const hasTfjsModel = Boolean(this.tfjsEmotionHeadModel || this.tfjsModel);
 
-    if (this.serverModelAvailable) {
-      result = await this._serverInference(this._lastFacePrediction);
-      if (result) this.inferenceMode = MODE_SERVER;
-      else this.serverModelAvailable = false;
-    }
-
-    if (!result && (this.tfjsEmotionHeadModel || this.tfjsModel)) {
+    // Prefer local TF.js for lower latency; use server as fallback.
+    if (hasTfjsModel) {
       result = await this._tfjsInference(this._lastFacePrediction);
       if (result) this.inferenceMode = MODE_TFJS;
+    }
+
+    if (!result && this.serverModelAvailable) {
+      result = await this._serverInference(this._lastFacePrediction);
+      if (result) this.inferenceMode = MODE_SERVER;
+      else if (!hasTfjsModel) this.serverModelAvailable = false;
     }
 
     if (!result) return;
@@ -595,7 +714,7 @@ export const emotionDetector = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ image: b64 }),
-        signal: AbortSignal.timeout(3000),
+        signal: AbortSignal.timeout(SERVER_INFERENCE_TIMEOUT_MS),
       });
       if (!resp.ok) return null;
       const data = await resp.json();
@@ -620,23 +739,92 @@ export const emotionDetector = {
         return Array.from(emotionModel.predict(t).dataSync());
       });
 
-      if (!rawProbs || rawProbs.length !== CLASS_NAMES.length) return null;
+      if (!rawProbs || !rawProbs.length) return null;
+      this._ensureModelClassNames();
+      const mappedScores = this._mapScoresToCanonical(rawProbs, this._modelClassNames);
+      if (!mappedScores) return null;
 
       // Step 4: FIX 4 — recall-derived class balance
-      const probsArr = this._applyClassBalance(rawProbs);
+      const balancedScores = this._applyClassBalance(mappedScores);
       const engagementScore = this._inferEngagementScore(scaled);
-      const topIdx   = probsArr.indexOf(Math.max(...probsArr));
+      const ranked = Object.entries(balancedScores).sort((a, b) => b[1] - a[1]);
 
       return {
-        emotion:    CLASS_NAMES[topIdx],
-        confidence: probsArr[topIdx],
+        emotion:    ranked[0]?.[0] || 'neutral',
+        confidence: Number(ranked[0]?.[1] || 0),
         engagement_score: engagementScore,
-        all_scores: Object.fromEntries(CLASS_NAMES.map((c, i) => [c, probsArr[i]])),
+        all_scores: balancedScores,
       };
     } catch (err) {
       console.warn('[EmotionDetector] TF.js inference error:', err.message);
       return null;
     }
+  },
+
+  _classListEquals(left, right) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+      return false;
+    }
+    for (let i = 0; i < left.length; i++) {
+      if (left[i] !== right[i]) return false;
+    }
+    return true;
+  },
+
+  _mapScoresToCanonical(rawProbs, sourceClassNames) {
+    const probs = Array.from(rawProbs || []).map((value) => Math.max(0, Number(value || 0)));
+    if (!probs.length) return null;
+
+    const sourceLabels = Array.isArray(sourceClassNames)
+      ? sourceClassNames.map((name) => this._canonicalEmotionName(name)).filter(Boolean)
+      : [];
+
+    if (sourceLabels.length === CLASS_NAMES.length && this._classListEquals(sourceLabels, CLASS_NAMES)) {
+      return this._normalizeScoreMap(
+        Object.fromEntries(CLASS_NAMES.map((className, index) => [className, probs[index] || 0])),
+      );
+    }
+
+    if (sourceLabels.length === LEGACY_CLASS_NAMES_6.length && this._classListEquals(sourceLabels, LEGACY_CLASS_NAMES_6)) {
+      const oldScores = Object.fromEntries(LEGACY_CLASS_NAMES_6.map((name, idx) => [name, probs[idx] || 0]));
+      const surprised = (0.58 * oldScores.happy) + (0.22 * oldScores.confused) + (0.20 * oldScores.neutral);
+      return this._normalizeScoreMap({ ...oldScores, surprised });
+    }
+
+    if (sourceLabels.length === LEGACY_CLASS_NAMES_4.length && this._classListEquals(sourceLabels, LEGACY_CLASS_NAMES_4)) {
+      const oldScores = Object.fromEntries(LEGACY_CLASS_NAMES_4.map((name, idx) => [name, probs[idx] || 0]));
+      const happy = Number(oldScores.happy || 0);
+      const confused = Number(oldScores.confused || 0);
+      const neutral = Number(oldScores.neutral || 0);
+      const angry = Number(oldScores.angry || 0);
+      const bored = 0.60 * neutral + 0.40 * confused;
+      const focused = 0.62 * neutral + 0.38 * happy;
+      const surprised = 0.52 * happy + 0.30 * confused + 0.18 * neutral;
+      return this._normalizeScoreMap({ happy, bored, focused, confused, neutral, angry, surprised });
+    }
+
+    const mapped = Object.fromEntries(CLASS_NAMES.map((className) => [className, 0]));
+    if (sourceLabels.length === probs.length) {
+      sourceLabels.forEach((label, idx) => {
+        if (label in mapped) {
+          mapped[label] += probs[idx] || 0;
+        }
+      });
+      return this._normalizeScoreMap(mapped);
+    }
+
+    if (probs.length === LEGACY_CLASS_NAMES_6.length) {
+      return this._mapScoresToCanonical(probs, LEGACY_CLASS_NAMES_6);
+    }
+    if (probs.length === LEGACY_CLASS_NAMES_4.length) {
+      return this._mapScoresToCanonical(probs, LEGACY_CLASS_NAMES_4);
+    }
+
+    const upto = Math.min(CLASS_NAMES.length, probs.length);
+    for (let i = 0; i < upto; i++) {
+      mapped[CLASS_NAMES[i]] = probs[i] || 0;
+    }
+    return this._normalizeScoreMap(mapped);
   },
 
   // FIX 1: Apply StandardScaler — z = (x - mean) / std
@@ -654,17 +842,16 @@ export const emotionDetector = {
   },
 
   // FIX 4: Recall-derived class balance weights
-  _applyClassBalance(probs) {
-    const weighted = probs.map((p, i) => {
-      const className = CLASS_NAMES[i];
-      const rawWeight = Number(CLASS_BALANCE_WEIGHTS[className] ?? 1.0);
+  _applyClassBalance(scoreMap) {
+    const weighted = {};
+    for (const className of CLASS_NAMES) {
+      const probability = Number(scoreMap?.[className] || 0);
+      const rawWeight = Number(this._classBalanceWeights[className] ?? 1.0);
       const boundedWeight = Math.max(CLASS_WEIGHT_MIN, Math.min(CLASS_WEIGHT_MAX, rawWeight));
-      const prior = Number(CLASS_PRIOR_MULTIPLIERS[className] ?? 1.0);
-      return Number(p || 0) * boundedWeight * prior;
-    });
-    const total    = weighted.reduce((s, v) => s + v, 0);
-    if (!total || !isFinite(total)) return probs;
-    return weighted.map(v => v / total);
+      const prior = Number(this._classPriorMultipliers[className] ?? 1.0);
+      weighted[className] = Math.max(0, probability) * boundedWeight * prior;
+    }
+    return this._normalizeScoreMap(weighted);
   },
 
   _inferEngagementScore(scaledFeatures) {
@@ -725,10 +912,20 @@ export const emotionDetector = {
         adjusted.angry *= 0.70;
       }
 
+      if (landmarks.surpriseHint) {
+        adjusted.surprised *= 1.24;
+        adjusted.angry *= 0.74;
+        adjusted.bored *= 0.82;
+      }
+
       if (landmarks.calmBrow && !landmarks.browFurrowStrong) {
         adjusted.angry *= 0.66;
         adjusted.neutral *= 1.10;
         adjusted.focused *= 1.07;
+      }
+
+      if (!landmarks.browFurrowStrong && landmarks.eyeOpenAvg > 0.03) {
+        adjusted.angry *= 0.82;
       }
 
       if (landmarks.browFurrowStrong && landmarks.eyeNarrow) {
@@ -816,12 +1013,16 @@ export const emotionDetector = {
     const eyeOpenLeft = distance(leftEyeTop, leftEyeBottom) / faceWidth;
     const eyeOpenRight = distance(rightEyeTop, rightEyeBottom) / faceWidth;
     const eyeOpenAvg = (eyeOpenLeft + eyeOpenRight) / 2;
+    const smileHint = mouthWidth > 0.34 && mouthOpen > 0.025;
 
     return {
-      smileHint: mouthWidth > 0.34 && mouthOpen > 0.025,
+      smileHint,
       calmBrow: browEyeAvg > 0.09,
       browFurrowStrong: browGap < 0.165,
       eyeNarrow: eyeOpenAvg < 0.028,
+      eyeOpenAvg,
+      mouthOpen,
+      surpriseHint: eyeOpenAvg > 0.038 && mouthOpen > 0.045 && !smileHint,
     };
   },
 
@@ -1025,7 +1226,7 @@ export const emotionDetector = {
   _startSimulation() {
     updateState({ usingSimulatedEmotions: true, faceDetectionConfirmed: false });
     this._updateCameraUI('active');
-    const emotions = ['neutral', 'focused', 'happy', 'confused', 'bored', 'neutral'];
+    const emotions = ['neutral', 'focused', 'happy', 'surprised', 'confused', 'bored', 'neutral'];
     let idx = 0;
     const interval = setInterval(() => {
       if (!this.detectionActive) { clearInterval(interval); return; }
@@ -1104,7 +1305,7 @@ export const emotionDetector = {
       const tmp = document.createElement('canvas');
       tmp.width = size; tmp.height = size;
       this._drawAlignedFaceToCanvas(tmp.getContext('2d'), size, size, facePrediction);
-      return tmp.toDataURL('image/jpeg', 0.80);
+      return tmp.toDataURL('image/jpeg', 0.72);
     } catch (_) { return null; }
   },
 

@@ -2,7 +2,7 @@
 Elevate Emotion Recognition CNN - Training Script
 ===================================================
 Architecture  : MobileNetV2 backbone + custom classification head
-Dataset       : dataset/angry | confused | happy | neutral
+Dataset       : dataset/happy | bored | focused | confused | neutral | angry | surprise
 Output        : backend/ai_models/emotion_model.h5
                 backend/ai_models/emotion_model_info.json
                 frontend/js/emotion_tfjs/  (TensorFlow.js web model)
@@ -58,8 +58,9 @@ FINETUNE_LR     = 1e-4
 VALIDATION_SPLIT = 0.20
 RANDOM_SEED      = 42
 
-# ── class labels that match your dataset folder names ───────────────────────
-CLASS_NAMES = ["angry", "confused", "happy", "neutral"]
+# ── Canonical labels and dataset folder labels ──────────────────────────────
+CLASS_NAMES = ["happy", "bored", "focused", "confused", "neutral", "angry", "surprised"]
+DATASET_CLASS_NAMES = ["happy", "bored", "focused", "confused", "neutral", "angry", "surprise"]
 
 # ────────────────────────────────────────────────────────────────────────────
 #  HELPERS
@@ -74,20 +75,23 @@ def verify_dataset():
     """Check that all class folders exist and report image counts."""
     print("\n[1/7] Verifying dataset …")
     counts = {}
-    for cls in CLASS_NAMES:
-        path = os.path.join(DATASET_DIR, cls)
+    for dataset_cls, canonical_cls in zip(DATASET_CLASS_NAMES, CLASS_NAMES):
+        path = os.path.join(DATASET_DIR, dataset_cls)
         if not os.path.isdir(path):
             raise FileNotFoundError(
                 f"Missing folder: {path}\n"
                 f"Expected dataset layout:\n"
-                f"  dataset/angry/\n"
-                f"  dataset/confused/\n"
                 f"  dataset/happy/\n"
-                f"  dataset/neutral/"
+                f"  dataset/bored/\n"
+                f"  dataset/focused/\n"
+                f"  dataset/confused/\n"
+                f"  dataset/neutral/\n"
+                f"  dataset/angry/\n"
+                f"  dataset/surprise/"
             )
         imgs = [f for f in os.listdir(path) if f.lower().endswith((".jpg", ".jpeg", ".png"))]
-        counts[cls] = len(imgs)
-        print(f"   {cls:12s}: {len(imgs):,} images")
+        counts[canonical_cls] = len(imgs)
+        print(f"   {canonical_cls:12s}: {len(imgs):,} images")
 
     total = sum(counts.values())
     print(f"   {'TOTAL':12s}: {total:,} images")
@@ -131,7 +135,7 @@ def build_data_generators(counts):
         DATASET_DIR,
         target_size=IMG_SIZE,
         batch_size=BATCH_SIZE,
-        classes=CLASS_NAMES,
+        classes=DATASET_CLASS_NAMES,
         class_mode="categorical",
         subset="training",
         seed=RANDOM_SEED,
@@ -142,7 +146,7 @@ def build_data_generators(counts):
         DATASET_DIR,
         target_size=IMG_SIZE,
         batch_size=BATCH_SIZE,
-        classes=CLASS_NAMES,
+        classes=DATASET_CLASS_NAMES,
         class_mode="categorical",
         subset="validation",
         seed=RANDOM_SEED,
@@ -186,7 +190,7 @@ def build_model():
     - Dropout(0.4): regularisation — reduces overfit on small classes
     - Dense(128, relu): task-specific feature compression
     - Dropout(0.3): additional regularisation
-    - Dense(4, softmax): 4-class probability output
+    - Dense(N, softmax): project taxonomy probability output
     """
     print("\n[4/7] Building MobileNetV2 model …")
 

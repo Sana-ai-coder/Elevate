@@ -20,6 +20,7 @@ const DIFFICULTY_SETTINGS = {
     confused: -0.20,
     neutral: 0,
     angry: -0.25,
+    surprised: 0.06,
   },
   
   // Cooldown period (number of questions) before next adjustment

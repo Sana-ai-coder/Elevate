@@ -52,7 +52,7 @@ def log_emotion():
             return jsonify({"error": "confidence must be a number"}), 400
         
         # Validate emotion
-        valid_emotions = ['happy', 'bored', 'focused', 'confused', 'neutral', 'angry']
+        valid_emotions = ['happy', 'bored', 'focused', 'confused', 'neutral', 'angry', 'surprised']
         emotion = sanitize_string(emotion).lower()
         if emotion not in valid_emotions:
             return jsonify({"error": f"Invalid emotion. Must be one of: {', '.join(valid_emotions)}"}), 400
@@ -194,7 +194,7 @@ def get_emotion_summary():
         dominant_emotion = distribution[0]['emotion'] if distribution else None
         
         # Calculate positive vs negative emotion ratio
-        positive_emotions = ['happy', 'focused', 'neutral']
+        positive_emotions = ['happy', 'focused', 'neutral', 'surprised']
         negative_emotions = ['confused', 'bored', 'angry']
         
         positive_count = sum(e['count'] for e in distribution if e['emotion'] in positive_emotions)

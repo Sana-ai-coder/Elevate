@@ -30,7 +30,8 @@ export const state = {
     focused: 0,
     confused: 0,
     neutral: 0,
-    angry: 0
+    angry: 0,
+    surprised: 0
   },
   
   // Timers
@@ -92,6 +93,12 @@ export function resetState() {
   state.cameraStream = null;
   state.cameraActive = false;
   state.emotionCounts = {
-    happy: 0, bored: 0, focused: 0, confused: 0, neutral: 0, angry: 0
+    happy: 0,
+    bored: 0,
+    focused: 0,
+    confused: 0,
+    neutral: 0,
+    angry: 0,
+    surprised: 0
   };
 }

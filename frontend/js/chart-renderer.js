@@ -19,7 +19,8 @@ class ChartRenderer {
       focused: '#17a2b8',
       confused: '#ffc107',
       neutral: '#6c757d',
-      angry: '#dc3545'
+      angry: '#dc3545',
+      surprised: '#0ea5e9'
     };
     
     this.difficultyColors = {

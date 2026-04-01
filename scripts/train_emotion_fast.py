@@ -37,7 +37,7 @@ Parallel loading: concurrent.futures.ProcessPoolExecutor.
   Image decode + HOG runs in a worker pool across all available CPU cores,
   reducing wall-clock load time to ~8-12 s for 4 800 images.
 
-Classifier: sklearn MLPClassifier (512 → 128 → 4 units, Adam, early stopping).
+Classifier: sklearn MLPClassifier (512 → 128 → N units, Adam, early stopping).
   A proper 2-hidden-layer neural network trained with mini-batch SGD.
   Early stopping halts training when validation loss plateaus — prevents
   overfitting and keeps total training time under 15 s.
@@ -52,7 +52,7 @@ TFJS export: 3-layer Sequential model (Dense+ReLU, Dense+ReLU, Dense+Softmax).
 
 EXPECTED PERFORMANCE
 --------------------
-  Accuracy:     55-68% on 4-class (angry / confused / happy / neutral)
+    Accuracy:     52-66% on 7-class (happy / bored / focused / confused / neutral / angry / surprised)
   This matches published FER-style benchmarks for non-deep-learning methods.
   MobileNetV2 (GPU, full training) reaches ~72-80%, so we are in the same
   ballpark without any GPU or deep-learning framework.
@@ -100,7 +100,16 @@ TFJS_DIR     = ROOT / "frontend" / "js" / "emotion_tfjs"
 AI_MODELS_DIR = ROOT / "backend" / "ai_models"
 
 # ── Class labels — project taxonomy ───────────────────────────────────────────
-CLASS_NAMES = ["happy", "bored", "focused", "confused", "neutral", "angry"]
+CLASS_NAMES = ["happy", "bored", "focused", "confused", "neutral", "angry", "surprised"]
+CLASS_FOLDER_ALIASES = {
+    "happy": ["happy"],
+    "bored": ["bored"],
+    "focused": ["focused"],
+    "confused": ["confused"],
+    "neutral": ["neutral"],
+    "angry": ["angry"],
+    "surprised": ["surprised", "surprise"],
+}
 NUM_CLASSES  = len(CLASS_NAMES)
 
 # ── Image / feature parameters ────────────────────────────────────────────────
@@ -125,7 +134,7 @@ MAX_TEST_PER_CLASS: Optional[int] = None
 # - Use median class size as target to avoid very large classes dominating.
 # - Limit oversampling per class to prevent overfitting from duplicate-heavy data.
 BALANCE_TARGET_MODE = "median"   # "median" | "max"
-MAX_OVERSAMPLE_FACTOR = 2.0       # e.g., 2.0 means class can at most double via augmentation
+MAX_OVERSAMPLE_FACTOR = 2.5       # e.g., 2.5 means class can at most 2.5x via augmentation
 
 # ── MLP architecture ─────────────────────────────────────────────────────────
 MLP_HIDDEN      = (512, 128)   # two hidden layers
@@ -189,11 +198,13 @@ def _dataset_class_folder_map() -> Dict[str, Path]:
 
 
 def _resolve_class_files(class_name: str, folder_map: Dict[str, Path]) -> Tuple[List[Path], str]:
-    """Resolve files for a target class using exact class semantics only."""
-    folder = folder_map.get(class_name.strip().lower())
-    if folder is None:
-        return [], class_name
-    return _list_images(folder), folder.name
+    """Resolve files for a target class using alias support (e.g., surprise→surprised)."""
+    aliases = CLASS_FOLDER_ALIASES.get(class_name.strip().lower(), [class_name])
+    for alias in aliases:
+        folder = folder_map.get(alias.strip().lower())
+        if folder is not None:
+            return _list_images(folder), folder.name
+    return [], class_name
 
 
 def _split_files(files: List[Path], rng: random.Random) -> SplitData:
@@ -500,6 +511,48 @@ def _print_metrics(metrics: Dict, split_label: str) -> None:
         print(f"    {row_cls:10s} {row}")
 
 
+def _derive_calibration_maps(
+    validation_metrics: Dict,
+    train_by_class: Dict[str, int],
+) -> Tuple[Dict[str, float], Dict[str, float]]:
+    """
+    Derive runtime calibration maps exported to TFJS metadata.
+
+    - class_balance_weights: inverse recall (harder classes get more weight).
+    - class_prior_multipliers: inverse sqrt(class frequency) to reduce majority bias.
+    """
+    per_class = validation_metrics.get("per_class", {}) if isinstance(validation_metrics, dict) else {}
+
+    recall_inv = []
+    for cls in CLASS_NAMES:
+        recall = float(per_class.get(cls, {}).get("recall", 0.0) or 0.0)
+        recall = max(0.20, min(1.0, recall))
+        recall_inv.append(1.0 / recall)
+
+    recall_inv = np.asarray(recall_inv, dtype=np.float32)
+    recall_inv /= float(np.mean(recall_inv)) if float(np.mean(recall_inv)) > 0 else 1.0
+    recall_inv = np.clip(recall_inv, 0.78, 1.32)
+
+    counts = np.asarray([
+        max(1, int(train_by_class.get(cls, 1) or 1))
+        for cls in CLASS_NAMES
+    ], dtype=np.float32)
+    mean_count = float(np.mean(counts)) if float(np.mean(counts)) > 0 else 1.0
+    prior = np.sqrt(mean_count / counts)
+    prior /= float(np.mean(prior)) if float(np.mean(prior)) > 0 else 1.0
+    prior = np.clip(prior, 0.90, 1.14)
+
+    class_balance_weights = {
+        cls: float(round(float(recall_inv[idx]), 4))
+        for idx, cls in enumerate(CLASS_NAMES)
+    }
+    class_prior_multipliers = {
+        cls: float(round(float(prior[idx]), 4))
+        for idx, cls in enumerate(CLASS_NAMES)
+    }
+    return class_balance_weights, class_prior_multipliers
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  TFJS EXPORT  — 3-layer MLP → TF.js layers-model
 # ═════════════════════════════════════════════════════════════════════════════
@@ -509,6 +562,8 @@ def _export_tfjs(
     scaler:  StandardScaler,
     out_dir: Path,
     feat_dim: int,
+    class_balance_weights: Dict[str, float],
+    class_prior_multipliers: Dict[str, float],
 ) -> None:
     """
     Export the trained 3-layer MLP as a TF.js layers-model.
@@ -670,6 +725,8 @@ def _export_tfjs(
             "hog_pixels_per_cell": list(HOG_PPC),
             "hog_cells_per_block": list(HOG_CPB),
             "feature_dim":     feat_dim,
+            "class_balance_weights": class_balance_weights,
+            "class_prior_multipliers": class_prior_multipliers,
             "architecture":    f"HOG({IMG_SIZE}x{IMG_SIZE}) → Dense(512,relu) → Dense(128,relu) → Dense({NUM_CLASSES},softmax)",
             "normalisation":   "StandardScaler (zero-mean, unit-variance) — weights at scaler/mean and scaler/std",
             "scaler_mean":     scale_mean.tolist(),
@@ -718,8 +775,13 @@ def main() -> None:
     print("\n[1/6] Verifying dataset …")
     split_map: Dict[str, SplitData] = {}
     folder_map = _dataset_class_folder_map()
+    required_aliases = {
+        cls: {alias.lower() for alias in CLASS_FOLDER_ALIASES.get(cls, [cls])}
+        for cls in CLASS_NAMES
+    }
     missing_class_folders = [
-        cls for cls in CLASS_NAMES if cls.lower() not in folder_map
+        cls for cls in CLASS_NAMES
+        if not required_aliases.get(cls, {cls.lower()}).intersection(folder_map.keys())
     ]
     if missing_class_folders:
         found = sorted(folder_map.keys())
@@ -735,7 +797,7 @@ def main() -> None:
     unexpected = sorted(
         folder_name
         for folder_name in folder_map.keys()
-        if folder_name not in {cls.lower() for cls in CLASS_NAMES}
+        if not any(folder_name in aliases for aliases in required_aliases.values())
     )
     if unexpected:
         print("  [INFO] Ignoring non-target dataset folders: " + ", ".join(unexpected))
@@ -885,11 +947,22 @@ def main() -> None:
             for i, cls in enumerate(CLASS_NAMES)
         },
     }
+    class_balance_weights, class_prior_multipliers = _derive_calibration_maps(
+        metrics.val_metrics,
+        metrics.split_counts["train_by_class"],
+    )
 
     # ── Step 6: Export TFJS + save metadata ───────────────────────────────
     print("\n[6/6] Exporting TF.js model and saving metadata …")
     t0 = time.time()
-    _export_tfjs(mlp, scaler, TFJS_DIR, feat_dim)
+    _export_tfjs(
+        mlp,
+        scaler,
+        TFJS_DIR,
+        feat_dim,
+        class_balance_weights,
+        class_prior_multipliers,
+    )
 
     timestamp   = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     payload = {
@@ -900,6 +973,8 @@ def main() -> None:
         "class_names":       CLASS_NAMES,
         "dataset_counts":    metrics.dataset_counts,
         "split_counts":      metrics.split_counts,
+        "class_balance_weights": class_balance_weights,
+        "class_prior_multipliers": class_prior_multipliers,
         "validation_metrics": metrics.val_metrics,
         "test_metrics":      metrics.test_metrics,
         "timing_seconds":    metrics.timing,

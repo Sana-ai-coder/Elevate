@@ -90,9 +90,17 @@ ai/fine_tune/runs/
 # Generated backend/model-training artifacts
 backend/models/
 backend/data/ml/interaction_datasets/
-backend/ai_models/emotion_fast_metrics_*.json
 scripts/backend/ai_models/
 scripts/frontend/js/emotion_tfjs/
+backend/ai_models/*
+frontend/js/emotion_tfjs/*
+
+# Keep deployable emotion model artifacts tracked (Render/Web runtime)
+!backend/ai_models/emotion_model.h5
+!backend/ai_models/emotion_model.keras
+!backend/ai_models/emotion_model_info.json
+!frontend/js/emotion_tfjs/model.json
+!frontend/js/emotion_tfjs/group1-shard1of1.bin
 
 # Archived/experimental snapshots not needed in primary repo history
 backend/unnecessary/
