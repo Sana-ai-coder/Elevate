@@ -6,7 +6,11 @@ from ..security import require_auth, optional_auth, role_required
 from ..validation import sanitize_string
 from sqlalchemy import and_, func
 import random
-from ..question_generator import generate_stem_questions, save_generated_questions
+
+# IMPORT FIX: Use our new fallback generator and the actual AI topic service
+from ..question_generator import generate_fallback_mcqs
+from ..ai_topic_service import generate_topic_mcqs
+
 from ..recommendation_service import (
     get_recommender_metadata,
     recommend_questions_for_user,
@@ -37,10 +41,7 @@ def normalize_topic_token(topic_value: str | None) -> str:
 
 
 def _select_adaptive_questions(base_filters: dict, count: int, target_difficulty: str | None, user_id: int | None, exclude_answered: bool):
-    """Select questions by target difficulty with nearest fallback ordering.
-
-    Prefers unanswered questions for authenticated users.
-    """
+    """Select questions by target difficulty with nearest fallback ordering."""
     picked = []
     seen_ids = set()
 
@@ -76,7 +77,6 @@ def _select_adaptive_questions(base_filters: dict, count: int, target_difficulty
             seen_ids.add(row.id)
             picked.append(row)
 
-    # If strict exclude_answered is enabled and still short, relax as a fallback.
     if exclude_answered and len(picked) < count:
         for difficulty in difficulty_fallback_sequence(target_difficulty):
             if len(picked) >= count:
@@ -120,24 +120,10 @@ def apply_topic_filter(query, topic_value: str):
 @questions_bp.get("/")
 @optional_auth
 def list_questions():
-    """
-    List and filter questions by subject, grade, and difficulty.
-    
-    Query Parameters:
-    - subject: Filter by subject (e.g., "mathematics", "science")
-    - grade: Filter by grade level (e.g., "elementary", "middle", "high", "college")
-    - difficulty: Filter by difficulty (e.g., "easy", "medium", "hard")
-    - exclude_answered: If true and user authenticated, exclude answered questions
-    - limit: Max results (default 10, max 50)
-    - offset: Pagination offset (default 0)
-    
-    Returns:
-        JSON with questions list and metadata
-    """
+    """List and filter questions by subject, grade, and difficulty."""
     from flask import g
     current_user = g.current_user
     try:
-        # Get query parameters
         subject = request.args.get("subject")
         grade = request.args.get("grade")
         difficulty = request.args.get("difficulty")
@@ -146,10 +132,8 @@ def list_questions():
         limit = min(int(request.args.get("limit", 10)), 50)
         offset = int(request.args.get("offset", 0))
         
-        # Build query
         query = Question.query
         
-        # Apply filters
         if subject:
             query = apply_subject_filter(query, subject)
         if grade:
@@ -159,20 +143,15 @@ def list_questions():
         if topic:
             query = apply_topic_filter(query, topic)
         
-        # Exclude answered questions if requested and user is authenticated
         if exclude_answered and current_user:
             answered_question_ids = db.session.query(AnswerLog.question_id).filter(
                 AnswerLog.user_id == current_user.id
             ).distinct().subquery()
             query = query.filter(~Question.id.in_(answered_question_ids))
         
-        # Get total count before pagination
         total = query.count()
-        
-        # Apply pagination
         questions = query.offset(offset).limit(limit).all()
         
-        # Format response (exclude correct answer for security)
         questions_list = [
             {
                 "id": q.id,
@@ -210,15 +189,7 @@ def list_questions():
 @questions_bp.get('/generate')
 @optional_auth
 def generate_questions():
-    """Generate a question set for a student based on grade and syllabus topic.
-
-    Query params:
-    - grade: student's grade (required)
-    - topic: syllabus topic slug (optional)
-    - subject: subject filter (optional)
-    - count: number of questions (default 10)
-    - exclude_answered: true/false to skip already-answered questions for authenticated user
-    """
+    """Generate a question set for a student based on grade and syllabus topic."""
     try:
         grade = request.args.get('grade')
         topic = request.args.get('topic') or request.args.get('syllabus_topic')
@@ -302,69 +273,40 @@ def generate_questions():
             if recommendation_scores:
                 recommendation_context['scores'] = recommendation_scores
 
-        # If bank coverage is sparse, top-up on demand so the student gets the selected count.
+        # TOP-UP LOGIC FIX: Do NOT use the slow LLM for students. Serve fallbacks instantly!
         if len(questions) < count and subject:
             needed = count - len(questions)
             generation_difficulty = (target_difficulty or 'medium').strip().lower()
-            existing_variant_count_query = Question.query.filter(
-                func.lower(Question.subject) == sanitize_string(subject).strip().lower(),
-                Question.grade == normalized_grade,
-                Question.difficulty == generation_difficulty,
-            )
-            if normalized_topic:
-                existing_variant_count_query = apply_topic_filter(existing_variant_count_query, normalized_topic)
-            variant_offset = existing_variant_count_query.count()
-
-            generated_payload = generate_stem_questions(
-                subject=sanitize_string(subject).strip().lower(),
-                grade=normalized_grade,
-                difficulty=generation_difficulty,
+            
+            # Instantly generate fallback questions to avoid freezing the student's UI
+            generated_payload = generate_fallback_mcqs(
+                topic=normalized_topic or topic or "General",
                 count=needed,
-                topic=normalized_topic,
-                variant_offset=variant_offset,
+                difficulty=generation_difficulty,
+                subject=sanitize_string(subject).strip().lower(),
+                grade=normalized_grade
             )
 
-            # Keep topic aligned with the requested topic so filtering remains consistent.
-            if normalized_topic:
-                for item in generated_payload:
-                    item['topic'] = normalized_topic
-
-            # Defensive cleanup for malformed generated rows.
-            cleaned_payload = []
+            created_questions = []
             for item in generated_payload:
-                if not item or not item.get('text'):
-                    continue
-                options = item.get('options') or []
-                options = [str(opt).strip() for opt in options if str(opt).strip()]
-                if len(options) < 2:
-                    continue
-                try:
-                    correct_index = int(item.get('correct_index', 0))
-                except Exception:
-                    correct_index = 0
-                if correct_index < 0 or correct_index >= len(options):
-                    correct_index = 0
-
-                cleaned_payload.append({
-                    'text': str(item.get('text')).strip(),
-                    'options': options,
-                    'correct_index': correct_index,
-                    'topic': normalize_topic_token(item.get('topic')) or normalized_topic or 'general',
-                    'hint': str(item.get('hint') or 'Think carefully before answering.').strip(),
-                    'explanation': str(item.get('explanation') or 'Review the concept and solve step by step.').strip(),
-                })
-
-            if cleaned_payload:
-                created = save_generated_questions(
-                    cleaned_payload,
+                new_q = Question(
                     subject=sanitize_string(subject).strip().lower(),
                     grade=normalized_grade,
                     difficulty=generation_difficulty,
-                    generated_by=current_user.id if current_user else None,
+                    text=item.get("text", "Error rendering question."),
+                    options=item.get("options", []),
+                    correct_index=item.get("correct_index", 0),
+                    explanation=item.get("explanation", ""),
+                    syllabus_topic=item.get("topic", normalized_topic),
+                    is_generated=True,
+                    generation_meta={"source": "robust_fallback"}
                 )
-                questions.extend(created)
+                db.session.add(new_q)
+                created_questions.append(new_q)
 
-        # Final cap to respect user-selected count.
+            db.session.commit()
+            questions.extend(created_questions)
+
         questions = questions[:count]
 
         questions_list = [
@@ -393,6 +335,7 @@ def generate_questions():
             'recommendation': recommendation_context,
         }), 200
     except Exception as e:
+        db.session.rollback()
         return jsonify({'error': 'Failed to generate questions', 'details': str(e)}), 500
 
 
@@ -467,14 +410,7 @@ def recommendation_endpoint():
 @require_auth
 @role_required('teacher','admin')
 def generate_and_persist():
-    """Generate and persist questions (teacher/admin only).
-
-    Request JSON body:
-    - topic (optional)
-    - difficulty (optional: easy|medium|hard)
-    - count (optional, default 5)
-    - subject, grade (optional)
-    """
+    """Generate and persist questions (teacher/admin only)."""
     try:
         data = request.get_json() or {}
         topic = data.get('topic')
@@ -493,11 +429,49 @@ def generate_and_persist():
             except Exception:
                 return jsonify({'error': 'seed must be an integer'}), 400
 
-        # Generate using deterministic generator
-        generated_data = generate_stem_questions(subject, grade or '', difficulty, count=count, seed=seed)
+        # Teacher Endpoint: We safely use the local AI generation service here
+        service_result = generate_topic_mcqs(
+            subject=subject,
+            grade=grade or 'high',
+            difficulty=difficulty,
+            topic=topic,
+            count=count,
+            seed=seed
+        )
 
-        # Persist generated questions with seed metadata
-        new_questions = save_generated_questions(generated_data, subject, grade or '', difficulty, generated_by=g.current_user.id, seed=seed)
+        payload = []
+        if service_result.get("ok"):
+            payload = service_result.get("questions", [])
+        
+        # If the AI fails, inject the fallback
+        if not service_result.get("ok") or len(payload) == 0:
+            payload = generate_fallback_mcqs(
+                topic=topic,
+                count=count,
+                difficulty=difficulty,
+                subject=subject,
+                grade=grade or 'high'
+            )
+
+        new_questions = []
+        for item in payload:
+            q = Question(
+                subject=subject,
+                grade=grade or 'high',
+                difficulty=difficulty,
+                text=item.get("text", ""),
+                options=item.get("options", []),
+                correct_index=item.get("correct_index", 0),
+                explanation=item.get("explanation", ""),
+                syllabus_topic=topic,
+                is_generated=True,
+                generated_by=g.current_user.id,
+                generation_meta={"seed": seed, "source": item.get("source", "topic_ai_service")}
+            )
+            db.session.add(q)
+            new_questions.append(q)
+
+        db.session.commit()
 
         return jsonify({'generated': [{'id': q.id, 'text': q.text, 'options': q.options, 'correct_index': q.correct_index, 'generation_meta': q.generation_meta} for q in new_questions]}), 201
     except Exception as e:
@@ -517,7 +491,6 @@ def list_topics():
         if grade:
             q = q.filter(Question.grade == sanitize_string(grade).strip().lower())
         topics = q.with_entities(Question.syllabus_topic).distinct().all()
-        # topics is list of tuples like [('arithmetic',), (None,), ...]
         cleaned = [t[0] for t in topics if t[0]]
         return jsonify({'topics': cleaned}), 200
     except Exception as e:
@@ -527,15 +500,7 @@ def list_topics():
 @questions_bp.get("/<int:question_id>")
 @optional_auth
 def get_question(question_id):
-    """
-    Get a single question by ID.
-    
-    Args:
-        question_id: Question ID
-        
-    Returns:
-        JSON with question details (excludes correct answer and explanation until answered)
-    """
+    """Get a single question by ID."""
     from flask import g
     current_user = g.current_user
     try:
@@ -543,7 +508,6 @@ def get_question(question_id):
         if not question:
             return jsonify({"error": "Question not found"}), 404
         
-        # Check if user already answered this question
         already_answered = False
         if current_user:
             answer = AnswerLog.query.filter_by(
@@ -564,7 +528,6 @@ def get_question(question_id):
             "already_answered": already_answered
         }
         
-        # Only include explanation if already answered
         if already_answered:
             response["explanation"] = question.explanation
         
@@ -577,17 +540,7 @@ def get_question(question_id):
 @questions_bp.post("/<int:question_id>/submit")
 @require_auth
 def submit_answer(question_id):
-    """
-    Submit an answer to a question.
-    
-    Request Body:
-    - selected_index: Index of selected option (0-based)
-    - time_spent: Time spent in seconds
-    - emotion: Optional emotion during answer (e.g., "focused", "confused")
-    
-    Returns:
-        JSON with correctness, explanation, and updated progress
-    """
+    """Submit an answer to a question."""
     from flask import g
     current_user = g.current_user
     
@@ -600,7 +553,6 @@ def submit_answer(question_id):
         time_spent = data.get("time_spent", 0)
         emotion = data.get("emotion")
         
-        # Validation
         if selected_index is None:
             return jsonify({"error": "selected_index is required"}), 400
         
@@ -610,19 +562,15 @@ def submit_answer(question_id):
         except (ValueError, TypeError):
             return jsonify({"error": "Invalid data types"}), 400
         
-        # Get question
         question = db.session.get(Question, question_id)
         if not question:
             return jsonify({"error": "Question not found"}), 404
         
-        # Validate selected_index range (-1 means unanswered/timeout auto-submit)
         if selected_index < -1 or selected_index >= len(question.options):
             return jsonify({"error": "Invalid option index"}), 400
         
-        # Check correctness
         is_correct = selected_index >= 0 and selected_index == question.correct_index
         
-        # Save answer log
         answer_log = AnswerLog(
             user_id=current_user.id,
             question_id=question_id,
@@ -635,18 +583,16 @@ def submit_answer(question_id):
         )
         db.session.add(answer_log)
         
-        # Log emotion if provided (for emotion tracking analysis)
         if emotion:
             emotion_log = EmotionLog(
                 user_id=current_user.id,
                 emotion=sanitize_string(emotion),
-                confidence=1.0,  # Frontend should send this if available
+                confidence=1.0,
                 context=f"answering_{question.subject}",
                 timestamp=datetime.now(timezone.utc)
             )
             db.session.add(emotion_log)
         
-        # Update user progress for this subject
         progress = UserProgress.query.filter_by(
             user_id=current_user.id,
             subject=question.subject
@@ -667,10 +613,8 @@ def submit_answer(question_id):
             progress.correct_answers = int(progress.correct_answers or 0) + 1
         progress.last_updated = datetime.now(timezone.utc)
         
-        # Calculate new accuracy
         accuracy = (progress.correct_answers / progress.total_questions * 100) if progress.total_questions > 0 else 0
         
-        # Update or create subject performance tracking
         subject_perf = SubjectPerformance.query.filter_by(
             user_id=current_user.id,
             subject=question.subject
@@ -687,7 +631,6 @@ def submit_answer(question_id):
             )
             db.session.add(subject_perf)
         
-        # Update streak
         subject_perf.streak = int(subject_perf.streak or 0)
         subject_perf.best_streak = int(subject_perf.best_streak or 0)
         subject_perf.total_time_spent = int(subject_perf.total_time_spent or 0)
@@ -697,9 +640,8 @@ def submit_answer(question_id):
             if subject_perf.streak > subject_perf.best_streak:
                 subject_perf.best_streak = subject_perf.streak
         else:
-            subject_perf.streak = 0  # Reset streak on wrong answer
+            subject_perf.streak = 0
         
-        # Update accuracy and time
         subject_perf.accuracy = accuracy
         subject_perf.total_time_spent = int(subject_perf.total_time_spent or 0) + int(time_spent or 0)
         subject_perf.last_practiced_at = datetime.now(timezone.utc)
@@ -714,7 +656,6 @@ def submit_answer(question_id):
         
         db.session.commit()
         
-        # Return response with feedback
         return jsonify({
             "correct": is_correct,
             "correct_index": question.correct_index,
@@ -732,5 +673,3 @@ def submit_answer(question_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": "Failed to submit answer", "details": str(e)}), 500
-
-
