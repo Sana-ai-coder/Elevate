@@ -1,5 +1,49 @@
 // Utility functions
 export const utils = {
+  _notificationTimer: null,
+
+  messageCatalog: {
+    'generic.completed': 'Done successfully.',
+    'generic.failed': 'Something went wrong. Please try again.',
+    'generic.network_failed': 'We could not connect right now. Please check your connection and try again.',
+    'auth.login_success': 'Signed in successfully. Redirecting to your dashboard.',
+    'auth.login_failed': 'We could not sign you in. Please check your details and try again.',
+    'auth.signup_success': 'Your account is ready. Redirecting to your dashboard.',
+    'auth.signup_failed': 'We could not create your account right now. Please try again.',
+    'teacher.test_create_success': 'Test created successfully.',
+    'teacher.test_create_failed': 'We could not create the test right now. Please try again.',
+    'teacher.test_update_success': 'Test updated successfully.',
+    'teacher.test_update_failed': 'We could not update the test right now. Please try again.',
+    'teacher.test_delete_success': 'Test deleted successfully.',
+    'teacher.test_delete_failed': 'We could not delete the test right now. Please try again.',
+    'teacher.classroom_create_success': 'Classroom created successfully.',
+    'teacher.classroom_create_failed': 'We could not create the classroom right now. Please try again.',
+    'teacher.assignment_create_success': 'Assignment created successfully.',
+    'teacher.assignment_create_failed': 'We could not create the assignment right now. Please try again.',
+    'teacher.student_add_success': 'Student added successfully.',
+    'teacher.student_add_failed': 'We could not add the student right now. Please try again.',
+    'teacher.student_remove_success': 'Student removed successfully.',
+    'teacher.student_remove_failed': 'We could not remove the student right now. Please try again.',
+  },
+
+  getMessage(messageOrKey, replacements = {}) {
+    const raw = this.messageCatalog[messageOrKey] || messageOrKey || this.messageCatalog['generic.failed'];
+    return String(raw).replace(/\{([^}]+)\}/g, (_, token) => {
+      const value = replacements[token];
+      return value === undefined || value === null ? '' : String(value);
+    });
+  },
+
+  notifySuccess(messageOrKey, replacements = {}, options = {}) {
+    const message = this.getMessage(messageOrKey, replacements);
+    this.showNotification(message, 'success', options);
+  },
+
+  notifyError(messageOrKey, replacements = {}, options = {}) {
+    const message = this.getMessage(messageOrKey, replacements);
+    this.showNotification(message, 'error', options);
+  },
+
   ensureNotificationElements() {
     let feedback = document.getElementById('emotionFeedback');
     let icon = document.getElementById('feedbackIcon');
@@ -48,7 +92,7 @@ export const utils = {
   },
 
   // Show notification/feedback (Consolidates showEmotionFeedback from index5.html)
-  showNotification(message, type = 'info') {
+  showNotification(message, type = 'info', options = {}) {
     // Check if notifications are enabled (import storage dynamically to avoid circular deps)
     try {
       const savedSettings = localStorage.getItem('userSettings');
@@ -63,6 +107,10 @@ export const utils = {
     }
     
     const { feedback, icon, text } = this.ensureNotificationElements();
+    const resolvedMessage = this.getMessage(message);
+    const baseDuration = Number(options?.durationMs || options?.duration || 0);
+    const adaptiveDuration = Math.min(6500, Math.max(2600, resolvedMessage.length * 40));
+    const durationMs = Number.isFinite(baseDuration) && baseDuration > 0 ? baseDuration : adaptiveDuration;
 
     // Icons matching index5.html exactly + extras
     const icons = {
@@ -80,14 +128,19 @@ export const utils = {
     };
 
     icon.textContent = icons[type] || icons.info;
-    text.textContent = message;
+    text.textContent = resolvedMessage;
     
     feedback.classList.add('show');
 
-    // Hide after 3 seconds
-    setTimeout(() => {
+    // Hide after duration, resetting previous timers to keep timing accurate.
+    if (this._notificationTimer) {
+      clearTimeout(this._notificationTimer);
+      this._notificationTimer = null;
+    }
+    this._notificationTimer = setTimeout(() => {
       feedback.classList.remove('show');
-    }, 3000);
+      this._notificationTimer = null;
+    }, durationMs);
   },
 
   // Format time (seconds to MM:SS)

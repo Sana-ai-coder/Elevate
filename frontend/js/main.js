@@ -340,16 +340,18 @@ function initAuthPage() {
         const selectedRole = getSelectedRole('loginRoleSelector');
         const dest = role === 'teacher' ? 'teacher-dashboard.html' : 'dashboard.html';
 
+        showAuthAlert('loginAlert', utils.getMessage('auth.login_success'), 'success');
+
         if (selectedRole && selectedRole !== role) {
           const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
-          showAuthAlert('loginAlert', `Your account is registered as a ${roleLabel}. Redirecting you to the correct dashboard...`, 'info');
+          showAuthAlert('loginAlert', `Signed in successfully. Your account is registered as ${roleLabel}. Redirecting...`, 'info');
           setTimeout(() => utils.navigateTo(dest, true), 3500);
         } else {
-          utils.navigateTo(dest, true);
+          setTimeout(() => utils.navigateTo(dest, true), 900);
         }
       } else {
         console.error('Login error:', result.error);
-        showAuthAlert('loginAlert', result.error || 'Login failed. Please check your credentials and try again.', 'error');
+        showAuthAlert('loginAlert', result.error || utils.getMessage('auth.login_failed'), 'error');
         btn.innerText = originalText;
         btn.disabled = false;
       }
@@ -374,14 +376,14 @@ function initAuthPage() {
       const result = await auth.signup(name, email, password, grade, role);
       
       if (result.success) {
-        showAuthAlert('signupAlert', 'Account created successfully! Redirecting...', 'success');
+        showAuthAlert('signupAlert', utils.getMessage('auth.signup_success'), 'success');
         const session = auth.loadSession();
         const savedRole = (session && session.user ? session.user.role : null) || role;
         const dest = savedRole === 'teacher' ? 'teacher-dashboard.html' : 'dashboard.html';
         setTimeout(() => utils.navigateTo(dest, true), 1200);
       } else {
         console.error('Signup error:', result.error);
-        showAuthAlert('signupAlert', result.error || 'Signup failed. Please try again.', 'error');
+        showAuthAlert('signupAlert', result.error || utils.getMessage('auth.signup_failed'), 'error');
         btn.innerText = originalText;
         btn.disabled = false;
       }

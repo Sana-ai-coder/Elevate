@@ -2,6 +2,49 @@
 import { config } from './config.js';
 
 export const api = {
+  buildFriendlyApiError(endpoint, method, status, serverMessage = '') {
+    const route = String(endpoint || '').toLowerCase();
+    const verb = String(method || 'GET').toUpperCase();
+
+    if (route.includes('/auth/login')) {
+      if (status === 401) return 'We could not sign you in. Please check your email and password and try again.';
+      return 'Sign-in is unavailable right now. Please try again.';
+    }
+
+    if (route.includes('/auth/signup')) {
+      if (status === 409) return 'This email is already registered. Please sign in or use a different email.';
+      return 'We could not create your account right now. Please try again.';
+    }
+
+    if (route.includes('/teacher/tests') && verb === 'POST') {
+      return 'We could not create the test right now. Please try again.';
+    }
+
+    if (route.includes('/teacher/question-bank/generate')) {
+      return 'We could not prepare questions right now. Please try again.';
+    }
+
+    if (status === 400) return 'We could not process that request. Please check your details and try again.';
+    if (status === 401) return 'Your session has expired. Please sign in again.';
+    if (status === 403) return 'You do not have permission to do that action.';
+    if (status === 404) return 'The requested item could not be found.';
+    if (status === 409) return 'A conflicting record already exists. Please review your input and try again.';
+    if (status === 429) return 'Too many requests right now. Please wait a moment and try again.';
+    if ([500, 502, 503, 504].includes(Number(status))) {
+      return 'Something went wrong on our side. Please try again in a moment.';
+    }
+
+    if (serverMessage && String(serverMessage).trim()) {
+      return 'We could not complete this request right now. Please try again.';
+    }
+
+    return 'We could not complete your request. Please try again.';
+  },
+
+  buildFriendlyNetworkError() {
+    return 'We could not connect to the server right now. Please check your connection and try again.';
+  },
+
   // Get stored JWT token from both localStorage and sessionStorage
   getToken() {
     try {
@@ -73,14 +116,24 @@ export const api = {
           }
         }
         
-        const requestError = new Error(data.error || data.message || 'API request failed');
+        const serverMessage = data.error || data.message || '';
+        const userMessage = this.buildFriendlyApiError(endpoint, method, response.status, serverMessage);
+        const requestError = new Error(userMessage);
         requestError.status = response.status;
         requestError.payload = data;
+        requestError.userMessage = userMessage;
+        requestError.serverMessage = serverMessage;
         throw requestError;
       }
 
       return data;
     } catch (error) {
+      if (!error.userMessage) {
+        const fallback = this.buildFriendlyNetworkError();
+        error.serverMessage = error.message || '';
+        error.userMessage = fallback;
+        error.message = fallback;
+      }
       console.error('API Error:', error);
       throw error;
     }

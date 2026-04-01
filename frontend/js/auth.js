@@ -73,7 +73,10 @@ export const auth = {
       return { success: true };
     } catch (error) {
       console.error('Login error:', error);
-      return { success: false, error: error.message || 'Login failed. Please check console.' };
+      return {
+        success: false,
+        error: error?.userMessage || error?.message || utils.getMessage('auth.login_failed'),
+      };
     }
   },
 
@@ -93,21 +96,11 @@ export const auth = {
       return { success: true };
     } catch (error) {
       console.error('Signup error:', error);
-      
-      // Handle detailed validation errors from backend
-      let errorMessage = error.message || 'Signup failed.';
-      
-      // Try to parse error response for details
-      try {
-        const errorData = JSON.parse(error.message);
-        if (errorData.details && Array.isArray(errorData.details)) {
-          errorMessage = errorData.details.join(', ');
-        }
-      } catch (e) {
-        // Keep the original error message
-      }
-      
-      return { success: false, error: errorMessage };
+
+      return {
+        success: false,
+        error: error?.userMessage || error?.message || utils.getMessage('auth.signup_failed'),
+      };
     }
   },
 

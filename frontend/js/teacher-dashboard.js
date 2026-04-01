@@ -11,6 +11,37 @@ const teacherCache = {
   reportRows: [],
 };
 
+const OPTION_LETTERS = ['A', 'B', 'C', 'D'];
+
+const TEACHER_MESSAGE_KEYS = {
+  testCreateSuccess: 'teacher.test_create_success',
+  testCreateFailed: 'teacher.test_create_failed',
+  testUpdateSuccess: 'teacher.test_update_success',
+  testUpdateFailed: 'teacher.test_update_failed',
+  testDeleteSuccess: 'teacher.test_delete_success',
+  testDeleteFailed: 'teacher.test_delete_failed',
+  classroomCreateSuccess: 'teacher.classroom_create_success',
+  classroomCreateFailed: 'teacher.classroom_create_failed',
+  assignmentCreateSuccess: 'teacher.assignment_create_success',
+  assignmentCreateFailed: 'teacher.assignment_create_failed',
+  studentAddSuccess: 'teacher.student_add_success',
+  studentAddFailed: 'teacher.student_add_failed',
+  studentRemoveSuccess: 'teacher.student_remove_success',
+  studentRemoveFailed: 'teacher.student_remove_failed',
+};
+
+function notifyTeacherSuccess(messageKey, replacements = {}) {
+  const key = TEACHER_MESSAGE_KEYS[messageKey] || 'generic.completed';
+  utils.notifySuccess(key, replacements);
+}
+
+function notifyTeacherError(messageKey, error) {
+  const key = TEACHER_MESSAGE_KEYS[messageKey] || 'generic.failed';
+  const fallback = utils.getMessage(key);
+  const message = error?.userMessage || error?.message || fallback;
+  utils.showNotification(message, 'error');
+}
+
 function getKnownStudents() {
   const byId = new Map();
 
@@ -160,7 +191,9 @@ function collectEditableQuestionsFromPanel(panel) {
     const points = Number(row.querySelector('.q-points')?.value || 1);
     const explanation = row.querySelector('.q-explanation')?.value?.trim() || ''; // Added
 
-    const options = [0, 1, 2, 3].map(i => row.querySelector(`.q-opt-${i}`)?.value?.trim() || '');
+    const options = Array.from(row.querySelectorAll('.q-option-input'))
+      .map(input => input?.value?.trim() || '')
+      .slice(0, 4);
     const correctIndex = Number(row.querySelector('.q-correct')?.value || 0);
 
     return {
@@ -172,6 +205,142 @@ function collectEditableQuestionsFromPanel(panel) {
       correct_index: correctIndex,
       explanation // Added
     };
+  });
+}
+
+function getOptionRows(questionRow) {
+  return Array.from(questionRow.querySelectorAll('.q-option-row'));
+}
+
+function syncCorrectAnswerDropdown(questionRow, preserveAnswerByText = false, preferredAnswerText = '') {
+  if (!questionRow) return;
+
+  const dropdown = questionRow.querySelector('.q-correct');
+  if (!dropdown) return;
+
+  const optionRows = getOptionRows(questionRow);
+  if (optionRows.length === 0) return;
+
+  const previousIndex = Number(dropdown.value || 0);
+  const previousSelectedText = preserveAnswerByText
+    ? (preferredAnswerText || optionRows[previousIndex]?.querySelector('.q-option-input')?.value?.trim() || '')
+    : '';
+
+  optionRows.forEach((row, idx) => {
+    row.dataset.optionIndex = String(idx);
+    const label = row.querySelector('.option-label');
+    if (label) {
+      label.textContent = OPTION_LETTERS[idx] || String(idx + 1);
+    }
+  });
+
+  dropdown.innerHTML = '';
+  optionRows.forEach((row, idx) => {
+    const rawText = row.querySelector('.q-option-input')?.value?.trim() || '';
+    const preview = rawText.length > 54 ? `${rawText.slice(0, 51)}...` : rawText;
+    const option = document.createElement('option');
+    option.value = String(idx);
+    option.textContent = `${OPTION_LETTERS[idx] || idx + 1}. ${preview || `Option ${idx + 1}`}`;
+    dropdown.appendChild(option);
+  });
+
+  let nextIndex = Number.isFinite(previousIndex) ? previousIndex : 0;
+  if (preserveAnswerByText && previousSelectedText) {
+    const matchIndex = optionRows.findIndex((row) => {
+      const currentText = row.querySelector('.q-option-input')?.value?.trim() || '';
+      return currentText === previousSelectedText;
+    });
+    if (matchIndex >= 0) {
+      nextIndex = matchIndex;
+    }
+  }
+
+  if (nextIndex < 0 || nextIndex >= optionRows.length) {
+    nextIndex = 0;
+  }
+  dropdown.value = String(nextIndex);
+}
+
+function enableOptionRowDragAndDrop(questionRow) {
+  if (!questionRow) return;
+  if (questionRow.dataset.optionDragBound === '1') return;
+  questionRow.dataset.optionDragBound = '1';
+
+  const optionRows = getOptionRows(questionRow);
+  let draggedRow = null;
+
+  optionRows.forEach((row) => {
+    row.setAttribute('draggable', 'true');
+
+    row.addEventListener('dragstart', (evt) => {
+      const fromHandle = evt.target?.closest?.('.option-drag-handle');
+      if (!fromHandle) {
+        evt.preventDefault();
+        return;
+      }
+
+      const dropdown = questionRow.querySelector('.q-correct');
+      const selectedIndex = Number(dropdown?.value || 0);
+      const selectedText = getOptionRows(questionRow)[selectedIndex]?.querySelector('.q-option-input')?.value?.trim() || '';
+      questionRow.dataset.selectedAnswerTextBeforeDrag = selectedText;
+
+      draggedRow = row;
+      row.classList.add('is-option-dragging');
+      if (evt.dataTransfer) {
+        evt.dataTransfer.effectAllowed = 'move';
+        evt.dataTransfer.setData('text/plain', row.dataset.optionIndex || '');
+      }
+    });
+
+    row.addEventListener('dragend', () => {
+      row.classList.remove('is-option-dragging');
+      draggedRow = null;
+      getOptionRows(questionRow).forEach((el) => {
+        el.classList.remove('option-drop-before', 'option-drop-after');
+      });
+      const selectedText = questionRow.dataset.selectedAnswerTextBeforeDrag || '';
+      syncCorrectAnswerDropdown(questionRow, true, selectedText);
+      delete questionRow.dataset.selectedAnswerTextBeforeDrag;
+    });
+
+    row.addEventListener('dragover', (evt) => {
+      evt.preventDefault();
+      if (!draggedRow || draggedRow === row) return;
+
+      const rect = row.getBoundingClientRect();
+      const insertAfter = evt.clientY > rect.top + rect.height / 2;
+
+      row.classList.toggle('option-drop-before', !insertAfter);
+      row.classList.toggle('option-drop-after', insertAfter);
+
+      const parent = row.parentElement;
+      if (!parent) return;
+      if (insertAfter) {
+        parent.insertBefore(draggedRow, row.nextSibling);
+      } else {
+        parent.insertBefore(draggedRow, row);
+      }
+    });
+
+    row.addEventListener('dragleave', () => {
+      row.classList.remove('option-drop-before', 'option-drop-after');
+    });
+  });
+}
+
+function initializeOptionEditors(panel) {
+  if (!panel) return;
+  const rows = Array.from(panel.querySelectorAll('.test-question-editor-row'));
+
+  rows.forEach((questionRow) => {
+    enableOptionRowDragAndDrop(questionRow);
+    syncCorrectAnswerDropdown(questionRow, false);
+
+    questionRow.querySelectorAll('.q-option-input').forEach((input) => {
+      input.addEventListener('input', () => {
+        syncCorrectAnswerDropdown(questionRow, false);
+      });
+    });
   });
 }
 
@@ -1105,6 +1274,14 @@ function bindTestActions() {
               const orderVal = Number(q.order || (idx + 1));
               const pointsVal = Number(q.points || 1);
               const correctVal = Number(q.correct_index || 0);
+              const clampedCorrect = Math.max(0, Math.min(3, correctVal));
+              const optionsMarkup = safeOpts.map((optText, optIndex) => `
+                    <div class="option-row q-option-row" data-option-index="${optIndex}" draggable="true">
+                      <button type="button" class="option-drag-handle" title="Drag to reorder option" aria-label="Drag option">≡</button>
+                      <span class="option-label">${OPTION_LETTERS[optIndex]}</span>
+                      <input type="text" class="form-control form-control-sm q-option-input" placeholder="Option ${optIndex + 1}" value="${optText}" />
+                    </div>
+              `).join('');
               
               return `
                 <article class="test-question-editor-row" data-question-id="${q.id}">
@@ -1124,19 +1301,13 @@ function bindTestActions() {
                   </div>
                   <div class="question-options-list">
                     <label class="form-label small mb-1">Answers</label>
-                    <div class="option-row"><span class="option-label">A</span><input type="text" class="form-control form-control-sm q-opt-0" placeholder="Option 1" value="${safeOpts[0]}" /></div>
-                    <div class="option-row"><span class="option-label">B</span><input type="text" class="form-control form-control-sm q-opt-1" placeholder="Option 2" value="${safeOpts[1]}" /></div>
-                    <div class="option-row"><span class="option-label">C</span><input type="text" class="form-control form-control-sm q-opt-2" placeholder="Option 3" value="${safeOpts[2]}" /></div>
-                    <div class="option-row"><span class="option-label">D</span><input type="text" class="form-control form-control-sm q-opt-3" placeholder="Option 4" value="${safeOpts[3]}" /></div>
+                    ${optionsMarkup}
                   </div>
                   <div class="row mt-2">
                     <div class="col-md-3">
                       <label class="form-label small mb-1">Correct Answer</label>
                       <select class="form-control form-control-sm q-correct">
-                        <option value="0" ${correctVal === 0 ? 'selected' : ''}>Option 1 (A)</option>
-                        <option value="1" ${correctVal === 1 ? 'selected' : ''}>Option 2 (B)</option>
-                        <option value="2" ${correctVal === 2 ? 'selected' : ''}>Option 3 (C)</option>
-                        <option value="3" ${correctVal === 3 ? 'selected' : ''}>Option 4 (D)</option>
+                        <option value="${clampedCorrect}" selected>Loading options...</option>
                       </select>
                     </div>
                     <div class="col-md-9">
@@ -1151,6 +1322,7 @@ function bindTestActions() {
         `;
 
         enableQuestionCardDragAndDrop(panel);
+        initializeOptionEditors(panel);
 
         const saveBtn = panel.querySelector('#saveTestQuestionsBtn');
         if (saveBtn) {
@@ -1163,14 +1335,14 @@ function bindTestActions() {
               }
 
               await api.teacher.updateTest(testId, { questions: questionPayload });
-              utils.showNotification('Test questions updated successfully.', 'success');
+              notifyTeacherSuccess('testUpdateSuccess');
               
               // Persist the "Hide" button state after reloading
               await loadTests();
               document.querySelectorAll(`button[data-action="view"][data-id="${testId}"]`).forEach(b => b.textContent = 'Hide');
             } catch (error) {
               console.error(error);
-              utils.showNotification(error.message || 'Failed to update test questions', 'error');
+              notifyTeacherError('testUpdateFailed', error);
             }
           });
         }
@@ -1179,7 +1351,7 @@ function bindTestActions() {
       if (action === 'toggle-publish') {
         const publish = btn.dataset.value === '1';
         await api.teacher.updateTest(testId, { is_published: publish });
-        utils.showNotification(`Test ${publish ? 'published' : 'unpublished'} successfully.`, 'success');
+        notifyTeacherSuccess('testUpdateSuccess');
         
         // Preserve panel visibility state
         const panel = document.getElementById('testDetailPanel');
@@ -1192,7 +1364,7 @@ function bindTestActions() {
       if (action === 'delete') {
         if (!window.confirm('Delete this test? This action cannot be undone.')) return;
         await api.teacher.deleteTest(testId);
-        utils.showNotification('Test deleted successfully.', 'success');
+        notifyTeacherSuccess('testDeleteSuccess');
         
         // Hide panel if the deleted test was being viewed
         const panel = document.getElementById('testDetailPanel');
@@ -1206,7 +1378,7 @@ function bindTestActions() {
       }
     } catch (error) {
       console.error(error);
-      utils.showNotification(error.message || 'Action failed', 'error');
+      notifyTeacherError('testUpdateFailed', error);
     }
   });
 }
@@ -1249,24 +1421,18 @@ async function createTest(event) {
     if (result && result.warning) {
       utils.showNotification(result.warning, 'warning');
     } else {
-      utils.showNotification('Test created successfully.', 'success');
+      notifyTeacherSuccess('testCreateSuccess');
     }
 
     if (diagnostics.summary || diagnostics.error) {
-      const endpointSuffix = diagnostics.endpoint ? ` | ${diagnostics.endpoint}` : '';
-      const errorSuffix = diagnostics.error ? ` | ${diagnostics.error}` : '';
-      utils.showNotification(`Generation diagnostics: ${diagnostics.summary}${endpointSuffix}${errorSuffix}`, 'info');
+      console.info('Generation diagnostics:', diagnostics);
     }
 
     await Promise.all([loadOverview(), loadTests()]);
     syncAssignmentFormOptions();
   } catch (error) {
     console.error(error);
-    const diagnostics = formatGenerationDiagnostics(error?.payload?.generation_status);
-    if (diagnostics.summary || diagnostics.error) {
-      utils.showNotification(`Generation diagnostics: ${diagnostics.summary}${diagnostics.error ? ` | ${diagnostics.error}` : ''}`, 'warning');
-    }
-    utils.showNotification(error.message || 'Failed to create test', 'error');
+    notifyTeacherError('testCreateFailed', error);
   } finally {
     clearBusy(button);
   }
@@ -1333,7 +1499,7 @@ function bindEvents() {
           const enrolledCount = Number(result.enrolled_count || 0);
           utils.showNotification(`Classroom created. ${enrolledCount} student(s) enrolled automatically.`, 'success');
         } else {
-          utils.showNotification('Classroom created.', 'success');
+          notifyTeacherSuccess('classroomCreateSuccess');
         }
         classroomForm.reset();
         const autoEnroll = document.getElementById('autoEnrollGradeStudents');
@@ -1342,7 +1508,7 @@ function bindEvents() {
         syncAssignmentFormOptions();
       } catch (error) {
         console.error(error);
-        utils.showNotification(error.message || 'Failed to create classroom', 'error');
+        notifyTeacherError('classroomCreateFailed', error);
       } finally {
         clearBusy(btn);
       }
@@ -1385,12 +1551,12 @@ function bindEvents() {
 
         try {
           await api.teacher.removeStudentFromClassroom(classroomId, studentId);
-          utils.showNotification('Student removed from classroom.', 'success');
+          notifyTeacherSuccess('studentRemoveSuccess');
           await Promise.all([loadClassrooms(), loadStudents()]);
           syncAssignmentFormOptions();
         } catch (error) {
           console.error(error);
-          utils.showNotification(error.message || 'Failed to remove student', 'error');
+          notifyTeacherError('studentRemoveFailed', error);
         }
         return;
       }
@@ -1408,12 +1574,12 @@ function bindEvents() {
 
       try {
         await api.teacher.addStudentToClassroom(classroomId, studentId);
-        utils.showNotification('Student added to classroom.', 'success');
+        notifyTeacherSuccess('studentAddSuccess');
         await Promise.all([loadClassrooms(), loadStudents()]);
         syncAssignmentFormOptions();
       } catch (error) {
         console.error(error);
-        utils.showNotification(error.message || 'Failed to add student', 'error');
+        notifyTeacherError('studentAddFailed', error);
       }
     });
   }
@@ -1430,13 +1596,13 @@ function bindEvents() {
 
       try {
         await api.teacher.removeStudentFromClassroom(classroomId, studentId);
-        utils.showNotification('Student removed from classroom.', 'success');
+        notifyTeacherSuccess('studentRemoveSuccess');
         await Promise.all([loadClassrooms(), loadStudents()]);
         syncAssignmentFormOptions();
         showClassroomStudentsModal(classroomId);
       } catch (error) {
         console.error(error);
-        utils.showNotification(error.message || 'Failed to remove student', 'error');
+        notifyTeacherError('studentRemoveFailed', error);
       }
     });
   }
@@ -1472,12 +1638,12 @@ function bindEvents() {
         }
 
         await api.teacher.createAssignment(payload);
-        utils.showNotification('Assignment created successfully.', 'success');
+        notifyTeacherSuccess('assignmentCreateSuccess');
         assignmentForm.reset();
         await loadAssignments();
       } catch (error) {
         console.error(error);
-        utils.showNotification(error.message || 'Failed to create assignment', 'error');
+        notifyTeacherError('assignmentCreateFailed', error);
       } finally {
         clearBusy(btn);
       }
