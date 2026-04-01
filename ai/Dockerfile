@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # BAKE THE MODEL INTO THE DOCKER IMAGE
 # Using Python directly avoids all 'command not found' errors
 # ---------------------------------------------------------
-ARG MODEL_NAME="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+ARG MODEL_NAME="Qwen/Qwen2.5-1.5B-Instruct"
 RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('${MODEL_NAME}')"
 
 COPY . /app
