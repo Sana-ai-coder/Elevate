@@ -1,28 +1,34 @@
-"""Model wrapper for the Hugging Face Serverless Inference API."""
+"""Language model wrapper for LOCAL text generation on CPU using Persistent Storage."""
 from __future__ import annotations
-import json
 import os
+import threading
 from typing import Optional
-import urllib.request
-import urllib.error
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from config import MODELS_DIR
 
-# Qwen 1.5B is incredibly fast and extremely reliable on the free HF API
-DEFAULT_INFERENCE_API_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+LLM_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
 class LanguageModel:
-    def __init__(self, model: Optional[str] = None):
-        self.model_id = model or os.environ.get("INFERENCE_API_MODEL") or DEFAULT_INFERENCE_API_MODEL
-        self.api_url = f"https://api-inference.huggingface.co/models/{self.model_id}"
-        self.api_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    def __init__(self) -> None:
+        self.device = "cpu"
+        print(f"Loading LOCAL model: {LLM_MODEL} into memory...")
+        print(f"Using persistent storage cache: {MODELS_DIR}")
         
-        self.headers = {
-            "Content-Type": "application/json"
-        }
-        if self.api_token:
-            self.headers["Authorization"] = f"Bearer {self.api_token}"
-            
-        self.device = "cloud"
-        print(f"Using Hugging Face Inference API for model: {self.model_id}")
+        # This downloads the model to /data ONLY on the very first run.
+        # On all future runs, it boots instantly from your persistent storage.
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            LLM_MODEL, 
+            cache_dir=str(MODELS_DIR)
+        )
+        self.model = AutoModelForCausalLM.from_pretrained(
+            LLM_MODEL,
+            cache_dir=str(MODELS_DIR),
+            torch_dtype=torch.float32,
+            low_cpu_mem_usage=True
+        )
+        self.model.eval()
+        print("Local language model loaded successfully.")
 
     def ensure_model_loaded(self) -> None:
         pass
@@ -34,43 +40,38 @@ class LanguageModel:
         self,
         prompt: str,
         max_new_tokens: int = 800,
-        temperature: float = 0.1, # Low temp for strict formatting
+        temperature: float = 0.1,
         top_p: float = 0.95,
         max_time: Optional[float] = None,
     ) -> str:
-        payload = {
-            "inputs": prompt,
-            "parameters": {
-                "max_new_tokens": max_new_tokens,
-                "temperature": max(0.01, temperature),
-                "top_p": top_p,
-                "return_full_text": False, 
-            },
-        }
+        messages = [
+            {"role": "system", "content": "You are an expert educational AI. Generate exactly what is requested, following the text format perfectly."},
+            {"role": "user", "content": prompt}
+        ]
+        text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = self.tokenizer([text], return_tensors="pt").to(self.device)
         
-        request_body = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(self.api_url, data=request_body, headers=self.headers)
-        
-        # Give it up to 55 seconds to respond before closing the connection
-        timeout = max_time if max_time is not None else 55.0 
-        
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as response:
-                result = json.loads(response.read().decode())
-                if isinstance(result, list):
-                    return result[0].get("generated_text", "")
-                elif isinstance(result, dict) and "error" in result:
-                    print(f"[Inference API Error] {result['error']}")
-                    return ""
-                return ""
-        except Exception as e:
-            print(f"[Inference API Request Failed] {e}")
-            return ""
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=True,
+                top_p=top_p,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+            
+        generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, outputs)]
+        response = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        return response.strip()
 
 _llm_model: LanguageModel | None = None
+_llm_model_lock = threading.Lock()
 
 def get_llm_model() -> LanguageModel:
     global _llm_model
     if _llm_model is None:
-        _llm_model = LanguageModel()
+        with _llm_model_lock:
+            if _llm_model is None:
+                _llm_model = LanguageModel()
     return _llm_model

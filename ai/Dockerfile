@@ -21,13 +21,13 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # BAKE THE MODEL INTO THE DOCKER IMAGE
 # Using Python directly avoids all 'command not found' errors
 # ---------------------------------------------------------
-ARG MODEL_NAME="Qwen/Qwen2.5-1.5B-Instruct"
-RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('${MODEL_NAME}')"
+# ARG MODEL_NAME="Qwen/Qwen2.5-1.5B-Instruct"
+# RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('${MODEL_NAME}')"
 
 
 # PROOF OF STORAGE: This will print the downloaded model files in your Render build logs!
-RUN echo "=== PROOF OF MODEL IN STORAGE ===" && \
-    ls -lh /root/.cache/huggingface/hub/
+# RUN echo "=== PROOF OF MODEL IN STORAGE ===" && \
+#     ls -lh /root/.cache/huggingface/hub/
     
 COPY . /app
 RUN chmod +x /app/start.sh

@@ -493,3 +493,33 @@ select.form-control:disabled,
 .fade-in {
   animation: fadeIn 0.5s ease;
 }
+
+/* Ensure the MCQ container wraps text and expands vertically */
+.mcq-container, 
+.question-card, 
+.question-item {
+    height: auto !important;
+    min-height: min-content !important;
+    overflow: visible !important;
+    word-wrap: break-word !important;
+    overflow-wrap: break-word !important;
+    white-space: normal !important;
+}
+
+/* Add spacing for AI explanations */
+.explanation-text {
+    margin-top: 12px;
+    padding: 12px;
+    background-color: #f9fafb;
+    border-left: 4px solid #3b82f6;
+    height: auto !important;
+    display: block;
+}
+
+/* Prevent options from spilling out */
+.options-list li {
+    word-wrap: break-word;
+    white-space: normal;
+    height: auto;
+    padding: 8px 0;
+}

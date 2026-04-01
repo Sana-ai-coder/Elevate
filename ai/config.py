@@ -1,22 +1,19 @@
 """Configuration for the standalone AI topic MCQ service."""
-
 from __future__ import annotations
-
 import os
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent
 
-# Stop trying to override with /data dynamically. 
-# Just use the standard Hugging Face cache directory where the Dockerfile downloaded the model.
-HF_HOME_DIR = Path(os.environ.get("HF_HOME", "~/.cache/huggingface")).expanduser()
+# Create a BRAND NEW cache directory on the persistent volume.
+# This acts as a clean wipe of your previous model data.
+HF_HOME_DIR = Path("/data/elevate_models_v3")
 HF_HOME_DIR.mkdir(parents=True, exist_ok=True)
 
-# Point all cache variables to the exact same place
 MODELS_DIR = HF_HOME_DIR
-os.environ.setdefault("HF_HOME", str(HF_HOME_DIR))
-os.environ.setdefault("TRANSFORMERS_CACHE", str(MODELS_DIR))
-os.environ.setdefault("HF_HUB_CACHE", str(HF_HOME_DIR / "hub"))
+os.environ["HF_HOME"] = str(HF_HOME_DIR)
+os.environ["TRANSFORMERS_CACHE"] = str(MODELS_DIR)
+os.environ["HF_HUB_CACHE"] = str(HF_HOME_DIR / "hub")
 
 LLM_MODEL = os.environ.get("LLM_MODEL", "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
 LORA_ADAPTER_PATH = (os.environ.get("LORA_ADAPTER_PATH") or "").strip() or None

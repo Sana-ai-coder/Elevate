@@ -16,7 +16,7 @@ from .validation import sanitize_string
 
 
 DEFAULT_TOPIC_AI_SERVICE_URL = "http://127.0.0.1:7860"
-DEFAULT_TOPIC_AI_TIMEOUT_SECONDS = 45
+DEFAULT_TOPIC_AI_TIMEOUT_SECONDS = 180S
 
 
 def _to_hf_space_subdomain(owner: str, space: str) -> str:
