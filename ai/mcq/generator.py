@@ -176,13 +176,33 @@ class MCQGenerator:
         test_description: str = "",
         existing_questions: Optional[List[str]] = None,
     ) -> str:
-        # Provide just 8 facts to keep the prompt short and generation fast
-        fact_lines = "\n".join(f"- {fact}" for fact in facts[:8])
+        # Provide up to 12 facts for richer, factual context
+        fact_lines = "\n".join(f"- {fact}" for fact in facts[:12])
         
-        # We ask for a strict, simple text format that the LLM won't mess up
+        # Build strict context constraints dynamically
+        context_block = ""
+        if test_title or test_description:
+            context_block += "TEST CONTEXT (Must be deeply integrated into the questions):\n"
+            if test_title:
+                context_block += f"Test Title: {test_title}\n"
+            if test_description:
+                context_block += f"Test Description: {test_description}\n"
+            context_block += "\n"
+
         return (
-            f"You are an expert teacher. Generate exactly {num_questions} multiple-choice questions about '{topic}'.\n"
-            "Use ONLY these facts:\n"
+            f"You are an expert educational assessment designer. Your task is to generate exactly {num_questions} original, highly sensible, and factual multiple-choice questions.\n\n"
+            f"TARGET AUDIENCE & PARAMETERS:\n"
+            f"- STEM Subject: {subject.capitalize()}\n"
+            f"- Sub-Topic: {topic}\n"
+            f"- Grade Level: {grade.capitalize()}\n"
+            f"- Difficulty: {difficulty.capitalize()}\n\n"
+            f"{context_block}"
+            f"STRICT INSTRUCTIONS:\n"
+            f"1. Alignment: The questions MUST align perfectly with the Test Title, Description, Subject, and Sub-Topic.\n"
+            f"2. Complexity: Calibrate the depth of the question, the vocabulary, and the reasoning required strictly to the '{grade.capitalize()}' grade level and '{difficulty.capitalize()}' difficulty.\n"
+            f"3. Practicality: Make questions sensible, practical, and highly useful for actual student practice. Use multi-line scenarios or real-world examples if they fit the difficulty.\n"
+            f"4. Options: Ensure all 4 options are plausible and challenging (especially for medium/hard difficulty), but only ONE is definitively correct.\n"
+            f"5. Accuracy: Use the following reference facts to ensure strict factual accuracy:\n"
             f"{fact_lines}\n\n"
             "DO NOT OUTPUT JSON. Output EXACTLY this plain-text format for each question, separated by a blank line:\n\n"
             "Question: <the question text>\n"
@@ -191,7 +211,7 @@ class MCQGenerator:
             "C) <third option>\n"
             "D) <fourth option>\n"
             "Answer: <A, B, C, or D>\n"
-            "Explanation: <one short sentence>\n"
+            "Explanation: <clear, educational explanation of why the answer is correct>\n"
         )
 
     def _generate_llm_mcqs(

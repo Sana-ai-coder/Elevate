@@ -158,6 +158,7 @@ function collectEditableQuestionsFromPanel(panel) {
     const text = row.querySelector('.q-text')?.value?.trim() || '';
     const order = Number(row.querySelector('.q-order')?.value || (index + 1));
     const points = Number(row.querySelector('.q-points')?.value || 1);
+    const explanation = row.querySelector('.q-explanation')?.value?.trim() || ''; // Added
 
     const options = [0, 1, 2, 3].map(i => row.querySelector(`.q-opt-${i}`)?.value?.trim() || '');
     const correctIndex = Number(row.querySelector('.q-correct')?.value || 0);
@@ -169,6 +170,7 @@ function collectEditableQuestionsFromPanel(panel) {
       points,
       options,
       correct_index: correctIndex,
+      explanation // Added
     };
   });
 }
@@ -1069,87 +1071,108 @@ function bindTestActions() {
 
     try {
       if (action === 'view') {
-        const detail = await api.teacher.getTest(testId);
         const panel = document.getElementById('testDetailPanel');
-        if (panel) {
-          const questions = Array.isArray(detail.questions) ? detail.questions : [];
-          panel.classList.remove('hidden');
-          panel.innerHTML = `
-            <div class="d-flex justify-content-between align-items-center mb-2">
-              <h5 class="mb-0">${escapeHtml(detail.title)} Questions</h5>
-              <button class="btn btn-sm btn-primary" id="saveTestQuestionsBtn" data-test-id="${testId}">Update Questions</button>
-            </div>
-            <div class="small text-muted mb-2">Drag by the serial card to reorder. Edit question, points, answers, and correct answer. Then click Update Questions.</div>
-            <div class="test-question-editor-list d-flex flex-column gap-3">
-              ${questions.map((q, idx) => {
-                const opts = Array.isArray(q.options) ? q.options : [];
-                const safeOpts = [0, 1, 2, 3].map(i => escapeHtml(opts[i] || ''));
-                const orderVal = Number(q.order || (idx + 1));
-                const pointsVal = Number(q.points || 1);
-                const correctVal = Number(q.correct_index || 0);
-                const correctAnswerText = safeOpts[correctVal] || '-';
-                return `
-                  <article class="test-question-editor-row" data-question-id="${q.id}">
-                    <div class="question-card-head">
-                      <button type="button" class="question-serial-card" title="Drag to reorder">
-                        <span class="question-serial-prefix">Q</span><span class="question-serial-number">${orderVal}</span>
-                      </button>
-                      <div class="question-points-wrap">
-                        <label class="form-label small mb-1">Points</label>
-                        <input type="number" class="form-control form-control-sm q-points" min="1" value="${pointsVal}" />
-                      </div>
-                    </div>
-                    <input type="hidden" class="q-order" value="${orderVal}" />
-                    <div class="question-main-field">
-                      <label class="form-label small mb-1">Question</label>
-                      <input type="text" class="form-control q-text" value="${escapeHtml(q.text || '')}" />
-                    </div>
-                    <div class="question-options-list">
-                      <label class="form-label small mb-1">Answers</label>
-                      <div class="option-row"><span class="option-label">A</span><input type="text" class="form-control form-control-sm q-opt-0" placeholder="Option 1" value="${safeOpts[0]}" /></div>
-                      <div class="option-row"><span class="option-label">B</span><input type="text" class="form-control form-control-sm q-opt-1" placeholder="Option 2" value="${safeOpts[1]}" /></div>
-                      <div class="option-row"><span class="option-label">C</span><input type="text" class="form-control form-control-sm q-opt-2" placeholder="Option 3" value="${safeOpts[2]}" /></div>
-                      <div class="option-row"><span class="option-label">D</span><input type="text" class="form-control form-control-sm q-opt-3" placeholder="Option 4" value="${safeOpts[3]}" /></div>
-                    </div>
-                    <div class="question-correct-row">
-                      <div class="question-correct-select">
-                        <label class="form-label small mb-1">Correct Answer</label>
-                        <select class="form-control form-control-sm q-correct">
-                          <option value="0" ${correctVal === 0 ? 'selected' : ''}>Option 1</option>
-                          <option value="1" ${correctVal === 1 ? 'selected' : ''}>Option 2</option>
-                          <option value="2" ${correctVal === 2 ? 'selected' : ''}>Option 3</option>
-                          <option value="3" ${correctVal === 3 ? 'selected' : ''}>Option 4</option>
-                        </select>
-                      </div>
-                      <div class="question-correct-text">Current correct: <strong>${correctAnswerText}</strong></div>
-                    </div>
-                  </article>
-                `;
-              }).join('')}
-            </div>
-          `;
+        if (!panel) return;
 
-          enableQuestionCardDragAndDrop(panel);
+        // Toggle Logic: If clicking View on an already open test, hide it.
+        if (panel.dataset.currentTestId === String(testId) && !panel.classList.contains('hidden')) {
+          panel.classList.add('hidden');
+          btn.textContent = 'View';
+          return;
+        }
 
-          const saveBtn = panel.querySelector('#saveTestQuestionsBtn');
-          if (saveBtn) {
-            saveBtn.addEventListener('click', async () => {
-              try {
-                const questionPayload = collectEditableQuestionsFromPanel(panel);
-                if (questionPayload.length === 0) {
-                  utils.showNotification('No questions to update.', 'warning');
-                  return;
-                }
+        const detail = await api.teacher.getTest(testId);
+        const questions = Array.isArray(detail.questions) ? detail.questions : [];
+        
+        panel.dataset.currentTestId = testId;
+        panel.classList.remove('hidden');
+        
+        // Change button states
+        document.querySelectorAll('button[data-action="view"]').forEach(b => {
+          b.textContent = b.dataset.id === String(testId) ? 'Hide' : 'View';
+        });
 
-                await api.teacher.updateTest(testId, { questions: questionPayload });
-                utils.showNotification('Test questions updated successfully.', 'success');
-                await loadTests();
-              } catch (error) {
-                console.error(error);
-                utils.showNotification(error.message || 'Failed to update test questions', 'error');
+        panel.innerHTML = `
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <h5 class="mb-0">${escapeHtml(detail.title)} Questions</h5>
+            <button class="btn btn-sm btn-primary" id="saveTestQuestionsBtn" data-test-id="${testId}">Update Questions</button>
+          </div>
+          <div class="small text-muted mb-2">Drag by the serial card to reorder. Edit question, points, answers, explanation, and correct answer. Then click Update Questions.</div>
+          <div class="test-question-editor-list d-flex flex-column gap-3">
+            ${questions.map((q, idx) => {
+              const opts = Array.isArray(q.options) ? q.options : [];
+              const safeOpts = [0, 1, 2, 3].map(i => escapeHtml(opts[i] || ''));
+              const orderVal = Number(q.order || (idx + 1));
+              const pointsVal = Number(q.points || 1);
+              const correctVal = Number(q.correct_index || 0);
+              
+              return `
+                <article class="test-question-editor-row" data-question-id="${q.id}">
+                  <div class="question-card-head">
+                    <button type="button" class="question-serial-card" title="Drag to reorder">
+                      <span class="question-serial-prefix">Q</span><span class="question-serial-number">${orderVal}</span>
+                    </button>
+                    <div class="question-points-wrap">
+                      <label class="form-label small mb-1">Points</label>
+                      <input type="number" class="form-control form-control-sm q-points" min="1" value="${pointsVal}" />
+                    </div>
+                  </div>
+                  <input type="hidden" class="q-order" value="${orderVal}" />
+                  <div class="question-main-field">
+                    <label class="form-label small mb-1">Question</label>
+                    <textarea class="form-control q-text" rows="2">${escapeHtml(q.text || '')}</textarea>
+                  </div>
+                  <div class="question-options-list">
+                    <label class="form-label small mb-1">Answers</label>
+                    <div class="option-row"><span class="option-label">A</span><input type="text" class="form-control form-control-sm q-opt-0" placeholder="Option 1" value="${safeOpts[0]}" /></div>
+                    <div class="option-row"><span class="option-label">B</span><input type="text" class="form-control form-control-sm q-opt-1" placeholder="Option 2" value="${safeOpts[1]}" /></div>
+                    <div class="option-row"><span class="option-label">C</span><input type="text" class="form-control form-control-sm q-opt-2" placeholder="Option 3" value="${safeOpts[2]}" /></div>
+                    <div class="option-row"><span class="option-label">D</span><input type="text" class="form-control form-control-sm q-opt-3" placeholder="Option 4" value="${safeOpts[3]}" /></div>
+                  </div>
+                  <div class="row mt-2">
+                    <div class="col-md-3">
+                      <label class="form-label small mb-1">Correct Answer</label>
+                      <select class="form-control form-control-sm q-correct">
+                        <option value="0" ${correctVal === 0 ? 'selected' : ''}>Option 1 (A)</option>
+                        <option value="1" ${correctVal === 1 ? 'selected' : ''}>Option 2 (B)</option>
+                        <option value="2" ${correctVal === 2 ? 'selected' : ''}>Option 3 (C)</option>
+                        <option value="3" ${correctVal === 3 ? 'selected' : ''}>Option 4 (D)</option>
+                      </select>
+                    </div>
+                    <div class="col-md-9">
+                      <label class="form-label small mb-1">Explanation</label>
+                      <textarea class="form-control form-control-sm q-explanation" rows="2" placeholder="Explain why the answer is correct...">${escapeHtml(q.explanation || '')}</textarea>
+                    </div>
+                  </div>
+                </article>
+              `;
+            }).join('')}
+          </div>
+        `;
+
+        enableQuestionCardDragAndDrop(panel);
+
+        const saveBtn = panel.querySelector('#saveTestQuestionsBtn');
+        if (saveBtn) {
+          saveBtn.addEventListener('click', async () => {
+            try {
+              const questionPayload = collectEditableQuestionsFromPanel(panel);
+              if (questionPayload.length === 0) {
+                utils.showNotification('No questions to update.', 'warning');
+                return;
               }
-            });
-          }
+
+              await api.teacher.updateTest(testId, { questions: questionPayload });
+              utils.showNotification('Test questions updated successfully.', 'success');
+              
+              // Persist the "Hide" button state after reloading
+              await loadTests();
+              document.querySelectorAll(`button[data-action="view"][data-id="${testId}"]`).forEach(b => b.textContent = 'Hide');
+            } catch (error) {
+              console.error(error);
+              utils.showNotification(error.message || 'Failed to update test questions', 'error');
+            }
+          });
         }
       }
 
@@ -1157,13 +1180,28 @@ function bindTestActions() {
         const publish = btn.dataset.value === '1';
         await api.teacher.updateTest(testId, { is_published: publish });
         utils.showNotification(`Test ${publish ? 'published' : 'unpublished'} successfully.`, 'success');
+        
+        // Preserve panel visibility state
+        const panel = document.getElementById('testDetailPanel');
         await loadTests();
+        if (panel && !panel.classList.contains('hidden')) {
+          document.querySelectorAll(`button[data-action="view"][data-id="${panel.dataset.currentTestId}"]`).forEach(b => b.textContent = 'Hide');
+        }
       }
 
       if (action === 'delete') {
         if (!window.confirm('Delete this test? This action cannot be undone.')) return;
         await api.teacher.deleteTest(testId);
         utils.showNotification('Test deleted successfully.', 'success');
+        
+        // Hide panel if the deleted test was being viewed
+        const panel = document.getElementById('testDetailPanel');
+        if (panel && panel.dataset.currentTestId === String(testId)) {
+          panel.innerHTML = '';
+          panel.classList.add('hidden');
+          panel.dataset.currentTestId = '';
+        }
+        
         await loadTests();
       }
     } catch (error) {

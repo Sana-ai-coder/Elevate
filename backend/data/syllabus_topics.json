@@ -1,41 +1,50 @@
 {
-  "mathematics": {
-    "elementary": ["addition","subtraction","multiplication","division"],
-    "middle": ["fractions","linear_equations","percentages"],
-    "high": ["trigonometry","calculus","algebra"],
-    "college": ["calculus","linear_algebra","fourier" ]
-  },
-  "technology": {
-    "elementary": ["digital_literacy","algorithms_basics","internet_safety"],
-    "middle": ["coding_fundamentals","web_basics","data_basics"],
-    "high": ["ai_basics","programming","networks"],
-    "college": ["machine_learning","databases","distributed_systems"]
-  },
-  "engineering": {
-    "elementary": ["design_thinking","simple_machines","measurement"],
-    "middle": ["mechanics","circuits_intro","materials"],
-    "high": ["statics","robotics","control_systems"],
-    "college": ["thermodynamics_eng","signal_processing","systems_design"]
-  },
-  "science": {
-    "elementary": ["photosynthesis","states_of_matter"],
-    "middle": ["water_cycle","astronomy"],
-    "high": ["cell_biology","chemistry_basics"],
-    "college": ["thermodynamics","molecular_biology"]
-  },
-  "physics": {
-    "middle": ["units_of_measure","basic_mechanics"],
-    "high": ["waves","gravity"],
-    "college": ["relativity","quantum_mechanics"]
-  },
-  "chemistry": {
-    "middle": ["molecules","periodic_table"],
-    "high": ["stoichiometry","acids_bases"],
-    "college": ["organic","physical_chemistry"]
-  },
-  "biology": {
-    "middle": ["anatomy","ecology"],
-    "high": ["genetics","cell_biology"],
-    "college": ["molecular_biology","physiology"]
-  }
+  "science": [
+    "Physics Fundamentals",
+    "Cellular Biology",
+    "Chemical Reactions",
+    "Earth And Space",
+    "Genetics And Evolution",
+    "Thermodynamics",
+    "Electromagnetism",
+    "Quantum Mechanics",
+    "Organic Chemistry",
+    "Ecology And Environment"
+  ],
+  "technology": [
+    "AI Basics",
+    "Machine Learning",
+    "Cyber Security",
+    "Web Development",
+    "Cloud Computing",
+    "Data Structures",
+    "Networking Principles",
+    "Blockchain Fundamentals",
+    "Internet Of Things",
+    "Software Engineering"
+  ],
+  "engineering": [
+    "Robotics Core",
+    "Civil Infrastructure",
+    "Electrical Circuits",
+    "Mechanical Systems",
+    "Aerospace Dynamics",
+    "Materials Science",
+    "Fluid Mechanics",
+    "Control Systems",
+    "Biomedical Engineering",
+    "Structural Analysis"
+  ],
+  "mathematics": [
+    "Algebraic Expressions",
+    "Calculus Basics",
+    "Geometry And Spatial",
+    "Probability And Statistics",
+    "Trigonometry",
+    "Linear Algebra",
+    "Discrete Mathematics",
+    "Differential Equations",
+    "Number Theory",
+    "Financial Mathematics"
+  ]
 }

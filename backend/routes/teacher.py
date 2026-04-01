@@ -1,3 +1,4 @@
+from ..question_generator import generate_fallback_mcqs
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -265,95 +266,6 @@ def _build_generated_question_records(
     return records
 
 
-def _generate_technical_sample_payload(
-    *,
-    subject,
-    grade,
-    difficulty,
-    topic,
-    count,
-    seed,
-):
-    focus = sanitize_string(topic or subject or "the requested topic", max_length=128) or "the requested topic"
-    subject_label = (sanitize_string(subject, max_length=64) or "STEM").strip().title()
-    grade_label = (sanitize_string(grade, max_length=32) or "school").strip().lower()
-    difficulty_label = (sanitize_string(difficulty, max_length=16) or "medium").strip().lower()
-
-    rng = random.Random(seed)
-    templates = [
-        (
-            "Which statement best defines {focus} in {subject_label}?",
-            "It describes the core principle used to explain {focus}.",
-            [
-                "It ignores evidence and relies only on guesswork.",
-                "It means every outcome is equally correct regardless of facts.",
-                "It is unrelated to the requested subject area.",
-            ],
-            "This option states the core idea accurately.",
-        ),
-        (
-            "In a {grade_label} {subject_label} assessment, what is the best way to apply {focus}?",
-            "Use the concept in a factual scenario and justify the answer with evidence.",
-            [
-                "Memorize random terms without checking their meaning.",
-                "Choose the longest option because it looks detailed.",
-                "Ignore units, assumptions, and known constraints.",
-            ],
-            "Applying evidence-based reasoning is the correct method.",
-        ),
-        (
-            "Which option is the most accurate conclusion about {focus} at {difficulty_label} difficulty?",
-            "The conclusion should be specific, testable, and consistent with known facts.",
-            [
-                "The conclusion should avoid measurable evidence.",
-                "The conclusion should contradict all known definitions.",
-                "The conclusion should be based only on personal opinion.",
-            ],
-            "A valid conclusion must align with verifiable facts.",
-        ),
-    ]
-
-    rows = []
-    for idx in range(max(0, int(count))):
-        question_tpl, correct_tpl, distractors_tpl, explanation_tpl = templates[idx % len(templates)]
-        question_text = question_tpl.format(
-            focus=focus,
-            subject_label=subject_label,
-            grade_label=grade_label,
-            difficulty_label=difficulty_label,
-        )
-        correct = correct_tpl.format(
-            focus=focus,
-            subject_label=subject_label,
-            grade_label=grade_label,
-            difficulty_label=difficulty_label,
-        )
-        distractors = [
-            value.format(
-                focus=focus,
-                subject_label=subject_label,
-                grade_label=grade_label,
-                difficulty_label=difficulty_label,
-            )
-            for value in distractors_tpl
-        ]
-
-        options = [correct] + distractors
-        rng.shuffle(options)
-        correct_index = options.index(correct)
-
-        rows.append({
-            "text": question_text,
-            "options": options,
-            "correct_index": correct_index,
-            "hint": f"Focus on the core principle of {focus}.",
-            "explanation": explanation_tpl,
-            "topic": focus,
-            "source": "technical_sample_fallback",
-        })
-
-    return rows
-
 
 def _pick_or_generate_questions(
     teacher_id,
@@ -442,13 +354,12 @@ def _pick_or_generate_questions(
     generation_status["service_generated_count"] = len(generated_records)
 
     if not service_result.get("ok") and len(pool) < count:
-        sample_payload = _generate_technical_sample_payload(
+        sample_payload = generate_fallback_mcqs(
             subject=subject,
             grade=grade,
             difficulty=difficulty,
             topic=topic,
-            count=count - len(pool),
-            seed=seed,
+            count=count - len(pool)
         )
         sample_records = _build_generated_question_records(
             sample_payload,
@@ -657,13 +568,12 @@ def teacher_generate_question_bank():
         )
 
     if not service_result.get("ok") and len(generated_payload) < count:
-        sample_payload = _generate_technical_sample_payload(
+        sample_payload = generate_fallback_mcqs(
             subject=subject,
             grade=grade,
             difficulty=difficulty,
             topic=topic,
-            count=count - len(generated_payload),
-            seed=seed,
+            count=count - len(generated_payload)
         )
         generated_payload.extend(sample_payload)
         generation_status["technical_sample_count"] = len(sample_payload)
@@ -1095,11 +1005,16 @@ def update_test(test_id):
             except (TypeError, ValueError):
                 return jsonify({"error": f"questions[{idx - 1}].points must be an integer"}), 400
             points = max(1, points)
-
+            
+            explanation = sanitize_string(item.get("explanation") or "", max_length=1500)
+            
             question = question_map[question_id]
             question.text = text
             question.options = normalized_options
             question.correct_index = correct_index
+            
+            if explanation is not None:
+                question.explanation = explanation
 
             tq = tq_map.get(question_id)
             if tq:
