@@ -280,6 +280,7 @@ Elevate shifts the paradigm from simple CRUD operations to an intelligent, state
 * **Real-Time Webcam Tracking:** Integrates lightweight browser-based computer vision (via MediaPipe/TensorFlow.js) to track seven core states during learning: happy, angry, neutral, confused, bored, focused, and surprised.
 * **Contextual Adaptation:** If high frustration is detected alongside repeated failures, the system automatically down-scales difficulty or triggers the AI Tutor.
 * **Dataset Setup Guide:** See [EMOTION_DATASET_GUIDE.md](EMOTION_DATASET_GUIDE.md) for class-folder layout, balancing targets, and distribution guidance.
+* **Deployment Visibility:** Use `python scripts/train_strict_pipeline.py` for fail-fast full training and `python scripts/prepare_emotion_deploy.py` for strict artifact/accuracy verification.
 
 ### 3. Predictive Analytics for Educators
 * **At-Risk Modeling:** Utilizes tabular ML classifiers (e.g., Random Forest/XGBoost) trained on historical interaction data (time-per-question, emotion logs, scores) to flag students at high risk of failing upcoming modules.

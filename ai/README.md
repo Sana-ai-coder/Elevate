@@ -46,3 +46,26 @@ When configured, `start.sh` runs `hf sync` from that bucket path into the config
    - Verify Space: `GET /health` reports `model_ready=true`.
    - Verify Space generation: `POST /mcq/generate` returns valid MCQs.
    - Verify backend integration: create a teacher test/question-bank and confirm service-generated questions.
+
+## Strict ML Training API
+
+This Space also exposes a strict training relay API used by Render backend predeploy.
+
+Endpoints:
+
+- `POST /training/strict/start`
+- `GET /training/strict/status/{job_id}`
+
+Behavior:
+
+- Training is strict and fail-fast: if any stage fails, job status becomes `failed` with stderr/stdout tails.
+- Render waits by polling status until terminal state (`succeeded` or `failed`) with no internal max-wait cutoff in backend relay.
+
+Required environment variables for strict training job execution:
+
+- `HF_ML_TRAINING_GITHUB_REPO_URL` (for example: `https://github.com/<owner>/<repo>.git`)
+- Optional: `HF_ML_TRAINING_GITHUB_REF` (default: `main`)
+- Optional: `HF_ML_TRAINING_WORKSPACE` (default: `/data/elevate_training_workspace`)
+- Optional: `HF_ML_TRAINING_OUTPUT_ROOT` (default: `/data/elevate_models_v3/strict_training`)
+
+The training runner clones the repo, installs requirements, runs `scripts/train_strict_pipeline.py`, and syncs resulting artifacts to persistent HF storage.

@@ -1227,25 +1227,28 @@ def build_large_question_bank(manifest: dict, per_topic: int = 12):
     if not manifest:
         return []
 
+    def _iter_manifest_topic_groups():
+        for subject, payload in manifest.items():
+            if isinstance(payload, dict):
+                for grade, topics in payload.items():
+                    if isinstance(topics, list) and topics:
+                        yield subject, str(grade), topics
+            elif isinstance(payload, list) and payload:
+                # Backward-compatible manifest shape: subject -> [topics]
+                yield subject, "high_school", payload
+
     generated = []
-    for subject, grades in manifest.items():
-        if not isinstance(grades, dict):
-            continue
+    for subject, grade, topics in _iter_manifest_topic_groups():
+        difficulties = ["easy", "medium", "hard"]
+        if str(grade).strip().lower() == "college":
+            difficulties.append("expert")
 
-        for grade, topics in grades.items():
-            if not isinstance(topics, list):
-                continue
-
-            difficulties = ["easy", "medium", "hard"]
-            if grade == "college":
-                difficulties.append("expert")
-
-            for topic in topics:
-                for difficulty in difficulties:
-                    for idx in range(per_topic):
-                        generated.append(
-                            _build_synthetic_question(subject, grade, topic, difficulty, idx)
-                        )
+        for topic in topics:
+            for difficulty in difficulties:
+                for idx in range(per_topic):
+                    generated.append(
+                        _build_synthetic_question(subject, grade, topic, difficulty, idx)
+                    )
 
     return generated
 
@@ -1265,26 +1268,29 @@ def build_strict_stem_bank(manifest: dict, per_subtopic: int = 20):
     if not manifest:
         return []
 
+    def _iter_manifest_topic_groups():
+        for subject, payload in manifest.items():
+            if isinstance(payload, dict):
+                for grade, topics in payload.items():
+                    if isinstance(topics, list) and topics:
+                        yield subject, str(grade), topics
+            elif isinstance(payload, list) and payload:
+                # Backward-compatible manifest shape: subject -> [topics]
+                yield subject, "high_school", payload
+
     generated = []
-    for subject, grades in manifest.items():
-        if not isinstance(grades, dict):
-            continue
+    for subject, grade, topics in _iter_manifest_topic_groups():
+        include_expert = str(grade).strip().lower() == "college"
+        distribution = _split_count_across_difficulties(per_subtopic, include_expert)
 
-        for grade, topics in grades.items():
-            if not isinstance(topics, list):
-                continue
-
-            include_expert = grade == "college"
-            distribution = _split_count_across_difficulties(per_subtopic, include_expert)
-
-            for topic in topics:
-                variant = 0
-                for difficulty, qty in distribution.items():
-                    for _ in range(qty):
-                        generated.append(
-                            _build_synthetic_question(subject, grade, topic, difficulty, variant)
-                        )
-                        variant += 1
+        for topic in topics:
+            variant = 0
+            for difficulty, qty in distribution.items():
+                for _ in range(qty):
+                    generated.append(
+                        _build_synthetic_question(subject, grade, topic, difficulty, variant)
+                    )
+                    variant += 1
 
     return generated
 
@@ -1292,6 +1298,35 @@ def build_strict_stem_bank(manifest: dict, per_subtopic: int = 20):
 def seed_database(reset_questions=False, augment_large=False, per_topic=12, strict_stem_rebuild=False, per_subtopic=20):
     """Populate database with questions."""
     import json, os
+
+    def _infer_syllabus_topic(sub: str | None, gr: str | None) -> str | None:
+        if not manifest or not sub:
+            return None
+
+        subject_keys = [str(sub).strip(), str(sub).strip().lower(), str(sub).strip().title()]
+        subject_payload = None
+        for key in subject_keys:
+            if key in manifest:
+                subject_payload = manifest.get(key)
+                break
+
+        if isinstance(subject_payload, list):
+            return subject_payload[0] if subject_payload else None
+
+        if isinstance(subject_payload, dict):
+            grade_keys = [str(gr).strip()] if gr is not None else []
+            for key in grade_keys:
+                topics = subject_payload.get(key)
+                if isinstance(topics, list) and topics:
+                    return topics[0]
+
+            # Fallback to first non-empty grade/topic list.
+            for topics in subject_payload.values():
+                if isinstance(topics, list) and topics:
+                    return topics[0]
+
+        return None
+
     topics_manifest_path = os.path.join(os.path.dirname(__file__), 'data', 'syllabus_topics.json')
     manifest = None
     if os.path.exists(topics_manifest_path):
@@ -1299,18 +1334,18 @@ def seed_database(reset_questions=False, augment_large=False, per_topic=12, stri
             with open(topics_manifest_path, 'r', encoding='utf-8') as f:
                 manifest = json.load(f)
         except Exception as e:
-            print('⚠️ Failed to load syllabus_topics manifest:', e)
+            print('WARNING: Failed to load syllabus_topics manifest:', e)
 
     with app.app_context():
         # Check if questions already exist
         existing_count = Question.query.count()
 
         if strict_stem_rebuild and existing_count > 0 and not reset_questions:
-            print("⚠️ strict STEM rebuild requires --reset-questions to avoid mixed banks.")
+            print("WARNING: strict STEM rebuild requires --reset-questions to avoid mixed banks.")
             return
         
         if existing_count > 0 and not reset_questions and not augment_large:
-            print(f"ℹ️  Database already has {existing_count} questions. Skipping reseed to avoid data loss.")
+            print(f"INFO: Database already has {existing_count} questions. Skipping reseed to avoid data loss.")
             print("   Pass --reset-questions to delete/reseed, or --augment-large to append broad-coverage questions.")
             return
 
@@ -1323,11 +1358,11 @@ def seed_database(reset_questions=False, augment_large=False, per_topic=12, stri
         question_bank = list(QUESTIONS)
         if strict_stem_rebuild:
             question_bank = build_strict_stem_bank(manifest, per_subtopic=per_subtopic)
-            print(f"ℹ️  Built strict STEM bank: {len(question_bank)} questions ({per_subtopic} per subject-grade-topic).")
+            print(f"INFO: Built strict STEM bank: {len(question_bank)} questions ({per_subtopic} per subject-grade-topic).")
         elif augment_large:
             generated = build_large_question_bank(manifest, per_topic=per_topic)
             question_bank.extend(generated)
-            print(f"ℹ️  Built {len(generated)} synthetic coverage questions ({per_topic} per topic per difficulty).")
+            print(f"INFO: Built {len(generated)} synthetic coverage questions ({per_topic} per topic per difficulty).")
 
         # Prevent duplicate inserts when augmenting existing banks.
         existing_texts = {
@@ -1342,11 +1377,9 @@ def seed_database(reset_questions=False, augment_large=False, per_topic=12, stri
         for q_data in question_bank:
             # if syllabus_topic missing, try to infer from manifest by subject/grade
             if manifest and not q_data.get('syllabus_topic'):
-                sub = q_data.get('subject')
-                gr = q_data.get('grade')
-                if sub and gr and manifest.get(sub) and manifest[sub].get(gr):
-                    # pick first topic as default
-                    q_data['syllabus_topic'] = manifest[sub][gr][0]
+                inferred_topic = _infer_syllabus_topic(q_data.get('subject'), q_data.get('grade'))
+                if inferred_topic:
+                    q_data['syllabus_topic'] = inferred_topic
 
             text_key = (q_data.get('text') or '').strip().lower()
             if not text_key:
@@ -1363,17 +1396,17 @@ def seed_database(reset_questions=False, augment_large=False, per_topic=12, stri
         
         db.session.commit()
         
-        print(f"\n✅ Successfully added {added} questions!")
+        print(f"\nSuccessfully added {added} questions!")
         if skipped_duplicates:
-            print(f"↩️  Skipped {skipped_duplicates} duplicate questions")
+            print(f"Skipped {skipped_duplicates} duplicate questions")
         
         # Show statistics
-        print("\n📊 Question Distribution:")
+        print("\nQuestion Distribution:")
         for difficulty in ['easy', 'medium', 'hard', 'expert']:
             count = Question.query.filter_by(difficulty=difficulty).count()
             print(f"  {difficulty.capitalize()}: {count}")
         
-        print("\n📚 Subject Distribution:")
+        print("\nSubject Distribution:")
         all_subjects = [row[0] for row in db.session.query(Question.subject).distinct().order_by(Question.subject).all()]
         for subject in all_subjects:
             count = Question.query.filter_by(subject=subject).count()
@@ -1381,7 +1414,7 @@ def seed_database(reset_questions=False, augment_large=False, per_topic=12, stri
 
 
 if __name__ == "__main__":
-    print("🌱 Seeding question database...")
+    print("Seeding question database...")
     should_reset = "--reset-questions" in sys.argv
     should_augment = "--augment-large" in sys.argv
     should_strict_rebuild = "--strict-stem-rebuild" in sys.argv
@@ -1392,14 +1425,14 @@ if __name__ == "__main__":
             per_topic_index = sys.argv.index("--per-topic") + 1
             per_topic = max(1, min(int(sys.argv[per_topic_index]), 50))
         except Exception:
-            print("⚠️ Invalid --per-topic value. Using default 12.")
+            print("WARNING: Invalid --per-topic value. Using default 12.")
 
     if "--per-subtopic" in sys.argv:
         try:
             per_subtopic_index = sys.argv.index("--per-subtopic") + 1
             per_subtopic = max(1, min(int(sys.argv[per_subtopic_index]), 100))
         except Exception:
-            print("⚠️ Invalid --per-subtopic value. Using default 20.")
+            print("WARNING: Invalid --per-subtopic value. Using default 20.")
 
     seed_database(
         reset_questions=should_reset,

@@ -10,6 +10,7 @@ Trains a deep learning model to predict student knowledge states using LSTM/GRU 
 """
 
 import json
+import os
 import pickle
 import numpy as np
 import torch
@@ -364,6 +365,7 @@ def main():
     rnn_layers = 2
     dropout = 0.3
     use_gru = False  # LSTM by default
+    num_workers = max(0, min(os.cpu_count() or 2, 4))
     
     # Load data
     print("[DKT] Loading interaction dataset...")
@@ -389,9 +391,30 @@ def main():
     )
     
     # Create data loaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=(device.type == "cuda"),
+        persistent_workers=(num_workers > 0),
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=(device.type == "cuda"),
+        persistent_workers=(num_workers > 0),
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=(device.type == "cuda"),
+        persistent_workers=(num_workers > 0),
+    )
     
     # Create model
     print("[DKT] Building DKT model...")

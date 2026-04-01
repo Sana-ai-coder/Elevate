@@ -14,7 +14,7 @@ import hashlib
 import json
 import math
 import random
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -334,9 +334,37 @@ def build_dataset(config: BuildConfig) -> dict[str, Any]:
     all_events = real_events + synthetic_events
     all_events.sort(key=lambda row: row["answered_at"])
 
+    student_keys = sorted({event["student_key"] for event in all_events})
+    split_by_student = {student_key: _student_split(student_key) for student_key in student_keys}
+
+    # Ensure every split has at least one student when we have enough students.
+    if len(student_keys) >= 3:
+        split_counts = Counter(split_by_student.values())
+        required_splits = ("train", "val", "test")
+        for missing_split in required_splits:
+            if split_counts.get(missing_split, 0) > 0:
+                continue
+
+            donor_split = max(required_splits, key=lambda split_name: split_counts.get(split_name, 0))
+            if split_counts.get(donor_split, 0) <= 1:
+                continue
+
+            donor_students = sorted(
+                student_key
+                for student_key, split_name in split_by_student.items()
+                if split_name == donor_split
+            )
+            if not donor_students:
+                continue
+
+            moved_student = donor_students[-1]
+            split_by_student[moved_student] = missing_split
+            split_counts[donor_split] -= 1
+            split_counts[missing_split] += 1
+
     by_split: dict[str, list[dict[str, Any]]] = {"train": [], "val": [], "test": []}
     for event in all_events:
-        split = _student_split(event["student_key"])
+        split = split_by_student.get(event["student_key"], _student_split(event["student_key"]))
         event["split"] = split
         by_split[split].append(event)
 

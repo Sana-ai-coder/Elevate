@@ -29,7 +29,7 @@ import json
 import os
 import logging
 import time
-from functools import lru_cache
+from datetime import datetime, timezone
 
 import numpy as np
 from flask import Blueprint, jsonify, request, current_app
@@ -90,10 +90,78 @@ MAX_B64_BYTES = 2 * 1024 * 1024   # 2 MB safety limit
 _model_cache: dict = {"model": None, "info": None, "loaded": False, "error": None}
 
 
+def _read_model_info_metadata() -> dict:
+    """Read emotion metadata JSON safely (if present)."""
+    if not os.path.exists(_INFO_PATH):
+        return {}
+    try:
+        with open(_INFO_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.warning("Failed to parse emotion model metadata at %s: %s", _INFO_PATH, exc)
+        return {}
+
+
+def _extract_training_summary(info: dict) -> dict:
+    """Extract a compact training summary from known metadata layouts."""
+    if not isinstance(info, dict) or not info:
+        return {}
+
+    validation = info.get("validation_metrics") if isinstance(info.get("validation_metrics"), dict) else {}
+    accuracy = validation.get("accuracy")
+    if accuracy is None:
+        accuracy = info.get("val_accuracy")
+
+    class_names = info.get("class_names")
+    if not isinstance(class_names, list):
+        class_names = []
+
+    return {
+        "timestamp": info.get("timestamp"),
+        "model_type": info.get("model_type") or info.get("model_name"),
+        "accuracy": accuracy,
+        "class_names": [_canonical_emotion_name(name) for name in class_names if str(name).strip()],
+    }
+
+
+def inspect_emotion_artifacts() -> dict:
+    """Inspect local emotion artifacts without loading TensorFlow model weights."""
+    project_root = os.path.dirname(_BACKEND_DIR)
+    tfjs_dir = os.path.join(project_root, "frontend", "js", "emotion_tfjs")
+    tfjs_model = os.path.join(tfjs_dir, "model.json")
+    tfjs_weights = os.path.join(tfjs_dir, "group1-shard1of1.bin")
+
+    info = _read_model_info_metadata()
+    summary = _extract_training_summary(info)
+
+    backend_model_exists = os.path.exists(_MODEL_PATH)
+    backend_model_mtime = None
+    if backend_model_exists:
+        backend_model_mtime = datetime.fromtimestamp(
+            os.path.getmtime(_MODEL_PATH), tz=timezone.utc
+        ).isoformat()
+
+    return {
+        "backend_model_exists": backend_model_exists,
+        "backend_model_path": _MODEL_PATH,
+        "backend_model_mtime_utc": backend_model_mtime,
+        "metadata_exists": os.path.exists(_INFO_PATH),
+        "metadata_path": _INFO_PATH,
+        "training_summary": summary,
+        "tfjs_model_exists": os.path.exists(tfjs_model),
+        "tfjs_model_path": tfjs_model,
+        "tfjs_weights_exists": os.path.exists(tfjs_weights),
+        "tfjs_weights_path": tfjs_weights,
+    }
+
+
 def _load_model_once() -> dict:
     """Load Keras model and metadata JSON exactly once; cache result."""
     if _model_cache["loaded"]:
         return _model_cache
+
+    _model_cache["info"] = _read_model_info_metadata()
 
     if not TF_AVAILABLE:
         _model_cache["error"] = "TensorFlow is not installed (pip install tensorflow)"
@@ -108,10 +176,19 @@ def _load_model_once() -> dict:
     if not os.path.exists(_MODEL_PATH):
         _model_cache["error"] = (
             f"Trained model not found at {_MODEL_PATH}. "
-            "Run train_emotion_model.py first."
+            "Train and publish model artifacts (or use TFJS fallback only)."
         )
         _model_cache["loaded"] = True
         logger.warning(_model_cache["error"])
+        summary = _extract_training_summary(_model_cache.get("info") or {})
+        if summary:
+            logger.info(
+                "Emotion metadata present: model_type=%s accuracy=%s timestamp=%s classes=%s",
+                summary.get("model_type"),
+                summary.get("accuracy"),
+                summary.get("timestamp"),
+                summary.get("class_names"),
+            )
         return _model_cache
 
     try:
@@ -127,15 +204,16 @@ def _load_model_once() -> dict:
         logger.exception("Emotion model load failed")
         return _model_cache
 
-    # Load metadata
-    info = {}
-    if os.path.exists(_INFO_PATH):
-        try:
-            with open(_INFO_PATH) as f:
-                info = json.load(f)
-        except Exception:
-            pass
-    _model_cache["info"] = info
+    summary = _extract_training_summary(_model_cache.get("info") or {})
+    if summary:
+        logger.info(
+            "Emotion metadata: model_type=%s accuracy=%s timestamp=%s classes=%s",
+            summary.get("model_type"),
+            summary.get("accuracy"),
+            summary.get("timestamp"),
+            summary.get("class_names"),
+        )
+
     _model_cache["loaded"] = True
     return _model_cache
 
@@ -339,8 +417,10 @@ def model_status():
         "model_loaded"   : model_loaded,
         "model_path"     : _MODEL_PATH,
         "model_exists"   : os.path.exists(_MODEL_PATH),
+        "inference_mode" : "server" if model_loaded else "unavailable",
         "error"          : cache.get("error"),
         "class_names"    : class_names,
         "info"           : cache.get("info") or {},
+        "training_summary": _extract_training_summary(cache.get("info") or {}),
         "tensorflow_ver" : tf.__version__ if TF_AVAILABLE else None,
     })

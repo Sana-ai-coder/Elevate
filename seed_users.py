@@ -28,7 +28,7 @@ with app.app_context():
             is_verified=True
         )
         db.session.add(admin)
-        print(f'✅ Created admin user: {admin_email} (password: admin123)')
+        print(f'Created admin user: {admin_email} (password: admin123)')
 
     # Create student user
     student_email = 'student@elevate.com'
@@ -42,7 +42,7 @@ with app.app_context():
             is_verified=True
         )
         db.session.add(student)
-        print(f'✅ Created student user: {student_email} (password: student123)')
+        print(f'Created student user: {student_email} (password: student123)')
 
     # Create teacher user
     teacher_email = 'teacher@elevate.com'
@@ -56,7 +56,7 @@ with app.app_context():
             is_verified=True
         )
         db.session.add(teacher)
-        print(f'✅ Created teacher user: {teacher_email} (password: teacher123)')
+        print(f'Created teacher user: {teacher_email} (password: teacher123)')
 
     db.session.commit()
-    print('✅ All test users created successfully!')
+    print('All test users created successfully!')

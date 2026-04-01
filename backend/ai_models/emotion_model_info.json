@@ -1,5 +1,5 @@
 {
-  "timestamp": "20260329T164011Z",
+  "timestamp": "20260401T113508Z",
   "model_type": "hog_mlp_tfjs",
   "feature_info": {
     "type": "HOG",
@@ -21,7 +21,7 @@
     "rationale": "HOG encodes gradient orientation histograms in local spatial cells. It captures eyebrow shape, mouth corner angles, and eye aperture independently of illumination \u2014 the cues humans use to read emotion."
   },
   "model_info": {
-    "architecture": "HOG(48\u00d748) \u2192 MLP(512, 128) \u2192 Softmax(6)",
+    "architecture": "HOG(48\u00d748) \u2192 MLP(512, 128) \u2192 Softmax(7)",
     "hidden_layer_sizes": [
       512,
       128
@@ -32,11 +32,11 @@
     "batch_size": 128,
     "l2_alpha": 0.0001,
     "early_stopping": true,
-    "epochs_trained": 13,
-    "final_train_loss": 0.128764,
+    "epochs_trained": 22,
+    "final_train_loss": 0.001968,
     "n_features": 1764,
-    "n_classes": 6,
-    "total_params": 970118
+    "n_classes": 7,
+    "total_params": 970247
   },
   "class_names": [
     "happy",
@@ -44,7 +44,8 @@
     "focused",
     "confused",
     "neutral",
-    "angry"
+    "angry",
+    "surprised"
   ],
   "dataset_counts": {
     "happy": 7215,
@@ -52,37 +53,57 @@
     "focused": 3123,
     "confused": 1285,
     "neutral": 4965,
-    "angry": 3995
+    "angry": 3995,
+    "surprised": 3171
   },
   "split_counts": {
-    "train_balanced": 14423,
-    "val": 3568,
-    "test": 3576,
+    "train_balanced": 15778,
+    "val": 4043,
+    "test": 4053,
     "train_by_class": {
-      "happy": 2525,
-      "bored": 2525,
-      "focused": 2525,
-      "confused": 1798,
-      "neutral": 2525,
-      "angry": 2525
+      "happy": 2255,
+      "bored": 2255,
+      "focused": 2255,
+      "confused": 2248,
+      "neutral": 2255,
+      "angry": 2255,
+      "surprised": 2255
     }
   },
+  "class_balance_weights": {
+    "happy": 1.0827,
+    "bored": 0.78,
+    "focused": 0.78,
+    "confused": 0.8474,
+    "neutral": 1.32,
+    "angry": 1.32,
+    "surprised": 0.9599
+  },
+  "class_prior_multipliers": {
+    "happy": 0.9998,
+    "bored": 0.9998,
+    "focused": 0.9998,
+    "confused": 1.0013,
+    "neutral": 0.9998,
+    "angry": 0.9998,
+    "surprised": 0.9998
+  },
   "validation_metrics": {
-    "accuracy": 0.7559,
-    "macro_f1": 0.7793,
-    "macro_precision": 0.7748,
-    "macro_recall": 0.7885,
+    "accuracy": 0.7203,
+    "macro_f1": 0.7466,
+    "macro_precision": 0.7356,
+    "macro_recall": 0.7629,
     "per_class": {
       "happy": {
-        "precision": 0.7332,
-        "recall": 0.7874,
-        "f1": 0.7594,
+        "precision": 0.7608,
+        "recall": 0.6645,
+        "f1": 0.7094,
         "support": 1082
       },
       "bored": {
-        "precision": 0.9918,
+        "precision": 0.9959,
         "recall": 1.0,
-        "f1": 0.9959,
+        "f1": 0.9979,
         "support": 483
       },
       "focused": {
@@ -92,36 +113,44 @@
         "support": 468
       },
       "confused": {
-        "precision": 0.7277,
+        "precision": 0.6878,
         "recall": 0.849,
-        "f1": 0.7837,
+        "f1": 0.7599,
         "support": 192
       },
       "neutral": {
-        "precision": 0.6565,
-        "recall": 0.5188,
-        "f1": 0.5796,
+        "precision": 0.5751,
+        "recall": 0.5349,
+        "f1": 0.5543,
         "support": 744
       },
       "angry": {
-        "precision": 0.5399,
-        "recall": 0.576,
-        "f1": 0.5574,
+        "precision": 0.4985,
+        "recall": 0.5426,
+        "f1": 0.5196,
         "support": 599
+      },
+      "surprised": {
+        "precision": 0.6312,
+        "recall": 0.7495,
+        "f1": 0.6853,
+        "support": 475
       }
     },
     "confusion_matrix": [
       [
-        852,
+        719,
         1,
         0,
         31,
-        86,
-        112
+        120,
+        122,
+        89
       ],
       [
         0,
         483,
+        0,
         0,
         0,
         0,
@@ -133,89 +162,110 @@
         468,
         0,
         0,
+        0,
         0
       ],
       [
-        14,
+        11,
         0,
         0,
         163,
-        4,
-        11
+        9,
+        6,
+        3
       ],
       [
-        163,
-        3,
+        102,
+        1,
         0,
         21,
-        386,
-        171
+        398,
+        163,
+        59
       ],
       [
-        133,
+        70,
         0,
         0,
-        9,
-        112,
-        345
+        16,
+        131,
+        325,
+        57
+      ],
+      [
+        43,
+        0,
+        0,
+        6,
+        34,
+        36,
+        356
       ]
     ]
   },
   "test_metrics": {
-    "accuracy": 0.7623,
-    "macro_f1": 0.7827,
-    "macro_precision": 0.7765,
-    "macro_recall": 0.7943,
+    "accuracy": 0.7293,
+    "macro_f1": 0.7523,
+    "macro_precision": 0.7411,
+    "macro_recall": 0.7681,
     "per_class": {
       "happy": {
-        "precision": 0.7491,
-        "recall": 0.7941,
-        "f1": 0.771,
+        "precision": 0.7669,
+        "recall": 0.7018,
+        "f1": 0.7329,
         "support": 1083
       },
       "bored": {
-        "precision": 0.9938,
+        "precision": 0.9979,
         "recall": 1.0,
-        "f1": 0.9969,
+        "f1": 0.999,
         "support": 484
       },
       "focused": {
-        "precision": 1.0,
+        "precision": 0.9958,
         "recall": 1.0,
-        "f1": 1.0,
+        "f1": 0.9979,
         "support": 469
       },
       "confused": {
-        "precision": 0.7034,
-        "recall": 0.8557,
-        "f1": 0.7721,
+        "precision": 0.6883,
+        "recall": 0.8763,
+        "f1": 0.771,
         "support": 194
       },
       "neutral": {
-        "precision": 0.6633,
-        "recall": 0.5308,
-        "f1": 0.5897,
+        "precision": 0.5948,
+        "recall": 0.5509,
+        "f1": 0.572,
         "support": 746
       },
       "angry": {
-        "precision": 0.5493,
-        "recall": 0.585,
-        "f1": 0.5666,
+        "precision": 0.5134,
+        "recall": 0.5433,
+        "f1": 0.5279,
         "support": 600
+      },
+      "surprised": {
+        "precision": 0.6304,
+        "recall": 0.7044,
+        "f1": 0.6653,
+        "support": 477
       }
     },
     "confusion_matrix": [
       [
-        860,
+        760,
         1,
-        0,
-        20,
-        88,
-        114
+        1,
+        26,
+        119,
+        126,
+        50
       ],
       [
         0,
         484,
+        0,
         0,
         0,
         0,
@@ -227,38 +277,51 @@
         469,
         0,
         0,
+        0,
         0
       ],
       [
-        12,
-        0,
-        0,
-        166,
         5,
-        11
-      ],
-      [
-        157,
-        2,
         0,
-        28,
-        396,
-        163
+        0,
+        170,
+        10,
+        8,
+        1
       ],
       [
-        119,
+        109,
         0,
         0,
         22,
-        108,
-        351
+        411,
+        121,
+        83
+      ],
+      [
+        78,
+        0,
+        1,
+        21,
+        111,
+        326,
+        63
+      ],
+      [
+        39,
+        0,
+        0,
+        8,
+        40,
+        54,
+        336
       ]
     ]
   },
   "timing_seconds": {
-    "load_s": 241.74,
-    "scale_s": 0.6,
-    "train_s": 85.96,
-    "eval_s": 0.26
+    "load_s": 699.06,
+    "scale_s": 4.19,
+    "train_s": 157.93,
+    "eval_s": 0.92
   }
 }

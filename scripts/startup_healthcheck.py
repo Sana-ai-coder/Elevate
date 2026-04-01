@@ -25,6 +25,11 @@ def _run(command: list[str], description: str) -> None:
         raise RuntimeError(f"Failed step: {description}")
 
 
+def _is_truthy_env(name: str, default: str = "0") -> bool:
+    raw = str(os.environ.get(name, default)).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _bootstrap_pip() -> None:
     subprocess.run([str(PYTHON_EXE), "-m", "ensurepip", "--upgrade"], cwd=ROOT)
     probe = subprocess.run([str(PYTHON_EXE), "-m", "pip", "--version"], cwd=ROOT)
@@ -127,11 +132,12 @@ def _ensure_dependencies() -> None:
 
 
 def _ensure_questions(question_count: int) -> None:
+    strict_mode = _is_truthy_env("ELEVATE_STRICT_MODE", "0")
     strict_rebuild = os.environ.get("ELEVATE_STRICT_REBUILD", "0") == "1"
     per_subtopic = int(os.environ.get("ELEVATE_PER_SUBTOPIC", "80"))
     min_questions = int(os.environ.get("ELEVATE_MIN_QUESTIONS", "300"))
 
-    if strict_rebuild:
+    if strict_rebuild or strict_mode:
         _run(
             [
                 str(PYTHON_EXE),
@@ -170,41 +176,112 @@ def _ensure_questions(question_count: int) -> None:
 
 
 def _ensure_interaction_dataset() -> None:
-    build_enabled = os.environ.get("ELEVATE_BUILD_INTERACTION_DATASET", "0") == "1"
-    if not build_enabled:
-        print("[BOOTSTRAP] Interaction dataset build disabled by env flag.")
-        return
-
     max_age_hours = max(1, int(os.environ.get("ELEVATE_DATASET_MAX_AGE_HOURS", "24")))
     min_events = max(1000, int(os.environ.get("ELEVATE_DATASET_MIN_EVENTS", "20000")))
     min_users = max(10, int(os.environ.get("ELEVATE_DATASET_MIN_USERS", "60")))
     dataset_seed = int(os.environ.get("ELEVATE_DATASET_SEED", "42"))
 
-    _run(
-        [
+    command = [
+        str(PYTHON_EXE),
+        "scripts/build_interaction_dataset.py",
+        "--if-stale",
+        "--max-age-hours",
+        str(max_age_hours),
+        "--min-events",
+        str(min_events),
+        "--min-users",
+        str(min_users),
+        "--seed",
+        str(dataset_seed),
+    ]
+
+    if _is_truthy_env("ELEVATE_STRICT_MODE", "0"):
+        command = [
             str(PYTHON_EXE),
             "scripts/build_interaction_dataset.py",
-            "--if-stale",
-            "--max-age-hours",
-            str(max_age_hours),
             "--min-events",
             str(min_events),
             "--min-users",
             str(min_users),
             "--seed",
             str(dataset_seed),
-        ],
+        ]
+
+    _run(
+        command,
         "Ensuring interaction dataset snapshot for model training",
     )
 
 
+def _run_local_strict_pipeline() -> None:
+    min_emotion_acc = str(os.environ.get("HF_ML_MIN_EMOTION_ACCURACY", "0.90")).strip() or "0.90"
+    processes = str(os.environ.get("HF_ML_TRAINING_PROCESSES", "4")).strip() or "4"
+
+    _run(
+        [
+            str(PYTHON_EXE),
+            "scripts/train_strict_pipeline.py",
+            "--min-emotion-accuracy",
+            min_emotion_acc,
+            "--min-emotion-macro-f1",
+            min_emotion_acc,
+            "--processes",
+            processes,
+        ],
+        "Running strict fail-fast local ML pipeline",
+    )
+
+
+def _run_remote_hf_strict_pipeline() -> None:
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from backend.hf_training_service import trigger_and_wait_hf_strict_training
+
+    print("[BOOTSTRAP] Triggering strict HF training via backend service client ...")
+    result = trigger_and_wait_hf_strict_training()
+    if not result.get("ok"):
+        raise RuntimeError(
+            "HF strict training failed: "
+            f"status_code={result.get('status_code')} "
+            f"endpoint={result.get('endpoint')} "
+            f"error={result.get('error')}"
+        )
+
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    state = str(payload.get("status") or "").strip().lower()
+    if state != "succeeded":
+        raise RuntimeError(
+            "HF strict training did not succeed: "
+            f"state={state} payload={payload}"
+        )
+
+    summary = payload.get("summary")
+    print(f"[BOOTSTRAP] HF strict training succeeded. summary={summary}")
+
+
+def _run_strict_pipeline_if_enabled() -> bool:
+    strict_mode = _is_truthy_env("ELEVATE_STRICT_MODE", "0")
+    if not strict_mode:
+        return False
+
+    # Optional delegation to HF Space; otherwise run strict pipeline locally.
+    use_remote_hf = _is_truthy_env("ELEVATE_STRICT_REMOTE_HF", "0")
+    if use_remote_hf:
+        _run_remote_hf_strict_pipeline()
+    else:
+        _run_local_strict_pipeline()
+    return True
+
+
+def _ensure_models_non_strict() -> None:
+    _ensure_bkt_model()
+    _ensure_dkt_model()
+    _ensure_emotion_model()
+    _ensure_at_risk_model()
+
+
 def _ensure_bkt_model() -> None:
     """Train BKT model if it doesn't exist or dataset is fresh."""
-    build_enabled = os.environ.get("ELEVATE_BUILD_BKT_MODEL", "0") == "1"
-    if not build_enabled:
-        print("[BOOTSTRAP] BKT model training disabled by env flag.")
-        return
-
     model_dir = ROOT / "backend" / "models" / "bkt"
     model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -221,11 +298,6 @@ def _ensure_bkt_model() -> None:
 
 def _ensure_dkt_model() -> None:
     """Train Deep Knowledge Tracing model if it doesn't exist."""
-    build_enabled = os.environ.get("ELEVATE_BUILD_DKT_MODEL", "0") == "1"
-    if not build_enabled:
-        print("[BOOTSTRAP] DKT model training disabled by env flag.")
-        return
-
     model_dir = ROOT / "backend" / "models" / "dkt"
     model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -242,11 +314,6 @@ def _ensure_dkt_model() -> None:
 
 def _ensure_emotion_model() -> None:
     """Build TFJS emotion model artifact when missing."""
-    build_enabled = os.environ.get("ELEVATE_BUILD_EMOTION_MODEL", "0") == "1"
-    if not build_enabled:
-        print("[BOOTSTRAP] Emotion model training disabled by env flag.")
-        return
-
     tfjs_model = ROOT / "frontend" / "js" / "emotion_tfjs" / "model.json"
     metrics_info = ROOT / "backend" / "ai_models" / "emotion_model_info.json"
     if tfjs_model.exists() and metrics_info.exists():
@@ -261,11 +328,6 @@ def _ensure_emotion_model() -> None:
 
 def _ensure_at_risk_model() -> None:
     """Train at-risk predictor artifact if missing."""
-    build_enabled = os.environ.get("ELEVATE_BUILD_AT_RISK_MODEL", "0") == "1"
-    if not build_enabled:
-        print("[BOOTSTRAP] At-risk model training disabled by env flag.")
-        return
-
     model_dir = ROOT / "backend" / "models" / "at_risk_predictor"
     latest_manifest = model_dir / "latest_manifest.json"
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -295,10 +357,9 @@ def main() -> int:
         _ensure_users(users_before)
         _ensure_questions(questions_before)
         _ensure_interaction_dataset()
-        _ensure_bkt_model()
-        _ensure_dkt_model()
-        _ensure_emotion_model()
-        _ensure_at_risk_model()
+        strict_ran = _run_strict_pipeline_if_enabled()
+        if not strict_ran:
+            _ensure_models_non_strict()
 
         users_after, questions_after = _read_counts()
         print(

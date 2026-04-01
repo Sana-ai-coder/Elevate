@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
+import subprocess
 import sys
+import threading
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.responses import JSONResponse
@@ -29,6 +33,8 @@ from mcq.validator import MCQValidator
 _MODEL_READY = False
 _PRELOAD_STARTED = False
 _PRELOAD_ERROR: Optional[str] = None
+_TRAINING_JOBS: Dict[str, Dict[str, Any]] = {}
+_TRAINING_LOCK = threading.Lock()
 
 
 def _ensure_generator_loaded():
@@ -134,6 +140,13 @@ class ScoreMCQRequest(BaseModel):
     user_answers: Dict[int, str]
 
 
+class StrictTrainingRequest(BaseModel):
+    github_repo_url: Optional[str] = None
+    github_ref: str = Field(default="main", min_length=1)
+    min_emotion_accuracy: float = Field(default=0.90, ge=0.50, le=0.999)
+    process_count: int = Field(default=4, ge=1, le=16)
+
+
 @app.get("/health")
 def health() -> dict:
     generator = _ensure_generator_loaded()
@@ -173,6 +186,122 @@ def warmup(authorization: Optional[str] = Header(default=None, alias="Authorizat
         "model_ready": _MODEL_READY,
         "warmup_ms": elapsed_ms,
     }
+
+
+def _run_strict_training_job(job_id: str, request_payload: StrictTrainingRequest) -> None:
+    command = [
+        sys.executable,
+        str(AI_ROOT / "training_runner.py"),
+        "--repo-url",
+        str(
+            request_payload.github_repo_url
+            or os.environ.get("HF_ML_TRAINING_GITHUB_REPO_URL")
+            or ""
+        ).strip(),
+        "--repo-ref",
+        str(request_payload.github_ref or "main").strip() or "main",
+        "--min-emotion-accuracy",
+        str(float(request_payload.min_emotion_accuracy)),
+        "--processes",
+        str(int(request_payload.process_count)),
+    ]
+
+    started = time.perf_counter()
+    with _TRAINING_LOCK:
+        _TRAINING_JOBS[job_id]["status"] = "running"
+        _TRAINING_JOBS[job_id]["started_at"] = datetime.now(timezone.utc).isoformat()
+        _TRAINING_JOBS[job_id]["command"] = command
+
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(AI_ROOT),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+        stdout_tail = (completed.stdout or "")[-6000:]
+        stderr_tail = (completed.stderr or "")[-6000:]
+
+        with _TRAINING_LOCK:
+            _TRAINING_JOBS[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+            _TRAINING_JOBS[job_id]["duration_ms"] = duration_ms
+            _TRAINING_JOBS[job_id]["return_code"] = int(completed.returncode)
+            _TRAINING_JOBS[job_id]["stdout_tail"] = stdout_tail
+            _TRAINING_JOBS[job_id]["stderr_tail"] = stderr_tail
+            _TRAINING_JOBS[job_id]["status"] = "succeeded" if completed.returncode == 0 else "failed"
+    except Exception as exc:
+        duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+        with _TRAINING_LOCK:
+            _TRAINING_JOBS[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+            _TRAINING_JOBS[job_id]["duration_ms"] = duration_ms
+            _TRAINING_JOBS[job_id]["status"] = "failed"
+            _TRAINING_JOBS[job_id]["error"] = str(exc)
+
+
+def _find_running_training_job_id() -> Optional[str]:
+    for job_id, payload in _TRAINING_JOBS.items():
+        if str(payload.get("status") or "").lower() == "running":
+            return job_id
+    return None
+
+
+@app.post("/training/strict/start")
+def training_strict_start(
+    payload: StrictTrainingRequest,
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+) -> dict:
+    _enforce_service_auth(authorization)
+
+    with _TRAINING_LOCK:
+        running_job = _find_running_training_job_id()
+        if running_job:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "running",
+                    "job_id": running_job,
+                    "message": "A strict training job is already running.",
+                },
+            )
+
+        repo_url = str(payload.github_repo_url or os.environ.get("HF_ML_TRAINING_GITHUB_REPO_URL") or "").strip()
+        if not repo_url:
+            raise HTTPException(
+                status_code=400,
+                detail="github_repo_url is required (either payload field or HF_ML_TRAINING_GITHUB_REPO_URL).",
+            )
+
+        job_id = uuid4().hex
+        _TRAINING_JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "queued",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "request": payload.model_dump(),
+        }
+
+    worker = threading.Thread(target=_run_strict_training_job, args=(job_id, payload), daemon=True)
+    worker.start()
+
+    return {
+        "status": "queued",
+        "job_id": job_id,
+        "status_endpoint": f"/training/strict/status/{job_id}",
+    }
+
+
+@app.get("/training/strict/status/{job_id}")
+def training_strict_status(
+    job_id: str,
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+) -> dict:
+    _enforce_service_auth(authorization)
+    with _TRAINING_LOCK:
+        job = _TRAINING_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Unknown training job id")
+        return dict(job)
 
 
 @app.post("/mcq/generate")

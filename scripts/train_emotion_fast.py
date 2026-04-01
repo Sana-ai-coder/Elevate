@@ -83,14 +83,15 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter
 from skimage.feature import hog
-from sklearn.metrics import classification_report, confusion_matrix
-from sklearn.neural_network import MLPClassifier
-from sklearn.preprocessing import StandardScaler
+
+if TYPE_CHECKING:
+    from sklearn.neural_network import MLPClassifier
+    from sklearn.preprocessing import StandardScaler
 
 # ── Path resolution ───────────────────────────────────────────────────────────
 # This file lives in scripts/, so project root is one level up.
@@ -113,7 +114,16 @@ CLASS_FOLDER_ALIASES = {
 NUM_CLASSES  = len(CLASS_NAMES)
 
 # ── Image / feature parameters ────────────────────────────────────────────────
-IMG_SIZE   = 48          # 48×48 px preserves more facial detail with low overhead
+def _read_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name)
+    try:
+        value = int(raw) if raw is not None else int(default)
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(minimum, min(value, maximum))
+
+
+IMG_SIZE   = _read_int_env("ELEVATE_EMOTION_IMG_SIZE", 48, 32, 96)
 # HOG parameters justified:
 #   orientations=9  : captures 9 gradient directions (standard in literature)
 #   pixels_per_cell : 6×6 gives 8×8 = 64 cells on a 48×48 image
@@ -146,8 +156,8 @@ MLP_PATIENCE    = 8            # epochs without improvement before stopping
 # ── Reproducibility ──────────────────────────────────────────────────────────
 SEED = 42
 
-# ── Parallel workers: use all physical cores but cap at 8 for safety ─────────
-N_WORKERS = min(os.cpu_count() or 2, 8)
+# ── Parallel workers: use all physical cores but cap at 4 for safety ─────────
+N_WORKERS = _read_int_env("ELEVATE_EMOTION_WORKERS", max(2, min(os.cpu_count() or 2, 8)), 1, 32)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -465,6 +475,8 @@ def _compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict:
     Return accuracy, macro-F1, per-class precision/recall/F1, and
     raw confusion matrix (as nested list for JSON serialisation).
     """
+    from sklearn.metrics import classification_report, confusion_matrix
+
     report = classification_report(
         y_true, y_pred,
         labels=list(range(NUM_CLASSES)),
@@ -495,7 +507,7 @@ def _compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict:
 
 
 def _print_metrics(metrics: Dict, split_label: str) -> None:
-    print(f"\n  ── {split_label} metrics ──────────────────────")
+    print(f"\n  -- {split_label} metrics ----------------------")
     print(f"  Accuracy  : {metrics['accuracy']*100:.2f}%")
     print(f"  Macro F1  : {metrics['macro_f1']*100:.2f}%")
     print(f"  Per class :")
@@ -738,11 +750,11 @@ def _export_tfjs(
         json.dump(model_json, f, indent=2)
 
     bin_size_kb = bin_path.stat().st_size / 1024
-    print(f"\n  ── TFJS export ────────────────────────────────")
-    print(f"  model.json     → {out_dir / 'model.json'}")
-    print(f"  weights.bin    → {bin_path}  ({bin_size_kb:.1f} KB)")
-    print(f"  Architecture   : HOG({IMG_SIZE}×{IMG_SIZE}) → Dense(512,relu) "
-            f"→ Dense(128,relu) → Dense({NUM_CLASSES},softmax)")
+    print(f"\n  -- TFJS export -------------------------------")
+    print(f"  model.json     -> {out_dir / 'model.json'}")
+    print(f"  weights.bin    -> {bin_path}  ({bin_size_kb:.1f} KB)")
+    print(f"  Architecture   : HOG({IMG_SIZE}x{IMG_SIZE}) -> Dense(512,relu) "
+          f"-> Dense(128,relu) -> Dense({NUM_CLASSES},softmax)")
     print(f"  Feature dim    : {feat_dim}")
 
 
@@ -753,12 +765,15 @@ def _export_tfjs(
 def main() -> None:
     wall_start = time.time()
 
+    from sklearn.neural_network import MLPClassifier
+    from sklearn.preprocessing import StandardScaler
+
     # ── Banner ────────────────────────────────────────────────────────────
     print("=" * 60)
-    print("  Elevate — Emotion Recognition Fast Training Pipeline")
+    print("  Elevate - Emotion Recognition Fast Training Pipeline")
     print("=" * 60)
     print(f"  Dataset  : {DATASET_DIR}")
-    print(f"  Features : HOG {IMG_SIZE}×{IMG_SIZE}, {HOG_ORIENT} orientations")
+    print(f"  Features : HOG {IMG_SIZE}x{IMG_SIZE}, {HOG_ORIENT} orientations")
     print(f"  Model    : MLP {MLP_HIDDEN} + StandardScaler")
     print(f"  Workers  : {N_WORKERS} parallel processes")
     print("=" * 60)
@@ -772,7 +787,7 @@ def main() -> None:
     metrics = PipelineMetrics()
 
     # ── Step 1: Verify dataset ────────────────────────────────────────────
-    print("\n[1/6] Verifying dataset …")
+    print("\n[1/6] Verifying dataset ...")
     split_map: Dict[str, SplitData] = {}
     folder_map = _dataset_class_folder_map()
     required_aliases = {
@@ -863,7 +878,7 @@ def main() -> None:
     }
 
     # ── Step 3: Normalise features ────────────────────────────────────────
-    print("\n[3/6] Fitting StandardScaler (zero-mean, unit-variance) …")
+    print("\n[3/6] Fitting StandardScaler (zero-mean, unit-variance) ...")
     t0 = time.time()
     scaler    = StandardScaler()
     X_train   = scaler.fit_transform(X_train_raw)
@@ -924,7 +939,7 @@ def main() -> None:
     }
 
     # ── Step 5: Evaluate ─────────────────────────────────────────────────
-    print("\n[5/6] Evaluating …")
+    print("\n[5/6] Evaluating ...")
     t0 = time.time()
 
     val_pred  = mlp.predict(X_val_s)
@@ -953,7 +968,7 @@ def main() -> None:
     )
 
     # ── Step 6: Export TFJS + save metadata ───────────────────────────────
-    print("\n[6/6] Exporting TF.js model and saving metadata …")
+    print("\n[6/6] Exporting TF.js model and saving metadata ...")
     t0 = time.time()
     _export_tfjs(
         mlp,

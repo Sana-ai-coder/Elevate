@@ -2,6 +2,11 @@ from flask import Blueprint, current_app, request, jsonify
 from ..models import db, User, Question, EmotionLog, AnswerLog, TeacherRequest, School, SyllabusTopic, TestResult
 from ..security import hash_password
 from ..notifications import send_email
+from ..hf_training_service import (
+    get_hf_strict_training_status,
+    get_hf_training_service_url,
+    start_hf_strict_training,
+)
 import csv
 from io import StringIO
 
@@ -310,3 +315,53 @@ def test_results_history(user_id):
         return jsonify({'error': 'not found'}), 404
     items = [tr.as_dict() for tr in TestResult.query.filter_by(user_id=user_id).order_by(TestResult.started_at.desc()).all()]
     return jsonify({'items': items}), 200
+
+
+@admin_bp.post('/ml/train-strict')
+def trigger_strict_ml_training():
+    if not _check_admin_token():
+        return {'error': 'unauthorized'}, 401
+
+    result = start_hf_strict_training()
+    if not result.get('ok'):
+        return jsonify({
+            'ok': False,
+            'service_url': get_hf_training_service_url(),
+            'service_endpoint': result.get('endpoint'),
+            'status_code': result.get('status_code'),
+            'error': result.get('error') or 'failed to trigger strict HF training',
+        }), int(result.get('status_code') or 502)
+
+    payload = result.get('payload') if isinstance(result.get('payload'), dict) else {}
+    return jsonify({
+        'ok': True,
+        'service_url': get_hf_training_service_url(),
+        'service_endpoint': result.get('endpoint'),
+        'service_latency_ms': result.get('latency_ms'),
+        **payload,
+    }), 202
+
+
+@admin_bp.get('/ml/train-strict/<job_id>')
+def strict_ml_training_status(job_id):
+    if not _check_admin_token():
+        return {'error': 'unauthorized'}, 401
+
+    result = get_hf_strict_training_status(job_id)
+    if not result.get('ok'):
+        return jsonify({
+            'ok': False,
+            'service_url': get_hf_training_service_url(),
+            'service_endpoint': result.get('endpoint'),
+            'status_code': result.get('status_code'),
+            'error': result.get('error') or 'failed to fetch strict HF training status',
+        }), int(result.get('status_code') or 502)
+
+    payload = result.get('payload') if isinstance(result.get('payload'), dict) else {}
+    return jsonify({
+        'ok': True,
+        'service_url': get_hf_training_service_url(),
+        'service_endpoint': result.get('endpoint'),
+        'service_latency_ms': result.get('latency_ms'),
+        **payload,
+    }), 200

@@ -114,6 +114,26 @@ def main() -> int:
             ])
 
         print("[predeploy] Migrations applied successfully.")
+
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from backend.hf_training_service import trigger_and_wait_hf_strict_training
+
+        print("[predeploy] Triggering strict HF training pipeline...")
+        training_result = trigger_and_wait_hf_strict_training()
+        if not training_result.get("ok"):
+            raise RuntimeError(
+                "Strict HF training failed: "
+                f"status={training_result.get('status_code')} "
+                f"error={training_result.get('error')}"
+            )
+
+        payload = training_result.get("payload") if isinstance(training_result.get("payload"), dict) else {}
+        state = str(payload.get("status") or "").strip().lower()
+        if state != "succeeded":
+            raise RuntimeError(f"Strict HF training did not succeed (status={state or 'unknown'}).")
+
+        print("[predeploy] Strict HF training completed successfully.")
         return 0
     except Exception as exc:
         print(f"[predeploy] ERROR: {exc}")

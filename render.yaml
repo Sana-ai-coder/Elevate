@@ -38,6 +38,20 @@ services:
         sync: false
       - key: AI_TOPIC_SERVICE_TIMEOUT_SECONDS
         value: "45"
+      - key: HF_ML_TRAINING_SERVICE_URL
+        sync: false
+      - key: HF_ML_TRAINING_SERVICE_TOKEN
+        sync: false
+      - key: HF_ML_TRAINING_GITHUB_REPO_URL
+        sync: false
+      - key: HF_ML_TRAINING_GITHUB_REF
+        value: "main"
+      - key: HF_ML_MIN_EMOTION_ACCURACY
+        value: "0.90"
+      - key: HF_ML_TRAINING_PROCESSES
+        value: "4"
+      - key: HF_ML_TRAINING_POLL_SECONDS
+        value: "20"
 
   - type: static
     name: elevate-frontend

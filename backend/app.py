@@ -35,9 +35,44 @@ from .routes.student   import student_bp
 from .routes.settings  import settings_bp
 
 # ── NEW: AI emotion inference blueprint ─────────────────────────────────────
-from .routes.ai_emotion import ai_emotion_bp
+from .routes.ai_emotion import ai_emotion_bp, inspect_emotion_artifacts
 
 from .logging_config import configure_logging
+
+
+def _log_emotion_deploy_status(app: Flask) -> None:
+    """Emit startup diagnostics for emotion model artifacts."""
+    try:
+        details = inspect_emotion_artifacts()
+        summary = details.get("training_summary") or {}
+
+        app.logger.info(
+            "[EmotionDeploy] backend_model_exists=%s metadata_exists=%s tfjs_model_exists=%s tfjs_weights_exists=%s",
+            details.get("backend_model_exists"),
+            details.get("metadata_exists"),
+            details.get("tfjs_model_exists"),
+            details.get("tfjs_weights_exists"),
+        )
+        app.logger.info(
+            "[EmotionDeploy] backend_model_path=%s metadata_path=%s",
+            details.get("backend_model_path"),
+            details.get("metadata_path"),
+        )
+
+        if summary:
+            app.logger.info(
+                "[EmotionDeploy] training_summary model_type=%s accuracy=%s timestamp=%s classes=%s",
+                summary.get("model_type"),
+                summary.get("accuracy"),
+                summary.get("timestamp"),
+                summary.get("class_names"),
+            )
+
+        app.logger.info(
+            "[EmotionDeploy] Note: training is not automatic at backend startup. Use scripts/train_strict_pipeline.py in HF/CI training pipelines."
+        )
+    except Exception as exc:
+        app.logger.warning("[EmotionDeploy] startup diagnostics failed: %s", exc)
 
 
 def create_app(config_name: str | None = None) -> Flask:
@@ -55,6 +90,7 @@ def create_app(config_name: str | None = None) -> Flask:
     app.config.from_object(cfg)
 
     configure_logging(app)
+    _log_emotion_deploy_status(app)
 
     allowed_origins = app.config.get("CORS_ORIGINS") or ["*"]
     if isinstance(allowed_origins, str):
