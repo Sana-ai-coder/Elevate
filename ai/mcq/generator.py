@@ -11,8 +11,6 @@ import threading
 import time
 from typing import Dict, List, Optional
 
-import torch
-
 from web_context import build_topic_web_context
 
 
@@ -234,7 +232,6 @@ class MCQGenerator:
             return []
 
         if seed is not None:
-            torch.manual_seed(seed)
             random.seed(seed)
 
         # Token budget: ~120 tokens per question + 80 buffer

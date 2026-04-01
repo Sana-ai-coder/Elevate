@@ -1,5 +1,7 @@
 FROM python:3.11-slim
 
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PORT=7860
@@ -15,8 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
-RUN chmod +x /app/start.sh
 
 EXPOSE 7860
 
-CMD ["/app/start.sh"]
+CMD ["sh", "-c", "python -m uvicorn app:app --host 0.0.0.0 --port ${PORT:-7860}"]
