@@ -248,53 +248,66 @@ class MCQGenerator:
 
         return collected[:requested_count]
 
-    # def _parse_llm_output(self, response: str, difficulty: str, topic: str) -> List[Dict]:
-    #     """
-    #     Parses the plain text output from the LLM into a structured list of question dictionaries.
-    #     This function is designed to be robust to minor formatting errors from the model.
-    #     """
-    #     candidates: List[Dict] = []
-    #     text = str(response or "").strip()
+    def _parse_llm_output(self, response: str, difficulty: str, topic: str) -> List[Dict]:
+        """
+        Parses plain text output from the LLM into structured dictionaries.
+        Highly robust to minor AI formatting mistakes (e.g. A. instead of A) ).
+        """
+        candidates: List[Dict] = []
+        text = str(response or "").strip()
 
-    #     # Split the entire response into blocks, where each block starts with "Question:"
-    #     question_blocks = re.split(r"(?=^Question:)", text, flags=re.MULTILINE)
+        # Split the entire response into blocks, where each block starts with "Question:"
+        # (?i) makes it case-insensitive just in case the AI writes "question:"
+        question_blocks = re.split(r"(?i)(?=^Question:)", text, flags=re.MULTILINE)
 
-    #     for block in question_blocks:
-    #         block = block.strip()
-    #         if not block:
-    #             continue
+        for block in question_blocks:
+            block = block.strip()
+            if not block:
+                continue
 
-    #         try:
-    #             question_match = re.search(r"^Question:\s*(.+)", block, re.MULTILINE)
-    #             options_matches = re.findall(r"^[A-D]\)\s*(.+)", block, re.MULTILINE)
-    #             answer_match = re.search(r"^Answer:\s*([A-D])", block, re.MULTILINE)
-    #             explanation_match = re.search(r"^Explanation:\s*(.+)", block, re.MULTILINE)
+            try:
+                # Extract question
+                question_match = re.search(r"(?i)^Question:\s*(.+)", block, re.MULTILINE)
+                if not question_match:
+                    continue
+                question = question_match.group(1).strip()
 
-    #             if question_match and len(options_matches) == 4 and answer_match and explanation_match:
-    #                 question = question_match.group(1).strip()
-    #                 options = [opt.strip() for opt in options_matches]
-    #                 answer = answer_match.group(1).strip()
-    #                 explanation = explanation_match.group(1).strip()
-                    
-    #                 normalized = self._normalize_candidate(
-    #                     item={
-    #                         "question": question,
-    #                         "options": options,
-    #                         "answer": answer,
-    #                         "explanation": explanation,
-    #                     },
-    #                     difficulty=difficulty,
-    #                     topic=topic,
-    #                     source="llm_v2"
-    #                 )
-    #                 if normalized:
-    #                     candidates.append(normalized)
+                # Extract options (Supports "A)" or "A.")
+                options_matches = re.findall(r"(?i)^[A-D][\)\.]\s*(.+)", block, re.MULTILINE)
+                if len(options_matches) < 4:
+                    continue
+                options = [opt.strip() for opt in options_matches[:4]]
 
-    #         except Exception:
-    #             # Ignore blocks that fail to parse
-    #             continue
+                # Extract answer
+                answer_match = re.search(r"(?i)^Answer:\s*([A-D])", block, re.MULTILINE)
+                if not answer_match:
+                    continue
+                answer = answer_match.group(1).upper().strip()
+
+                # Extract explanation (If missing, gracefully fallback)
+                explanation_match = re.search(r"(?i)^Explanation:\s*(.+)", block, re.MULTILINE)
+                explanation = explanation_match.group(1).strip() if explanation_match else f"The correct answer is {answer}."
                 
-    #     return self._dedupe_questions(candidates)
+                normalized = self._normalize_candidate(
+                    item={
+                        "question": question,
+                        "options": options,
+                        "answer": answer,
+                        "explanation": explanation,
+                    },
+                    difficulty=difficulty,
+                    topic=topic,
+                    source="llm_text"
+                )
+                if normalized:
+                    candidates.append(normalized)
+
+            except Exception as e:
+                # If a single question is hopelessly garbled, ignore it and parse the rest
+                print(f"[Parser Warning] Failed to parse a block: {e}")
+                continue
+                
+        return self._dedupe_questions(candidates)
 
 
     def _parse_json_output(self, response: str, difficulty: str, topic: str) -> List[Dict]:
