@@ -13,18 +13,16 @@ ENV HF_HOME=/root/.cache/huggingface
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
-# Install requirements AND the huggingface CLI tool
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r /app/requirements.txt && \
     pip install --no-cache-dir huggingface_hub
 
 # ---------------------------------------------------------
 # BAKE THE MODEL INTO THE DOCKER IMAGE
-# This guarantees it is cached and ready instantly on startup.
-# If you are using Qwen or another model, change this argument!
+# Using Python directly avoids all 'command not found' errors
 # ---------------------------------------------------------
 ARG MODEL_NAME="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-RUN huggingface-cli download ${MODEL_NAME}
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('${MODEL_NAME}')"
 
 COPY . /app
 RUN chmod +x /app/start.sh
