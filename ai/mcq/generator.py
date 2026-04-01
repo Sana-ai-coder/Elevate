@@ -174,45 +174,24 @@ class MCQGenerator:
         facts: List[str],
         test_title: str = "",
         test_description: str = "",
+        existing_questions: Optional[List[str]] = None,
     ) -> str:
-        """
-        Engineers a detailed, context-rich prompt for the language model.
-        This is the core of the AI's "intelligence".
-        """
-        grade_guidance = self._grade_guidance(grade)
-        difficulty_guidance = self._difficulty_guidance(difficulty)
-
-        # Create a context block for the test, if provided
-        test_context_parts = []
-        if test_title:
-            test_context_parts.append(f"The test is titled '{test_title}'.")
-        if test_description:
-            test_context_parts.append(f"Its description is: '{test_description}'.")
-        test_context = " ".join(test_context_parts)
-
-        # Provide a limited number of facts to keep the prompt focused
-        fact_lines = "\n".join(f"- {fact}" for fact in facts[:15])
-
-        # The main instruction block, framed as a persona
+        # Provide just 8 facts to keep the prompt short and generation fast
+        fact_lines = "\n".join(f"- {fact}" for fact in facts[:8])
+        
+        # We ask for a strict, simple text format that the LLM won't mess up
         return (
-            f"You are an expert {subject} curriculum developer creating an assessment for {grade} students.\n"
-            f"Your task is to generate {num_questions} high-quality multiple-choice questions about '{topic}'.\n"
-            f"{test_context}\n"
-            f"Adhere to these rules:\n"
-            f"1. Grade Level: {grade_guidance}\n"
-            f"2. Difficulty: {difficulty_guidance}\n"
-            f"3. Grounding: Base questions on the provided facts. Do not invent information.\n"
-            f"4. Format: For each question, you must strictly follow the format shown in the example below, with no extra text.\n\n"
-            f"Here is a perfect example of the required format:\n"
-            "Question: What is the primary function of the mitochondria in a cell?\n"
-            "A) To store genetic information\n"
-            "B) To produce energy through cellular respiration\n"
-            "C) To synthesize proteins\n"
-            "D) To control cell division\n"
-            "Answer: B\n"
-            "Explanation: Mitochondria are known as the powerhouses of the cell because they generate most of the cell's supply of adenosine triphosphate (ATP).\n\n"
-            f"Begin now. Generate {num_questions} questions. Here are the facts to use:\n"
-            f"{fact_lines}\n"
+            f"You are an expert teacher. Generate exactly {num_questions} multiple-choice questions about '{topic}'.\n"
+            "Use ONLY these facts:\n"
+            f"{fact_lines}\n\n"
+            "DO NOT OUTPUT JSON. Output EXACTLY this plain-text format for each question, separated by a blank line:\n\n"
+            "Question: <the question text>\n"
+            "A) <first option>\n"
+            "B) <second option>\n"
+            "C) <third option>\n"
+            "D) <fourth option>\n"
+            "Answer: <A, B, C, or D>\n"
+            "Explanation: <one short sentence>\n"
         )
 
     def _generate_llm_mcqs(
@@ -226,48 +205,47 @@ class MCQGenerator:
         facts: List[str],
         test_title: str = "",
         test_description: str = "",
-        seed: Optional[int] = None,
     ) -> List[Dict]:
-        if self.llm is None:
+        if requested_count <= 0:
             return []
 
-        if seed is not None:
-            random.seed(seed)
+        llm = self.ensure_model_loaded()
+        collected: List[Dict] = []
+        attempts = 0
+        
+        # Max 2 attempts. If the first fails, the second will rescue it.
+        while len(collected) < requested_count and attempts < 2:
+            remaining = requested_count - len(collected)
+            prompt = self._create_llm_prompt(
+                topic=topic,
+                subject=subject,
+                grade=grade,
+                num_questions=remaining,
+                difficulty=difficulty,
+                facts=facts,
+                test_title=test_title,
+                test_description=test_description,
+            )
 
-        # Token budget: ~120 tokens per question + 80 buffer
-        tokens_needed = min(1800, max(512, requested_count * 130 + 80))
+            # Generate text
+            response = llm.generate(
+                prompt=prompt,
+                max_new_tokens=800,
+                temperature=0.1,
+                top_p=0.95,
+                max_time=45.0, # Timeout the LLM at 45s so the backend doesn't crash
+            )
+            
+            # Use your original parser to cleanly chop the text into dicts
+            parsed = self._parse_llm_output(response, difficulty, topic)
+            
+            if parsed:
+                collected.extend(parsed)
+                collected = self._dedupe_questions(collected)
 
-        prompt = self._create_llm_prompt(
-            topic=topic, subject=subject, grade=grade, num_questions=requested_count,
-            difficulty=difficulty, facts=facts, test_title=test_title,
-            test_description=test_description,
-        )
+            attempts += 1
 
-        for attempt in range(2):  # max 2 attempts
-            try:
-                response = self.llm.generate(
-                    prompt=prompt,
-                    max_new_tokens=tokens_needed,
-                    temperature=0.15 if attempt == 0 else 0.05,  # more deterministic on retry
-                    top_p=0.92,
-                    max_time=35.0,
-                )
-                parsed = self._parse_json_output(response, difficulty, topic)
-                if parsed:
-                    return parsed
-                # If parse failed, tighten the prompt on retry
-                prompt = (
-                    f"Output ONLY a JSON array of {requested_count} MCQ objects. "
-                    f"Topic: {topic}. Subject: {subject}. Grade: {grade}. Difficulty: {difficulty}.\n"
-                    'Each object: {"question":"...?","options":["A text","B text","C text","D text"],"answer":"A","explanation":"..."}\n'
-                    "JSON array:\n"
-                )
-            except Exception as exc:
-                print(f"[generator] attempt {attempt + 1} failed: {exc}")
-                if attempt == 1:
-                    raise
-
-        return []
+        return collected[:requested_count]
 
     # def _parse_llm_output(self, response: str, difficulty: str, topic: str) -> List[Dict]:
     #     """
