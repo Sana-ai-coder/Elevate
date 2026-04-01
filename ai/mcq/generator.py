@@ -205,6 +205,7 @@ class MCQGenerator:
         facts: List[str],
         test_title: str = "",
         test_description: str = "",
+        seed: Optional[int] = None,
     ) -> List[Dict]:
         if requested_count <= 0:
             return []
