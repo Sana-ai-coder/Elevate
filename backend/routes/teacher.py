@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import random
+import concurrent.futures
+import time
 
 from flask import Blueprint, jsonify, request, g, current_app
 from sqlalchemy import and_, func, or_
@@ -265,7 +267,81 @@ def _build_generated_question_records(
         records.append(record)
     return records
 
-
+def generate_topic_mcqs_concurrently(subject, grade, difficulty, topic, count, seed=None, test_title=None, test_description=None, chunk_size=10):
+    """
+    Splits a large question generation request into parallel chunks.
+    Fires them concurrently to the AI service and merges the results.
+    """
+    # 1. Calculate chunks (e.g., 30 becomes [10, 10, 10], 25 becomes [10, 10, 5])
+    chunks = []
+    remaining = count
+    while remaining > 0:
+        chunks.append(min(chunk_size, remaining))
+        remaining -= chunk_size
+        
+    combined_result = {
+        "ok": True,
+        "questions": [],
+        "error": None,
+        "status_code": 200,
+        "service_endpoint": get_topic_ai_service_url(),
+        "service_latency_ms": 0.0,
+        "meta": {
+            "llm_count": 0,
+            "template_count": 0,
+            "cache_hit": False
+        }
+    }
+    
+    start_time = time.time()
+    
+    # 2. Fire requests concurrently
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+        futures = []
+        for index, c_count in enumerate(chunks):
+            # IMPORTANT: Vary the seed per chunk so parallel requests don't generate the exact same text!
+            chunk_seed = (seed + index) if seed is not None else random.randint(1000, 99999)
+            
+            futures.append(executor.submit(
+                generate_topic_mcqs,
+                subject=subject,
+                grade=grade,
+                difficulty=difficulty,
+                topic=topic,
+                count=c_count,
+                seed=chunk_seed,
+                test_title=test_title,
+                test_description=test_description
+            ))
+            
+        # 3. Gather and merge results as they finish
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                res = future.result()
+                if res.get("ok"):
+                    combined_result["questions"].extend(res.get("questions", []))
+                    
+                    # Aggregate the metadata for accuracy
+                    meta = res.get("meta", {})
+                    combined_result["meta"]["llm_count"] += int(meta.get("llm_count", 0))
+                    combined_result["meta"]["template_count"] += int(meta.get("template_count", 0))
+                    # If any chunk hit the cache, mark true
+                    combined_result["meta"]["cache_hit"] = combined_result["meta"]["cache_hit"] or bool(meta.get("cache_hit", False))
+                else:
+                    # If one chunk fails, log it but don't crash the others
+                    current_app.logger.warning(f"Chunk failed: {res.get('error')}")
+                    combined_result["ok"] = False
+                    combined_result["error"] = res.get("error", "Partial chunk generation failed")
+                    combined_result["status_code"] = res.get("status_code", 500)
+            except Exception as e:
+                current_app.logger.error(f"Thread execution error: {str(e)}")
+                combined_result["ok"] = False
+                combined_result["error"] = str(e)
+                combined_result["status_code"] = 500
+                
+    # 4. Calculate total time taken
+    combined_result["service_latency_ms"] = round((time.time() - start_time) * 1000, 2)
+    return combined_result
 
 def _pick_or_generate_questions(
     teacher_id,
@@ -295,7 +371,7 @@ def _pick_or_generate_questions(
         "technical_fallback_used": False,
     }
 
-    service_result = generate_topic_mcqs(
+    service_result = generate_topic_mcqs_concurrently(
         subject=subject,
         grade=grade,
         difficulty=difficulty,
@@ -522,7 +598,7 @@ def teacher_generate_question_bank():
     if grade not in VALID_GRADES:
         return jsonify({"error": "Grade must be one of: elementary, middle, high, college"}), 400
 
-    service_result = generate_topic_mcqs(
+    service_result = generate_topic_mcqs_concurrently(
         subject=subject,
         grade=grade,
         difficulty=difficulty,
