@@ -267,17 +267,28 @@ def _build_generated_question_records(
         records.append(record)
     return records
 
-def generate_topic_mcqs_concurrently(subject, grade, difficulty, topic, count, seed=None, test_title=None, test_description=None, chunk_size=10):
+def generate_topic_mcqs_concurrently(subject, grade, difficulty, topic, count, seed=None, test_title=None, test_description=None, max_workers=5):
     """
-    Splits a large question generation request into parallel chunks.
-    Fires them concurrently to the AI service and merges the results.
+    Dynamically splits a question generation request to maximize parallel processing.
+    Adapts chunk sizes automatically based on total count and max_workers.
     """
-    # 1. Calculate chunks (e.g., 30 becomes [10, 10, 10], 25 becomes [10, 10, 5])
+    # 1. Dynamic Load Balancing Algorithm
     chunks = []
-    remaining = count
-    while remaining > 0:
-        chunks.append(min(chunk_size, remaining))
-        remaining -= chunk_size
+    if count > 0:
+        base_chunk = count // max_workers
+        remainder = count % max_workers
+        
+        if base_chunk == 0:
+            # E.g., user asks for 3 questions, max_workers is 5. 
+            # We just create 3 workers handling 1 question each.
+            chunks = [1] * count
+        else:
+            # E.g., user asks for 30 questions -> 5 chunks of 6.
+            # E.g., user asks for 12 questions -> 2 chunks of 3, and 3 chunks of 2.
+            chunks = [base_chunk + 1 if i < remainder else base_chunk for i in range(max_workers)]
+            
+    # Filter out any zero-sized chunks for safety
+    chunks = [c for c in chunks if c > 0]
         
     combined_result = {
         "ok": True,
@@ -295,11 +306,11 @@ def generate_topic_mcqs_concurrently(subject, grade, difficulty, topic, count, s
     
     start_time = time.time()
     
-    # 2. Fire requests concurrently
+    # 2. Fire dynamic requests concurrently
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(chunks)) as executor:
         futures = []
         for index, c_count in enumerate(chunks):
-            # IMPORTANT: Vary the seed per chunk so parallel requests don't generate the exact same text!
+            # Dynamic seed injection to ensure Qwen generates totally unique batches
             chunk_seed = (seed + index) if seed is not None else random.randint(1000, 99999)
             
             futures.append(executor.submit(
@@ -339,7 +350,7 @@ def generate_topic_mcqs_concurrently(subject, grade, difficulty, topic, count, s
                 combined_result["error"] = str(e)
                 combined_result["status_code"] = 500
                 
-    # 4. Calculate total time taken
+    # 4. Finalize
     combined_result["service_latency_ms"] = round((time.time() - start_time) * 1000, 2)
     return combined_result
 
