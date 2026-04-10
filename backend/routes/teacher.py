@@ -267,7 +267,7 @@ def _build_generated_question_records(
         records.append(record)
     return records
 
-def generate_topic_mcqs_concurrently(subject, grade, difficulty, topic, count, seed=None, test_title=None, test_description=None, max_workers=5):
+def generate_topic_mcqs_concurrently(subject, grade, difficulty, topic, count, seed=None, test_title=None, test_description=None, max_workers=2):
     """
     Dynamically splits a question generation request to maximize parallel processing.
     Adapts chunk sizes automatically based on total count and max_workers.

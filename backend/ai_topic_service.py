@@ -216,136 +216,125 @@ def generate_topic_mcqs(
 ) -> Dict[str, Any]:
     requested_count = max(1, min(int(count), 50))
     source_topic = _derive_source_topic(topic, subject, grade)
-    endpoint = f"{get_topic_ai_service_url()}/mcq/generate"
+    
+    base_url = get_topic_ai_service_url()
+    # Auto-detect if we are using the direct Hugging Face Serverless API
+    is_direct_hf_api = "api-inference.huggingface.co" in base_url
+    
+    endpoint = base_url if is_direct_hf_api else f"{base_url}/mcq/generate"
     request_started = time.perf_counter()
 
     def _elapsed_ms() -> int:
         return max(0, int((time.perf_counter() - request_started) * 1000))
 
-    payload = {
-        "source_type": "topic",
-        "source": source_topic,
-        "num_questions": requested_count,
-        "difficulty": str(difficulty or "medium").strip().lower(),
-        "subject": str(subject or "science").strip().lower(),
-        "grade": str(grade or "high").strip().lower(),
-        "seed": seed,
-    }
+    # --- 1. BUILD PAYLOAD (Routing logic) ---
+    if is_direct_hf_api:
+        # Prompt Compression for maximum speed on HF API
+        sys_prompt = "You are an expert STEM educator. Output ONLY a valid JSON array. Do not use markdown blocks."
+        user_prompt = (
+            f"CRITICAL SPEED CONSTRAINT: Generate exactly {requested_count} multiple choice questions "
+            f"about '{source_topic}' for {grade}-level {subject} at {difficulty} difficulty. "
+            f"Keep the 'explanation' field strictly under 15 words. "
+            f"Format required: [{{\"question\": \"...\", \"options\": [\"...\", \"...\", \"...\", \"...\"], \"correct_index\": 0, \"explanation\": \"...\"}}]"
+        )
+        # Using Qwen ChatML format
+        prompt = f"<|im_start|>system\n{sys_prompt}<|im_end|>\n<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n["
 
-    clean_title = sanitize_string(test_title or "", max_length=255)
-    clean_description = sanitize_string(test_description or "", max_length=1000)
-    if clean_title:
-        payload["test_title"] = clean_title
-    if clean_description:
-        payload["test_description"] = clean_description
+        payload = {
+            "inputs": prompt,
+            "parameters": {
+                "max_new_tokens": 1500,
+                "temperature": 0.8,
+                "return_full_text": False
+            }
+        }
+    else:
+        # Fallback to original custom Space payload
+        payload = {
+            "source_type": "topic",
+            "source": source_topic,
+            "num_questions": requested_count,
+            "difficulty": str(difficulty or "medium").strip().lower(),
+            "subject": str(subject or "science").strip().lower(),
+            "grade": str(grade or "high").strip().lower(),
+            "seed": seed,
+        }
+        if test_title: payload["test_title"] = sanitize_string(test_title, 255)
+        if test_description: payload["test_description"] = sanitize_string(test_description, 1000)
 
     request_body = json.dumps(payload).encode("utf-8")
-    request_headers = {
-        "Content-Type": "application/json",
-    }
+    request_headers = {"Content-Type": "application/json"}
 
     token = get_topic_ai_service_token()
     if token:
         request_headers["Authorization"] = f"{get_topic_ai_auth_scheme()} {token}"
 
-    request_obj = urlrequest.Request(
-        endpoint,
-        data=request_body,
-        method="POST",
-        headers=request_headers,
-    )
-
+    request_obj = urlrequest.Request(endpoint, data=request_body, method="POST", headers=request_headers)
     timeout = get_topic_ai_timeout_seconds()
 
+    # --- 2. EXECUTE REQUEST ---
     try:
         with urlrequest.urlopen(request_obj, timeout=timeout) as response:
             status_code = int(getattr(response, "status", 200) or 200)
             raw_response = response.read().decode("utf-8")
-    except urlerror.HTTPError as exc:
-        error_body = ""
-        try:
-            error_body = exc.read().decode("utf-8")
-        except Exception:
-            error_body = ""
-
+    except Exception as exc:
         return {
-            "ok": False,
-            "status_code": int(getattr(exc, "code", 502) or 502),
-            "error": _extract_error_message(error_body) or f"Topic AI service HTTP {exc.code}",
-            "questions": [],
-            "meta": {},
-            "requested_count": requested_count,
-            "generated_count": 0,
-            "service_url": get_topic_ai_service_url(),
-            "service_endpoint": endpoint,
-            "service_latency_ms": _elapsed_ms(),
-        }
-    except (urlerror.URLError, socket.timeout, TimeoutError, OSError) as exc:
-        return {
-            "ok": False,
-            "status_code": 503,
-            "error": f"Topic AI service unavailable: {exc}",
-            "questions": [],
-            "meta": {},
-            "requested_count": requested_count,
-            "generated_count": 0,
-            "service_url": get_topic_ai_service_url(),
-            "service_endpoint": endpoint,
-            "service_latency_ms": _elapsed_ms(),
+            "ok": False, "status_code": 503, "error": f"Topic AI service unavailable: {exc}",
+            "questions": [], "meta": {}, "requested_count": requested_count, "generated_count": 0,
+            "service_url": base_url, "service_endpoint": endpoint, "service_latency_ms": _elapsed_ms(),
         }
 
-    if status_code < 200 or status_code >= 300:
-        return {
-            "ok": False,
-            "status_code": status_code,
-            "error": _extract_error_message(raw_response),
-            "questions": [],
-            "meta": {},
-            "requested_count": requested_count,
-            "generated_count": 0,
-            "service_url": get_topic_ai_service_url(),
-            "service_endpoint": endpoint,
-            "service_latency_ms": _elapsed_ms(),
-        }
-
+    # --- 3. PARSE RESPONSE ---
     try:
         parsed = json.loads(raw_response)
     except json.JSONDecodeError:
         return {
-            "ok": False,
-            "status_code": 502,
-            "error": "Topic AI service returned invalid JSON.",
-            "questions": [],
-            "meta": {},
-            "requested_count": requested_count,
-            "generated_count": 0,
-            "service_url": get_topic_ai_service_url(),
-            "service_endpoint": endpoint,
-            "service_latency_ms": _elapsed_ms(),
+            "ok": False, "status_code": 502, "error": "Invalid JSON from AI.",
+            "questions": [], "meta": {}, "requested_count": requested_count, "generated_count": 0,
+            "service_url": base_url, "service_endpoint": endpoint, "service_latency_ms": _elapsed_ms(),
         }
 
     rows = []
-    if isinstance(parsed, dict):
-        candidates = parsed.get("mcqs")
-        if isinstance(candidates, list):
-            for candidate in candidates:
-                normalized = _normalize_service_question(candidate, source_topic)
-                if normalized:
-                    rows.append(normalized)
-                    if len(rows) >= requested_count:
-                        break
+    meta = {}
+    
+    if is_direct_hf_api:
+        # Extract from HF text generation array
+        if isinstance(parsed, list) and len(parsed) > 0:
+            text_out = parsed[0].get("generated_text", "")
+            # Reattach the '[' we forced in the prompt
+            if not text_out.strip().startswith("["): text_out = "[" + text_out
+            # Clean hallucinated markdown
+            text_out = text_out.replace("```json", "").replace("```", "").strip()
+            try:
+                candidates = json.loads(text_out)
+                if isinstance(candidates, list):
+                    for candidate in candidates:
+                        normalized = _normalize_service_question(candidate, source_topic)
+                        if normalized: rows.append(normalized)
+            except json.JSONDecodeError:
+                pass
+    else:
+        # Extract from custom space format
+        if isinstance(parsed, dict):
+            candidates = parsed.get("mcqs", [])
+            meta = parsed.get("meta", {})
+            if isinstance(candidates, list):
+                for candidate in candidates:
+                    normalized = _normalize_service_question(candidate, source_topic)
+                    if normalized: rows.append(normalized)
 
-    meta = parsed.get("meta") if isinstance(parsed, dict) and isinstance(parsed.get("meta"), dict) else {}
+    # Enforce exact counts
+    rows = rows[:requested_count]
 
     return {
         "ok": True,
         "status_code": status_code,
-        "error": None,
+        "error": None if rows else "Failed to parse questions",
         "questions": rows,
         "meta": meta,
         "requested_count": requested_count,
         "generated_count": len(rows),
-        "service_url": get_topic_ai_service_url(),
+        "service_url": base_url,
         "service_endpoint": endpoint,
         "service_latency_ms": _elapsed_ms(),
     }
