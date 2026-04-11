@@ -382,7 +382,7 @@ def _pick_or_generate_questions(
         "technical_fallback_used": False,
     }
 
-    service_result = generate_topic_mcqs_concurrently(
+    service_result = generate_topic_mcqs(
         subject=subject,
         grade=grade,
         difficulty=difficulty,
@@ -609,7 +609,7 @@ def teacher_generate_question_bank():
     if grade not in VALID_GRADES:
         return jsonify({"error": "Grade must be one of: elementary, middle, high, college"}), 400
 
-    service_result = generate_topic_mcqs_concurrently(
+    service_result = generate_topic_mcqs(
         subject=subject,
         grade=grade,
         difficulty=difficulty,
