@@ -1706,6 +1706,72 @@ function bindEvents() {
     });
   }
 
+  // DOM Elements for Generation (safely inside the function)
+  const generateBtn = document.getElementById('generate-btn');
+  const questionsContainer = document.getElementById('generated-questions-container');
+  const loadingIndicator = document.getElementById('loading-indicator');
+  const progressText = document.getElementById('loading-progress-text');
+
+  // Make sure the button actually exists on the page before adding the listener
+  if (generateBtn) {
+      generateBtn.addEventListener('click', async (e) => {
+          e.preventDefault();
+
+          const totalRequested = parseInt(document.getElementById('question-count').value, 10) || 10;
+          const subject = document.getElementById('subject-select').value;
+          const topic = document.getElementById('topic-input').value;
+          const difficulty = document.getElementById('difficulty-select').value;
+          const grade = document.getElementById('grade-select').value;
+
+          const CHUNK_SIZE = 5; 
+          let questionsFetched = 0;
+          let allGeneratedQuestions = [];
+
+          questionsContainer.innerHTML = ''; 
+          generateBtn.disabled = true;
+          loadingIndicator.style.display = 'block';
+
+          try {
+              while (questionsFetched < totalRequested) {
+                  const countForThisChunk = Math.min(CHUNK_SIZE, totalRequested - questionsFetched);
+                  progressText.innerText = `Generating ${questionsFetched} of ${totalRequested} questions...`;
+
+                  // Hitting your custom HF Space via Render backend!
+                  const result = await api.generateQuestions({
+                      count: countForThisChunk,
+                      subject,
+                      topic,
+                      difficulty,
+                      grade
+                  });
+
+                  if (result.questions && result.questions.length > 0) {
+                      const newQuestions = result.questions;
+                      allGeneratedQuestions = allGeneratedQuestions.concat(newQuestions);
+                      questionsFetched += newQuestions.length;
+
+                      // Call the helper function
+                      renderQuestionsChunkToDOM(newQuestions, questionsContainer);
+                  } else {
+                      console.warn("AI returned an empty chunk. Stopping early.");
+                      break; 
+                  }
+              }
+                
+              progressText.innerText = `Success! Generated ${questionsFetched} questions.`;
+
+          } catch (error) {
+              console.error("Generation failed:", error);
+              progressText.innerText = `Error generating questions: ${error.message}`;
+          } finally {
+              generateBtn.disabled = false;
+              setTimeout(() => {
+                  loadingIndicator.style.display = 'none';
+              }, 2000);
+          }
+      });
+  }
+
   bindTestActions();
   bindSidebarNav();
 }
@@ -1727,3 +1793,26 @@ async function initTeacherDashboard() {
 }
 
 document.addEventListener('DOMContentLoaded', initTeacherDashboard);
+
+// Place this at the bottom of the file
+function renderQuestionsChunkToDOM(questions, container) {
+    questions.forEach((q, index) => {
+        const qCard = document.createElement('div');
+        qCard.className = 'question-card fade-in'; 
+        
+        const optionsHTML = q.options.map((opt, i) => {
+            const isCorrect = i === q.correct_index;
+            return `<li class="${isCorrect ? 'correct-option' : ''}">${opt}</li>`;
+        }).join('');
+
+        qCard.innerHTML = `
+            <h4>${q.text}</h4>
+            <ul>${optionsHTML}</ul>
+            <div class="explanation">
+                <strong>Explanation:</strong> ${q.explanation}
+            </div>
+        `;
+        
+        container.appendChild(qCard);
+    });
+}

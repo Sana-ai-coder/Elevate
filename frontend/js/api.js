@@ -467,5 +467,23 @@ export const api = {
     async finishTest(testId) {
       return await api.request(`/student/tests/${testId}/finish`, { method: 'POST' });
     }
-  }
+  },
+  
+  async generateQuestions(payload) {
+        const token = localStorage.getItem('elevate_token');
+        const response = await fetch('/api/teacher/question-bank/generate', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+        }
+        return await response.json();
+    }
 };
