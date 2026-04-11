@@ -1,34 +1,34 @@
-"""Language model wrapper for LOCAL text generation on CPU using Persistent Storage."""
+"""Language model wrapper using HIGH-SPEED Quantized GGUF on CPU."""
 from __future__ import annotations
-import os
 import threading
 from typing import Optional
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from huggingface_hub import hf_hub_download
+from llama_cpp import Llama
 from config import MODELS_DIR
 
-LLM_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+# We are using a 4-bit compressed version of Qwen 2.5 1.5B
+REPO_ID = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+FILENAME = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
 
 class LanguageModel:
     def __init__(self) -> None:
-        self.device = "cpu"
-        print(f"Loading LOCAL model: {LLM_MODEL} into memory...")
-        print(f"Using persistent storage cache: {MODELS_DIR}")
+        print(f"Downloading/Loading Quantized GGUF model: {REPO_ID}...")
         
-        # This downloads the model to /data ONLY on the very first run.
-        # On all future runs, it boots instantly from your persistent storage.
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            LLM_MODEL, 
+        # 1. Download model to persistent cache (only downloads once)
+        model_path = hf_hub_download(
+            repo_id=REPO_ID,
+            filename=FILENAME,
             cache_dir=str(MODELS_DIR)
         )
-        self.model = AutoModelForCausalLM.from_pretrained(
-            LLM_MODEL,
-            cache_dir=str(MODELS_DIR),
-            torch_dtype=torch.float32,
-            low_cpu_mem_usage=True
+        
+        # 2. Load with llama.cpp optimized for CPU
+        self.llm = Llama(
+            model_path=model_path,
+            n_ctx=2048,          # Context window size
+            n_threads=2,         # Max out the 2 vCPUs of HF Free Tier
+            verbose=False        # Keep logs clean
         )
-        self.model.eval()
-        print("Local language model loaded successfully.")
+        print("Quantized local model loaded successfully.")
 
     def ensure_model_loaded(self) -> None:
         pass
@@ -44,26 +44,23 @@ class LanguageModel:
         top_p: float = 0.95,
         max_time: Optional[float] = None,
     ) -> str:
-        messages = [
-            {"role": "system", "content": "You are an expert educational AI. Generate exactly what is requested, following the text format perfectly."},
-            {"role": "user", "content": prompt}
-        ]
-        text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.tokenizer([text], return_tensors="pt").to(self.device)
+        # Format prompt for Qwen ChatML
+        formatted_prompt = (
+            f"<|im_start|>system\nYou are an expert educational AI. "
+            f"Generate exactly what is requested, following the text format perfectly.<|im_end|>\n"
+            f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        )
         
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                do_sample=True,
-                top_p=top_p,
-                pad_token_id=self.tokenizer.eos_token_id
-            )
-            
-        generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, outputs)]
-        response = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        return response.strip()
+        # Generate using C++ bindings
+        response = self.llm(
+            prompt=formatted_prompt,
+            max_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            stop=["<|im_end|>"]
+        )
+        
+        return response["choices"][0]["text"].strip()
 
 _llm_model: LanguageModel | None = None
 _llm_model_lock = threading.Lock()
