@@ -272,65 +272,101 @@ def generate_topic_mcqs(
 ) -> Dict[str, Any]:
     import time
     import json
+    import os
     from urllib import request as urlrequest
 
     requested_count = max(1, min(int(count), 50))
     source_topic = _derive_source_topic(topic, subject, grade)
-    base_url = get_topic_ai_service_url()
-    endpoint = f"{base_url}/mcq/generate"
+    
+    # Direct Groq API Endpoint
+    base_url = "https://api.groq.com/openai/v1/chat/completions"
+    api_key = os.environ.get("GROQ_API_KEY", "")
     
     request_started = time.perf_counter()
 
+    # 1. High-Quality Prompt Engineering
+    sys_prompt = "You are an expert STEM educator. You must output ONLY valid JSON using the exact schema requested."
+    
+    context_block = ""
+    if test_title or test_description:
+        context_block = f"Test Context: {test_title} - {test_description}\n"
+
+    user_prompt = f"""
+    Generate exactly {requested_count} highly logical and factual multiple-choice questions.
+    Topic: {source_topic}
+    Subject: {subject.capitalize()}
+    Grade Level: {grade.capitalize()}
+    Difficulty: {difficulty.capitalize()}
+    {context_block}
+    
+    CRITICAL INSTRUCTIONS:
+    - Make distractors (wrong options) plausible and challenging.
+    - Ensure the 'explanation' clearly states why the answer is correct.
+    
+    Format required (strictly adhere to this JSON structure):
+    {{
+      "questions": [
+        {{
+          "text": "The actual question text here?",
+          "options": ["Option A", "Option B", "Option C", "Option D"],
+          "correct_index": 0,
+          "explanation": "Clear, educational explanation here."
+        }}
+      ]
+    }}
+    """
+
+    # 2. Build the Groq Payload
     payload = {
-        "source_type": "topic",
-        "source": source_topic,
-        "num_questions": requested_count,
-        "difficulty": str(difficulty or "medium").strip().lower(),
-        "subject": str(subject or "science").strip().lower(),
-        "grade": str(grade or "high").strip().lower(),
-        "seed": seed,
+        "model": "llama-3.3-70b-versatile", # Groq's fastest, smartest 70B model
+        "messages": [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.6, # Add slight randomness so duplicate parameters yield fresh questions
+        "response_format": {"type": "json_object"} # Forces perfect JSON output
     }
-    if test_title: payload["test_title"] = sanitize_string(test_title, 255)
-    if test_description: payload["test_description"] = sanitize_string(test_description, 1000)
 
     request_body = json.dumps(payload).encode("utf-8")
-    request_headers = {"Content-Type": "application/json"}
+    request_headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
 
-    token = get_topic_ai_service_token()
-    if token:
-        request_headers["Authorization"] = f"{get_topic_ai_auth_scheme()} {token}"
+    request_obj = urlrequest.Request(base_url, data=request_body, method="POST", headers=request_headers)
 
-    request_obj = urlrequest.Request(endpoint, data=request_body, method="POST", headers=request_headers)
-    timeout = get_topic_ai_timeout_seconds()
-
+    # 3. Execute the Request
     try:
-        with urlrequest.urlopen(request_obj, timeout=timeout) as response:
+        with urlrequest.urlopen(request_obj, timeout=30) as response:
             status_code = int(getattr(response, "status", 200) or 200)
             raw_response = response.read().decode("utf-8")
     except Exception as exc:
         return {
-            "ok": False, "status_code": 503, "error": f"Topic AI service unavailable: {exc}",
+            "ok": False, "status_code": 503, "error": f"Groq API unavailable: {exc}",
             "questions": [], "meta": {}, "requested_count": requested_count, "generated_count": 0,
-            "service_url": base_url, "service_endpoint": endpoint, "service_latency_ms": int((time.perf_counter() - request_started) * 1000),
+            "service_latency_ms": int((time.perf_counter() - request_started) * 1000),
         }
 
+    # 4. Parse the Groq Response
     try:
-        parsed = json.loads(raw_response)
-    except json.JSONDecodeError:
+        response_data = json.loads(raw_response)
+        ai_content_str = response_data["choices"][0]["message"]["content"]
+        ai_json = json.loads(ai_content_str)
+        candidates = ai_json.get("questions", [])
+    except (json.JSONDecodeError, KeyError, IndexError):
         return {
             "ok": False, "status_code": 502, "error": "Invalid JSON from AI.",
             "questions": [], "meta": {}, "requested_count": requested_count, "generated_count": 0,
-            "service_url": base_url, "service_endpoint": endpoint, "service_latency_ms": int((time.perf_counter() - request_started) * 1000),
+            "service_latency_ms": int((time.perf_counter() - request_started) * 1000),
         }
 
+    # 5. Normalize using your existing Elevate logic
     rows = []
-    meta = parsed.get("meta", {})
-    candidates = parsed.get("mcqs", [])
-    
     if isinstance(candidates, list):
         for candidate in candidates:
             normalized = _normalize_service_question(candidate, source_topic)
-            if normalized: rows.append(normalized)
+            if normalized: 
+                rows.append(normalized)
 
     rows = rows[:requested_count]
 
@@ -339,10 +375,8 @@ def generate_topic_mcqs(
         "status_code": status_code,
         "error": None if rows else "Failed to parse questions",
         "questions": rows,
-        "meta": meta,
+        "meta": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
         "requested_count": requested_count,
         "generated_count": len(rows),
-        "service_url": base_url,
-        "service_endpoint": endpoint,
         "service_latency_ms": int((time.perf_counter() - request_started) * 1000),
     }
