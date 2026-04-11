@@ -259,57 +259,89 @@ def _fetch_single_batch(
         return []
 
 
-def generate_topic_mcqs(*, subject: str, grade: str, difficulty: str, topic: str | None, count: int, seed: int | None = None, test_title: str | None = None, test_description: str | None = None) -> dict:
+def generate_topic_mcqs(
+    *,
+    subject: str,
+    grade: str,
+    difficulty: str,
+    topic: str | None,
+    count: int,
+    seed: int | None = None,
+    test_title: str | None = None,
+    test_description: str | None = None,
+) -> Dict[str, Any]:
     import time
-    
-    requested_count = max(1, min(int(count), 30)) # Capped at 30
+    import json
+    from urllib import request as urlrequest
+
+    requested_count = max(1, min(int(count), 50))
     source_topic = _derive_source_topic(topic, subject, grade)
     base_url = get_topic_ai_service_url()
     endpoint = f"{base_url}/mcq/generate"
     
+    request_started = time.perf_counter()
+
+    payload = {
+        "source_type": "topic",
+        "source": source_topic,
+        "num_questions": requested_count,
+        "difficulty": str(difficulty or "medium").strip().lower(),
+        "subject": str(subject or "science").strip().lower(),
+        "grade": str(grade or "high").strip().lower(),
+        "seed": seed,
+    }
+    if test_title: payload["test_title"] = sanitize_string(test_title, 255)
+    if test_description: payload["test_description"] = sanitize_string(test_description, 1000)
+
+    request_body = json.dumps(payload).encode("utf-8")
     request_headers = {"Content-Type": "application/json"}
 
     token = get_topic_ai_service_token()
     if token:
         request_headers["Authorization"] = f"{get_topic_ai_auth_scheme()} {token}"
 
-    request_started = time.perf_counter()
-    
-    # 1. Calculate the smart batches
-    batches = _calculate_smart_batches(requested_count, max_parallel=2)
-    all_raw_candidates = []
-    
-    # 2. Fire requests to YOUR custom space simultaneously
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(batches)) as executor:
-        futures = [
-            executor.submit(
-                _fetch_single_batch, 
-                batch_count, subject, grade, difficulty, source_topic, seed, test_title, test_description,
-                base_url, endpoint, request_headers, get_topic_ai_timeout_seconds()
-            )
-            for batch_count in batches
-        ]
-        
-        for future in concurrent.futures.as_completed(futures):
-            all_raw_candidates.extend(future.result())
+    request_obj = urlrequest.Request(endpoint, data=request_body, method="POST", headers=request_headers)
+    timeout = get_topic_ai_timeout_seconds()
 
-    # 3. Normalize and exact-count the results
-    final_rows = []
-    for candidate in all_raw_candidates:
-        normalized = _normalize_service_question(candidate, source_topic)
-        if normalized:
-            final_rows.append(normalized)
-            
-    final_rows = final_rows[:requested_count]
+    try:
+        with urlrequest.urlopen(request_obj, timeout=timeout) as response:
+            status_code = int(getattr(response, "status", 200) or 200)
+            raw_response = response.read().decode("utf-8")
+    except Exception as exc:
+        return {
+            "ok": False, "status_code": 503, "error": f"Topic AI service unavailable: {exc}",
+            "questions": [], "meta": {}, "requested_count": requested_count, "generated_count": 0,
+            "service_url": base_url, "service_endpoint": endpoint, "service_latency_ms": int((time.perf_counter() - request_started) * 1000),
+        }
+
+    try:
+        parsed = json.loads(raw_response)
+    except json.JSONDecodeError:
+        return {
+            "ok": False, "status_code": 502, "error": "Invalid JSON from AI.",
+            "questions": [], "meta": {}, "requested_count": requested_count, "generated_count": 0,
+            "service_url": base_url, "service_endpoint": endpoint, "service_latency_ms": int((time.perf_counter() - request_started) * 1000),
+        }
+
+    rows = []
+    meta = parsed.get("meta", {})
+    candidates = parsed.get("mcqs", [])
+    
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            normalized = _normalize_service_question(candidate, source_topic)
+            if normalized: rows.append(normalized)
+
+    rows = rows[:requested_count]
 
     return {
-        "ok": len(final_rows) > 0,
-        "status_code": 200 if final_rows else 502,
-        "error": None if final_rows else "AI generated insufficient questions.",
-        "questions": final_rows,
-        "meta": {"batched_execution": True, "chunks": batches},
+        "ok": len(rows) > 0,
+        "status_code": status_code,
+        "error": None if rows else "Failed to parse questions",
+        "questions": rows,
+        "meta": meta,
         "requested_count": requested_count,
-        "generated_count": len(final_rows),
+        "generated_count": len(rows),
         "service_url": base_url,
         "service_endpoint": endpoint,
         "service_latency_ms": int((time.perf_counter() - request_started) * 1000),

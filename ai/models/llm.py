@@ -28,6 +28,9 @@ class LanguageModel:
             n_threads=2,         # Max out the 2 vCPUs of HF Free Tier
             verbose=False        # Keep logs clean
         )
+        
+        # ADD THIS: A dedicated lock for the generation process
+        self._inference_lock = threading.Lock()
         print("Quantized local model loaded successfully.")
 
     def ensure_model_loaded(self) -> None:
@@ -51,14 +54,15 @@ class LanguageModel:
             f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
         )
         
-        # Generate using C++ bindings
-        response = self.llm(
-            prompt=formatted_prompt,
-            max_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            stop=["<|im_end|>"]
-        )
+        # ADD THIS: Enforce single-file processing to prevent SegFaults
+        with self._inference_lock:
+            response = self.llm(
+                prompt=formatted_prompt,
+                max_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stop=["<|im_end|>"]
+            )
         
         return response["choices"][0]["text"].strip()
 
