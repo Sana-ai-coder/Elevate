@@ -1,4 +1,108 @@
+const ADMIN_SESSION_KEY = 'elevate_user_session';
+const SCHOOL_SLUG_HINT_KEY = 'elevate_school_slug_hint';
+const SCHOOL_SLUG_HINT_COOKIE = 'elevate_school_slug_hint';
+
+function loadAuthSession() {
+  try {
+    const fromLocal = localStorage.getItem(ADMIN_SESSION_KEY);
+    const fromSession = sessionStorage.getItem(ADMIN_SESSION_KEY);
+    const raw = fromLocal || fromSession;
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    console.warn('Failed to parse auth session for admin page:', error);
+    localStorage.removeItem(ADMIN_SESSION_KEY);
+    sessionStorage.removeItem(ADMIN_SESSION_KEY);
+    return null;
+  }
+}
+
+function roleHomePage(role) {
+  const normalized = String(role || 'student').trim().toLowerCase();
+  const page = normalized === 'teacher'
+    ? 'teacher-dashboard.html'
+    : normalized === 'admin'
+      ? 'admin.html'
+      : 'dashboard.html';
+
+  const session = loadAuthSession();
+  const pathParts = String(window.location.pathname || '').split('/').filter(Boolean);
+  const pathSlug = pathParts.length > 0 && !String(pathParts[0]).includes('.') ? String(pathParts[0]).trim().toLowerCase() : '';
+  const slug = String(session?.user?.school_slug || pathSlug || '').trim().toLowerCase();
+  if (!slug) return page;
+  return `/${slug}/${page}`;
+}
+
+function enforceAdminSessionGuard() {
+  const session = loadAuthSession();
+  if (!session || !session.user || !session.token) {
+      window.location.replace('/index.html');
+    return null;
+  }
+
+  const role = String(session.user.role || 'student').trim().toLowerCase();
+  if (role !== 'admin') {
+    window.location.replace(roleHomePage(role));
+    return null;
+  }
+
+  return session;
+}
+
+function clearAuthSession() {
+  localStorage.removeItem(ADMIN_SESSION_KEY);
+  sessionStorage.removeItem(ADMIN_SESSION_KEY);
+  localStorage.removeItem(SCHOOL_SLUG_HINT_KEY);
+  sessionStorage.removeItem(SCHOOL_SLUG_HINT_KEY);
+  document.cookie = `${SCHOOL_SLUG_HINT_COOKIE}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; samesite=lax`;
+}
+
+function getInitial(name) {
+  const trimmed = String(name || '').trim();
+  return trimmed ? trimmed.charAt(0).toUpperCase() : 'A';
+}
+
+function setupAdminNavbar(session) {
+  const user = session?.user || {};
+  const info = document.getElementById('adminUserInfo');
+  const nameEl = document.getElementById('adminUserName');
+  const avatar = document.getElementById('adminUserAvatar');
+  const profileMenu = document.getElementById('adminProfileMenu');
+  const toggle = document.getElementById('adminProfileMenuToggle');
+  const logoutBtn = document.getElementById('adminLogoutBtn');
+
+  if (nameEl) nameEl.textContent = user.name || 'Admin';
+  if (avatar) avatar.textContent = getInitial(user.name || 'Admin');
+  if (info) info.classList.add('hydrated');
+
+  if (toggle && profileMenu) {
+    toggle.addEventListener('click', (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      const isOpen = profileMenu.classList.toggle('open');
+      toggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    });
+
+    document.addEventListener('click', (evt) => {
+      if (!profileMenu.classList.contains('open')) return;
+      if (profileMenu.contains(evt.target)) return;
+      profileMenu.classList.remove('open');
+      toggle.setAttribute('aria-expanded', 'false');
+    });
+  }
+
+  if (logoutBtn) {
+    logoutBtn.addEventListener('click', () => {
+      clearAuthSession();
+      window.location.replace('/index.html');
+    });
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  const session = enforceAdminSessionGuard();
+  if (!session) return;
+  setupAdminNavbar(session);
+
   function getGradeDisplayName(grade) {
     const gradeNames = {
       elementary: 'Elementary (K-5)',

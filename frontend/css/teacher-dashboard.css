@@ -31,7 +31,7 @@ body {
 }
 
 .navbar-brand {
-  color: var(--teacher-text);
+  color: var(--primary-color);
   font-weight: 800;
   letter-spacing: -0.02em;
 }
@@ -485,6 +485,70 @@ body.modal-open {
   align-items: end;
 }
 
+#createSection .assessment-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+#createSection .assessment-mode-btn {
+  border: 1px solid #d5e2f8;
+  border-radius: 16px;
+  padding: 12px;
+  text-align: left;
+  background: linear-gradient(180deg, #f7faff 0%, #f2f7ff 100%);
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  width: 100%;
+  transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+}
+
+#createSection .assessment-mode-btn:hover {
+  border-color: #9fc2ff;
+  transform: translateY(-1px);
+}
+
+#createSection .assessment-mode-btn.is-active {
+  border-color: #2a68d8;
+  box-shadow: 0 0 0 3px rgba(42, 104, 216, 0.15);
+  background: linear-gradient(180deg, #eef5ff 0%, #e6f0ff 100%);
+}
+
+#createSection .assessment-mode-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #1e4fb8;
+  background: #dce9ff;
+  flex-shrink: 0;
+}
+
+#createSection .assessment-mode-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+#createSection .assessment-mode-copy strong {
+  font-size: 0.95rem;
+  color: #15345e;
+  font-weight: 800;
+}
+
+#createSection .assessment-mode-copy small {
+  color: #537099;
+  font-size: 0.8rem;
+}
+
+#createSection .assessment-mode-panel.hidden {
+  display: none !important;
+}
+
 #createSection .create-test-actions .btn {
   width: 100%;
   min-height: 44px;
@@ -493,6 +557,204 @@ body.modal-open {
 #createSection .teacher-panel-form .row.g-3 {
   --bs-gutter-x: 0.9rem;
   --bs-gutter-y: 0.85rem;
+}
+
+.rag-library-panel {
+  border: 1px solid #cfe0fa;
+  border-radius: 16px;
+  padding: 12px;
+  background:
+    linear-gradient(180deg, rgba(15, 98, 254, 0.05) 0%, rgba(15, 118, 110, 0.04) 100%),
+    #ffffff;
+}
+
+.rag-library-head {
+  margin-bottom: 10px;
+}
+
+.rag-library-head h4 {
+  margin: 0;
+  font-size: 0.98rem;
+  font-weight: 800;
+  color: #1f3d69;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rag-library-head p {
+  margin: 2px 0 0;
+  color: #5b6f89;
+  font-size: 0.86rem;
+}
+
+.rag-doc-summary {
+  color: #415777;
+  font-size: 0.84rem;
+}
+
+.rag-doc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.rag-doc-item {
+  border: 1px solid #d8e5f9;
+  border-radius: 12px;
+  background: #ffffff;
+  padding: 9px 10px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.rag-doc-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.rag-doc-checkbox {
+  margin-top: 3px;
+}
+
+.rag-doc-info {
+  min-width: 0;
+}
+
+.rag-doc-title {
+  font-weight: 700;
+  color: #1f2f46;
+  word-break: break-word;
+}
+
+.rag-doc-meta {
+  margin-top: 2px;
+  color: #5f7393;
+  font-size: 0.78rem;
+}
+
+.rag-doc-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rag-doc-status {
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  padding: 3px 8px;
+  text-transform: uppercase;
+}
+
+.rag-doc-status.is-processed {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.rag-doc-status.is-processing {
+  background: #e7f0ff;
+  color: #1d4ed8;
+}
+
+.rag-doc-status.is-failed {
+  background: #ffe8ec;
+  color: #9b1c31;
+}
+
+.rag-doc-empty {
+  border: 1px dashed #c7d9f8;
+  border-radius: 12px;
+  padding: 10px;
+  color: #4d6487;
+  font-size: 0.84rem;
+  background: #f5f9ff;
+}
+
+.rag-observability-panel {
+  margin-top: 12px;
+  border: 1px solid #d4e4fb;
+  border-radius: 14px;
+  padding: 11px;
+  background: linear-gradient(180deg, #ffffff 0%, #f5f9ff 100%);
+}
+
+.rag-observability-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.rag-observability-head h5 {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 800;
+  color: #1e3d6d;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rag-observability-kpis {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.rag-observability-kpi {
+  border: 1px solid #d8e6fb;
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 8px 9px;
+}
+
+.rag-observability-kpi span {
+  display: block;
+  color: #597097;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-weight: 700;
+}
+
+.rag-observability-kpi strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 1.02rem;
+  color: #1b355a;
+}
+
+.rag-observability-summary {
+  margin-top: 10px;
+  color: #425e86;
+  font-size: 0.82rem;
+}
+
+.rag-fallback-reasons {
+  margin-top: 9px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.rag-fallback-badge {
+  border: 1px solid #ecd3b7;
+  background: #fff6ea;
+  color: #8a4f1d;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  padding: 3px 9px;
+  font-weight: 700;
 }
 
 #testsSection .test-detail-panel {
@@ -733,6 +995,68 @@ body.modal-open {
   font-weight: 800;
 }
 
+.question-citations {
+  margin-top: 12px;
+  border-top: 1px dashed #d5e1f2;
+  padding-top: 10px;
+}
+
+.question-citations-title {
+  margin: 0 0 8px;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #526889;
+  font-weight: 800;
+}
+
+.citation-topline {
+  background: #edf4ff;
+  border: 1px solid #d3e2fb;
+  color: #234e89;
+  border-radius: 10px;
+  padding: 7px 10px;
+  font-size: 0.78rem;
+  margin-bottom: 8px;
+}
+
+.citation-trace-list {
+  display: grid;
+  gap: 8px;
+}
+
+.citation-trace-item {
+  border: 1px solid #dae5f5;
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 8px 10px;
+}
+
+.citation-trace-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.76rem;
+  color: #466284;
+  margin-bottom: 4px;
+}
+
+.citation-trace-snippet {
+  font-size: 0.8rem;
+  color: #264869;
+  line-height: 1.35;
+}
+
+.citation-empty {
+  font-size: 0.8rem;
+  color: #5f7393;
+  background: #f5f8fd;
+  border: 1px dashed #d3dfef;
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
 .weak-topics {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -846,6 +1170,62 @@ body.modal-open {
   border-radius: 16px;
 }
 
+.reports-actions-panel {
+  border: 1px solid #cfe0fa;
+  border-radius: 16px;
+  padding: 14px;
+  background:
+    linear-gradient(180deg, rgba(15, 98, 254, 0.06) 0%, rgba(15, 118, 110, 0.05) 100%),
+    #ffffff;
+}
+
+.reports-actions-head h4 {
+  font-size: 1rem;
+  font-weight: 800;
+  color: #1f3d69;
+}
+
+.reports-actions-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.reports-actions-buttons .btn {
+  min-width: 220px;
+}
+
+.reports-action-result {
+  margin-top: 12px;
+  border-radius: 12px;
+  border: 1px solid #b8d4ff;
+  background: #f3f8ff;
+  padding: 10px 12px;
+  color: #1d365a;
+}
+
+.reports-action-result.is-warning {
+  border-color: #f6d58a;
+  background: #fff8e6;
+  color: #5c4303;
+}
+
+.reports-action-result.is-error {
+  border-color: #f5b8c0;
+  background: #fff2f4;
+  color: #6d1f2b;
+}
+
+#interventionsSection .table textarea,
+#interventionsSection .table select,
+#interventionsSection .table input[type="datetime-local"] {
+  min-height: 34px;
+}
+
+#interventionsSection .table textarea {
+  min-width: 240px;
+}
+
 .profile-menu-dropdown {
   border-radius: 12px;
   border: 1px solid #d8e3f4;
@@ -928,6 +1308,28 @@ body.modal-open {
   .teacher-chart {
     height: 280px;
   }
+
+  .reports-actions-buttons .btn {
+    min-width: calc(50% - 4px);
+  }
+
+  .rag-doc-item {
+    grid-template-columns: 1fr;
+  }
+
+  .rag-doc-actions {
+    justify-content: space-between;
+  }
+
+  .rag-observability-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .citation-trace-meta {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }
 
 @media (max-width: 640px) {
@@ -953,6 +1355,10 @@ body.modal-open {
   }
 
   .teacher-card .btn-sm {
+    min-width: 100%;
+  }
+
+  .reports-actions-buttons .btn {
     min-width: 100%;
   }
 }

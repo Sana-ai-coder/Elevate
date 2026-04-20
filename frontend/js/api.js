@@ -1,10 +1,14 @@
 // API module for backend communication
 import { config } from './config.js';
 
+const SCHOOL_SLUG_HINT_KEY = 'elevate_school_slug_hint';
+const SCHOOL_SLUG_HINT_COOKIE = 'elevate_school_slug_hint';
+
 export const api = {
   buildFriendlyApiError(endpoint, method, status, serverMessage = '') {
     const route = String(endpoint || '').toLowerCase();
     const verb = String(method || 'GET').toUpperCase();
+    const cleanedServerMessage = String(serverMessage || '').trim();
 
     if (route.includes('/auth/login')) {
       if (status === 401) return 'We could not sign you in. Please check your email and password and try again.';
@@ -24,18 +28,27 @@ export const api = {
       return 'We could not prepare questions right now. Please try again.';
     }
 
-    if (status === 400) return 'We could not process that request. Please check your details and try again.';
+    if (route.includes('/teacher/documents/upload') || route.includes('/teacher/documents/cleanup')) {
+      if (cleanedServerMessage) return cleanedServerMessage;
+      return 'We could not process that document request. Please check file type and size and try again.';
+    }
+
+    if (route.includes('/teacher/documents/') && cleanedServerMessage && status >= 400 && status < 500) {
+      return cleanedServerMessage;
+    }
+
+    if (status === 400) return cleanedServerMessage || 'We could not process that request. Please check your details and try again.';
     if (status === 401) return 'Your session has expired. Please sign in again.';
     if (status === 403) return 'You do not have permission to do that action.';
     if (status === 404) return 'The requested item could not be found.';
-    if (status === 409) return 'A conflicting record already exists. Please review your input and try again.';
-    if (status === 429) return 'Too many requests right now. Please wait a moment and try again.';
+    if (status === 409) return cleanedServerMessage || 'A conflicting record already exists. Please review your input and try again.';
+    if (status === 429) return cleanedServerMessage || 'Too many requests right now. Please wait a moment and try again.';
     if ([500, 502, 503, 504].includes(Number(status))) {
       return 'Something went wrong on our side. Please try again in a moment.';
     }
 
-    if (serverMessage && String(serverMessage).trim()) {
-      return 'We could not complete this request right now. Please try again.';
+    if (cleanedServerMessage) {
+      return cleanedServerMessage;
     }
 
     return 'We could not complete your request. Please try again.';
@@ -76,6 +89,10 @@ export const api = {
     const method = (options.method || 'GET').toUpperCase();
     let url = `${config.API_BASE_URL}${endpoint}`;
     const token = this.getToken();
+    const isFormDataPayload = typeof FormData !== 'undefined' && options.body instanceof FormData;
+    const timeoutMs = Number(options.timeoutMs || config.API_REQUEST_TIMEOUT_MS || 12000);
+    const timeoutController = new AbortController();
+    let timeoutHandle = null;
 
     // Cache-bust GET requests without adding custom headers that can break CORS preflight.
     if (method === 'GET') {
@@ -85,10 +102,11 @@ export const api = {
     
     const defaultOptions = {
       headers: {
-        'Content-Type': 'application/json',
+        ...(isFormDataPayload ? {} : { 'Content-Type': 'application/json' }),
         ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
       },
       cache: 'no-store',
+      signal: options.signal || timeoutController.signal,
       ...options,
     };
 
@@ -101,6 +119,7 @@ export const api = {
     }
 
     try {
+      timeoutHandle = setTimeout(() => timeoutController.abort(), timeoutMs);
       const response = await fetch(url, defaultOptions);
       const data = await response.json().catch(() => ({}));
 
@@ -110,9 +129,12 @@ export const api = {
           // Clear both storage locations and redirect to login
           localStorage.removeItem('elevate_user_session');
           sessionStorage.removeItem('elevate_user_session');
+          localStorage.removeItem(SCHOOL_SLUG_HINT_KEY);
+          sessionStorage.removeItem(SCHOOL_SLUG_HINT_KEY);
+          document.cookie = `${SCHOOL_SLUG_HINT_COOKIE}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; samesite=lax`;
           const currentPath = window.location.pathname;
-          if (!currentPath.endsWith('index.html') && currentPath !== '/') {
-            window.location.href = 'index.html';
+          if (currentPath !== '/index.html' && currentPath !== '/') {
+            window.location.href = '/index.html';
           }
         }
         
@@ -128,6 +150,14 @@ export const api = {
 
       return data;
     } catch (error) {
+      if (error && error.name === 'AbortError') {
+        const timeoutError = new Error('Request timed out. Please try again.');
+        timeoutError.userMessage = 'Request timed out. Please try again.';
+        timeoutError.serverMessage = '';
+        timeoutError.status = 408;
+        throw timeoutError;
+      }
+
       if (!error.userMessage) {
         const fallback = this.buildFriendlyNetworkError();
         error.serverMessage = error.message || '';
@@ -136,15 +166,22 @@ export const api = {
       }
       console.error('API Error:', error);
       throw error;
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
     }
   },
 
   // Auth endpoints -> real Flask backend
   auth: {
-    async login(email, password) {
+    async login(email, password, schoolSlug = null) {
+      const payload = { email, password };
+      if (schoolSlug) payload.school_slug = schoolSlug;
+
       const data = await api.request('/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify(payload),
       });
       return {
         success: true,
@@ -153,10 +190,14 @@ export const api = {
       };
     },
 
-    async signup(name, email, password, grade, role = 'student') {
+    async signup(nameOrPayload, email, password, grade, role = 'student') {
+      const payload = (typeof nameOrPayload === 'object' && nameOrPayload !== null)
+        ? { ...nameOrPayload }
+        : { name: nameOrPayload, email, password, grade, role };
+
       const data = await api.request('/auth/signup', {
         method: 'POST',
-        body: JSON.stringify({ name, email, password, grade, role }),
+        body: JSON.stringify(payload),
       });
       return {
         success: true,
@@ -330,7 +371,10 @@ export const api = {
   // Teacher endpoints
   teacher: {
     async getDashboard(days = 30) {
-      return await api.request(`/teacher/dashboard?days=${days}`, { method: 'GET' });
+      return await api.request(`/teacher/dashboard?days=${days}&include_at_risk=0`, {
+        method: 'GET',
+        timeoutMs: 45000,
+      });
     },
 
     async getTests() {
@@ -400,6 +444,40 @@ export const api = {
       return await api.request(`/teacher/assignments?limit=${limit}`, { method: 'GET' });
     },
 
+    async getDocuments() {
+      return await api.request('/teacher/documents', { method: 'GET' });
+    },
+
+    async uploadDocument(file, options = {}) {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      if (options.title) formData.append('title', String(options.title));
+      if (options.chunk_size) formData.append('chunk_size', String(options.chunk_size));
+      if (options.overlap) formData.append('overlap', String(options.overlap));
+      if (options.vector_store) formData.append('vector_store', String(options.vector_store));
+      if (options.document_storage) formData.append('document_storage', String(options.document_storage));
+      if (options.async_ingestion !== undefined) formData.append('async_ingestion', options.async_ingestion ? '1' : '0');
+
+      return await api.request('/teacher/documents/upload', {
+        method: 'POST',
+        body: formData,
+      });
+    },
+
+    async deleteDocument(documentId) {
+      return await api.request(`/teacher/documents/${documentId}`, {
+        method: 'DELETE',
+      });
+    },
+
+    async cleanupDocuments(payload = {}) {
+      return await api.request('/teacher/documents/cleanup', {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
+      });
+    },
+
     async createAssignment(payload) {
       return await api.request('/teacher/assignments', {
         method: 'POST',
@@ -430,6 +508,64 @@ export const api = {
       if (params.days) query.append('days', String(params.days));
       const qs = query.toString();
       return await api.request(`/teacher/analytics${qs ? `?${qs}` : ''}`, { method: 'GET' });
+    },
+
+    async getInterventions(params = {}) {
+      const query = new URLSearchParams();
+      if (params.status) query.append('status', params.status);
+      if (params.limit) query.append('limit', String(params.limit));
+      const qs = query.toString();
+      return await api.request(`/teacher/interventions${qs ? `?${qs}` : ''}`, { method: 'GET' });
+    },
+
+    async getRagObservability(params = {}) {
+      const query = new URLSearchParams();
+      if (params.days) query.append('days', String(params.days));
+      if (params.limit) query.append('limit', String(params.limit));
+      const qs = query.toString();
+      return await api.request(`/teacher/rag/observability${qs ? `?${qs}` : ''}`, { method: 'GET' });
+    },
+
+    async createIntervention(payload) {
+      return await api.request('/teacher/interventions', {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
+      });
+    },
+
+    async updateIntervention(interventionId, payload) {
+      return await api.request(`/teacher/interventions/${interventionId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload || {}),
+      });
+    },
+
+    async assignRemedialTest(payload) {
+      return await api.request('/teacher/interventions/actions/remedial-assignment', {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
+      });
+    },
+
+    async createFocusedPractice(payload) {
+      return await api.request('/teacher/interventions/actions/focused-practice', {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
+      });
+    },
+
+    async scheduleFollowUpAssignment(payload) {
+      return await api.request('/teacher/interventions/actions/follow-up-assignment', {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
+      });
+    },
+
+    async groupWeaknessClusters(payload) {
+      return await api.request('/teacher/interventions/actions/weakness-clusters', {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
+      });
     },
 
     async generateQuestionBank(payload) {

@@ -8,6 +8,7 @@ from ..models import (
     Question,
     TestQuestion,
     AnswerLog,
+    EmotionLog,
     UserProgress,
     SubjectPerformance,
     ClassroomStudent,
@@ -17,6 +18,8 @@ from ..models import (
 from ..security import require_auth, role_required
 
 student_bp = Blueprint("student", __name__)
+
+ASSIGNMENT_INTEGRITY_WINDOW_SECONDS = 180
 
 
 def _utcnow():
@@ -48,6 +51,35 @@ def _is_assignment_expired(assignment):
     if assignment.allow_late:
         return False
     return assignment.due_at < _utcnow()
+
+
+def _enforce_assignment_integrity(student_id, assignment, *, phase: str):
+    if not assignment:
+        return None
+
+    require_camera = bool(getattr(assignment, "require_camera", True))
+    require_emotion = bool(getattr(assignment, "require_emotion", True))
+    if not require_camera and not require_emotion:
+        return None
+
+    now = _utcnow()
+    cutoff = now - timedelta(seconds=ASSIGNMENT_INTEGRITY_WINDOW_SECONDS)
+    recent_log = EmotionLog.query.filter(
+        EmotionLog.user_id == int(student_id),
+        EmotionLog.timestamp >= cutoff,
+    ).order_by(EmotionLog.timestamp.desc()).first()
+
+    if not recent_log:
+        return jsonify({
+            "error": "Camera and emotion tracking must be active for assigned tests",
+            "code": "assignment_integrity_required",
+            "phase": phase,
+            "require_camera": require_camera,
+            "require_emotion": require_emotion,
+            "window_seconds": ASSIGNMENT_INTEGRITY_WINDOW_SECONDS,
+        }), 403
+
+    return None
 
 
 @student_bp.get('/dashboard')
@@ -228,6 +260,10 @@ def start_test(test_id):
         assignment.status = 'expired'
         db.session.commit()
         return jsonify({"error": "Assigned test is overdue"}), 400
+
+    integrity_error = _enforce_assignment_integrity(student.id, assignment, phase="start")
+    if integrity_error:
+        return integrity_error
     
     # Check if student has already completed this test
     existing_result = TestResult.query.filter_by(
@@ -283,7 +319,11 @@ def start_test(test_id):
         return jsonify({
             "message": "Test started successfully",
             "test_result": test_result.as_dict(),
-            "time_limit": test.time_limit
+            "time_limit": test.time_limit,
+            "assignment_policy": {
+                "require_camera": bool(getattr(assignment, "require_camera", False)) if assignment else False,
+                "require_emotion": bool(getattr(assignment, "require_emotion", False)) if assignment else False,
+            }
         }), 201
         
     except Exception as e:
@@ -379,6 +419,11 @@ def submit_answer(test_id):
         test_result.status = 'expired'
         db.session.commit()
         return jsonify({"error": "Test time limit expired"}), 400
+
+    assignment = _active_assignment_for_student_test(student.id, test_id)
+    integrity_error = _enforce_assignment_integrity(student.id, assignment, phase="answer")
+    if integrity_error:
+        return integrity_error
     
     # Get the question
     question = db.session.get(Question, question_id)
@@ -450,6 +495,11 @@ def finish_test(test_id):
     
     if not test_result:
         return jsonify({"error": "No active test found"}), 404
+
+    assignment = _active_assignment_for_student_test(student.id, test_id)
+    integrity_error = _enforce_assignment_integrity(student.id, assignment, phase="finish")
+    if integrity_error:
+        return integrity_error
     
     try:
         # Get all answers for this test
@@ -476,7 +526,6 @@ def finish_test(test_id):
         test_result.finished_at = _utcnow()
         test_result.status = 'completed'
 
-        assignment = _active_assignment_for_student_test(student.id, test_id)
         if assignment:
             assignment.status = 'submitted'
             assignment.submitted_at = _utcnow()

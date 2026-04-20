@@ -417,6 +417,9 @@ def generate_and_persist():
         difficulty = data.get('difficulty', 'medium')
         subject = data.get('subject', 'general')
         grade = data.get('grade')
+        test_title = data.get('title')
+        test_description = data.get('description')
+        generation_mode = data.get('generation_mode') or 'standard'
         try:
             count = min(int(data.get('count', 5)), 50)
         except Exception:
@@ -436,7 +439,10 @@ def generate_and_persist():
             difficulty=difficulty,
             topic=topic,
             count=count,
-            seed=seed
+            seed=seed,
+            test_title=test_title,
+            test_description=test_description,
+            generation_mode=generation_mode,
         )
 
         payload = []

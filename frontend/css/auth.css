@@ -142,6 +142,81 @@
   box-shadow: 0 2px 8px rgba(102, 126, 234, 0.35);
 }
 
+.signup-stepper {
+  display: flex;
+  gap: 0.75rem;
+  margin-bottom: 0.9rem;
+}
+
+.signup-step {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  padding: 0.52rem 0.65rem;
+  border: 1px solid #dbe3ff;
+  border-radius: 999px;
+  background: #f6f8ff;
+  color: #6b7280;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.signup-step span {
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #e3e9ff;
+  color: #4f46e5;
+  font-size: 0.74rem;
+}
+
+.signup-step.active {
+  background: #eef2ff;
+  border-color: #667eea;
+  color: #2f3a6d;
+}
+
+.signup-step.active span {
+  background: #667eea;
+  color: #ffffff;
+}
+
+.signup-role-hint {
+  margin-bottom: 1rem;
+  color: #64748b;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.signup-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+
+.signup-actions .btn-auth {
+  margin-bottom: 0;
+}
+
+.btn-auth-secondary {
+  background: #eef2ff;
+  color: #334155;
+  box-shadow: none;
+}
+
+.btn-auth-secondary:hover {
+  background: #e3e8ff;
+  color: #1e293b;
+  transform: translateY(-1px);
+  box-shadow: none;
+}
+
 /* ===== INLINE AUTH ALERTS ===== */
 .auth-alert {
   display: none;
@@ -364,6 +439,14 @@
   }
   
   .form-row {
+    grid-template-columns: 1fr;
+  }
+
+  .signup-step {
+    font-size: 0.74rem;
+  }
+
+  .signup-actions {
     grid-template-columns: 1fr;
   }
 }

@@ -30,6 +30,38 @@ def _is_truthy_env(name: str, default: str = "0") -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _assert_gemini_key_if_required() -> None:
+    is_production_runtime = (
+        str(os.environ.get("FLASK_ENV", "")).strip().lower() == "production"
+        or bool(str(os.environ.get("RENDER_SERVICE_ID") or "").strip())
+        or _is_truthy_env("RENDER", "0")
+        or bool(str(os.environ.get("K_SERVICE") or "").strip())
+    )
+
+    explicit_requirement = os.environ.get("ELEVATE_REQUIRE_GEMINI_KEY")
+    if explicit_requirement is None:
+        require_key = is_production_runtime
+    else:
+        require_key = _is_truthy_env("ELEVATE_REQUIRE_GEMINI_KEY", "0")
+
+    if not require_key:
+        return
+
+    gemini_key = (
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or ""
+    )
+    if str(gemini_key).strip():
+        return
+
+    raise RuntimeError(
+        "Gemini API key is required but missing. "
+        "Set GEMINI_API_KEY (or GOOGLE_API_KEY), or set ELEVATE_REQUIRE_GEMINI_KEY=0 "
+        "for non-production bootstrap runs."
+    )
+
+
 def _bootstrap_pip() -> None:
     subprocess.run([str(PYTHON_EXE), "-m", "ensurepip", "--upgrade"], cwd=ROOT)
     probe = subprocess.run([str(PYTHON_EXE), "-m", "pip", "--version"], cwd=ROOT)
@@ -348,6 +380,7 @@ def main() -> int:
         return 1
 
     try:
+        _assert_gemini_key_if_required()
         _ensure_dependencies()
         users_before, questions_before = _read_counts()
         print(

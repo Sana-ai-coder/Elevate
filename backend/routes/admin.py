@@ -1,12 +1,15 @@
 from flask import Blueprint, current_app, request, jsonify
+import re
 from ..models import db, User, Question, EmotionLog, AnswerLog, TeacherRequest, School, SyllabusTopic, TestResult
 from ..security import hash_password
+from ..validation import sanitize_string
 from ..notifications import send_email
 from ..hf_training_service import (
     get_hf_strict_training_status,
     get_hf_training_service_url,
     start_hf_strict_training,
 )
+from sqlalchemy import func
 import csv
 from io import StringIO
 
@@ -177,12 +180,18 @@ def create_school():
     if not _check_admin_token():
         return {'error': 'unauthorized'}, 401
     data = request.get_json(silent=True) or {}
-    name = data.get('name')
-    slug = data.get('slug')
+    name = sanitize_string(data.get('name') or '', max_length=255)
+    slug = sanitize_string(data.get('slug') or '', max_length=128).lower()
+    slug = re.sub(r"[^a-z0-9\s_-]", "", slug)
+    slug = re.sub(r"[\s_]+", "-", slug).strip("-")
     if not name:
         return jsonify({'error': 'name required'}), 400
-    if School.query.filter_by(name=name).first():
+    if not slug:
+        return jsonify({'error': 'slug required'}), 400
+    if School.query.filter(func.lower(School.name) == name.lower()).first():
         return jsonify({'error': 'already exists'}), 409
+    if School.query.filter(func.lower(School.slug) == slug.lower()).first():
+        return jsonify({'error': 'slug exists'}), 409
     s = School(name=name, slug=slug)
     db.session.add(s)
     db.session.commit()

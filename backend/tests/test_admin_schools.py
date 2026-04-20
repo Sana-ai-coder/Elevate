@@ -37,3 +37,10 @@ def test_create_list_delete_school(client):
 
     r4 = client.get('/api/admin/schools', headers={'X-Admin-Token': ADMIN_TOKEN})
     assert all(s['id'] != sid for s in r4.get_json()['items'])
+
+
+def test_create_school_requires_slug(client):
+    r = client.post('/api/admin/schools', json={'name': 'Slugless School'}, headers={'X-Admin-Token': ADMIN_TOKEN})
+    assert r.status_code == 400
+    data = r.get_json()
+    assert 'slug required' in str(data.get('error', '')).lower()

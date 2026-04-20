@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -135,6 +136,19 @@ class GenerateMCQRequest(BaseModel):
     test_description: Optional[str] = None
 
 
+class OptimizePromptRequest(BaseModel):
+    source_type: str = Field(default="topic")
+    source: str = Field(..., min_length=1)
+    num_questions: int = Field(default=5, ge=1, le=50)
+    difficulty: str = Field(default="medium")
+    subject: str = Field(default="science")
+    grade: str = Field(default="high")
+    generation_mode: str = Field(default="standard")
+    test_title: Optional[str] = None
+    test_description: Optional[str] = None
+    rag_context: Optional[str] = None
+
+
 class ScoreMCQRequest(BaseModel):
     mcqs: List[Dict]
     user_answers: Dict[int, str]
@@ -145,6 +159,36 @@ class StrictTrainingRequest(BaseModel):
     github_ref: str = Field(default="main", min_length=1)
     min_emotion_accuracy: float = Field(default=0.90, ge=0.50, le=0.999)
     process_count: int = Field(default=4, ge=1, le=16)
+
+
+def _sanitize_prompt_text(raw: str | None, *, max_length: int = 24000) -> str:
+    text = str(raw or "").strip()
+    text = re.sub(r"^```(?:text)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text, flags=re.IGNORECASE)
+    return text[:max_length].strip()
+
+
+def _build_prompt_optimizer_fallback(payload: OptimizePromptRequest) -> str:
+    clean_rag = str(payload.rag_context or "").strip()
+    rag_block = ""
+    if clean_rag:
+        rag_block = (
+            "RAG CONTEXT (must be used as primary factual grounding when relevant):\n"
+            f"{clean_rag[:12000]}\n\n"
+        )
+
+    return (
+        "You are an expert STEM assessment designer. Return only JSON with this shape: "
+        "{\"questions\":[{\"text\":string,\"options\":[string,string,string,string],\"correct_index\":0-3,\"explanation\":string,\"topic\":string}]}.\n"
+        f"Generation mode: {payload.generation_mode}.\n"
+        f"Subject: {payload.subject}. Grade: {payload.grade}. Difficulty: {payload.difficulty}.\n"
+        f"Topic/Sub-topic: {payload.source}.\n"
+        f"Question count: {payload.num_questions}.\n"
+        f"Test title: {payload.test_title or 'N/A'}.\n"
+        f"Test description: {payload.test_description or 'N/A'}.\n"
+        f"{rag_block}"
+        "Rules: exactly requested count, exactly four distinct options, one correct answer, concise instructional explanations, no markdown, no extra keys."
+    )
 
 
 @app.get("/health")
@@ -368,6 +412,61 @@ def generate_mcqs(
             "latency_ms": elapsed_ms,
         },
     }
+
+
+@app.post("/prompt/optimize")
+def optimize_prompt_for_gemini(
+    payload: OptimizePromptRequest,
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+) -> dict:
+    _enforce_service_auth(authorization)
+
+    generator = _ensure_generator_loaded()
+    if not bool(getattr(generator, "is_model_loaded", lambda: _MODEL_READY)()):
+        raise HTTPException(status_code=503, detail="Model is not loaded yet. Please retry shortly.")
+
+    fallback_prompt = _build_prompt_optimizer_fallback(payload)
+    optimizer_prompt = (
+        "Create one high-performance Gemini MCQ generation prompt for a STEM assessment request.\n"
+        "Output ONLY the final prompt text (no markdown, no explanation).\n\n"
+        "The prompt you produce must force these guarantees:\n"
+        "1) strict JSON output with exact schema\n"
+        "2) uses all user-provided fields\n"
+        "3) grounded use of any RAG context\n"
+        "4) exact requested count\n"
+        "5) strong, plausible distractors and concise explanations\n\n"
+        f"Request payload:\n{json.dumps(payload.model_dump(), ensure_ascii=False)}\n\n"
+        f"Safe fallback template:\n{fallback_prompt}"
+    )
+
+    try:
+        llm = getattr(generator, "llm", None)
+        if llm is None:
+            raise RuntimeError("LLM instance is not initialized")
+
+        optimized = llm.generate(
+            prompt=optimizer_prompt,
+            max_new_tokens=900,
+            temperature=0.2,
+            top_p=0.95,
+            max_time=20.0,
+        )
+        optimized_prompt = _sanitize_prompt_text(optimized)
+        if not optimized_prompt:
+            optimized_prompt = fallback_prompt
+
+        return {
+            "status": "ok",
+            "source": "hf_local_prompt_optimizer",
+            "optimized_prompt": optimized_prompt,
+        }
+    except Exception as exc:
+        return {
+            "status": "fallback",
+            "source": "deterministic_fallback",
+            "optimized_prompt": fallback_prompt,
+            "error": str(exc),
+        }
 
 
 @app.post("/mcq/score")

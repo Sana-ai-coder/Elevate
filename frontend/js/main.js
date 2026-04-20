@@ -12,6 +12,8 @@ import { storage } from './storage.js';
 console.log('Elevate: main.js loaded successfully');
 
 const SESSION_KEY = 'elevate_user_session';
+const SCHOOL_SLUG_HINT_KEY = 'elevate_school_slug_hint';
+const SCHOOL_SLUG_HINT_COOKIE = 'elevate_school_slug_hint';
 let currentShellRoute = null;
 
 const STUDENT_SHELL_ROUTE_TO_FILE = {
@@ -21,6 +23,111 @@ const STUDENT_SHELL_ROUTE_TO_FILE = {
   settings: 'settings.html',
   profile: 'profile.html'
 };
+
+function normalizeUserRole(role) {
+  const normalized = String(role || 'student').trim().toLowerCase();
+  return ['student', 'teacher', 'admin'].includes(normalized) ? normalized : 'student';
+}
+
+function normalizeSchoolSlug(slug) {
+  const normalized = String(slug || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\s_-]/g, '')
+    .replace(/[\s_]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return normalized || null;
+}
+
+function readCookie(name) {
+  const encoded = encodeURIComponent(String(name || ''));
+  const chunks = String(document.cookie || '').split(';');
+  for (const rawChunk of chunks) {
+    const chunk = rawChunk.trim();
+    if (!chunk.startsWith(`${encoded}=`)) continue;
+    return decodeURIComponent(chunk.slice(encoded.length + 1));
+  }
+  return null;
+}
+
+function rememberSchoolSlugHint(slug) {
+  const normalized = normalizeSchoolSlug(slug);
+  if (!normalized) return null;
+  sessionStorage.setItem(SCHOOL_SLUG_HINT_KEY, normalized);
+  return normalized;
+}
+
+function getStoredSchoolSlugHint() {
+  const fromSession = normalizeSchoolSlug(sessionStorage.getItem(SCHOOL_SLUG_HINT_KEY));
+  if (fromSession) return fromSession;
+
+  const fromCookie = normalizeSchoolSlug(readCookie(SCHOOL_SLUG_HINT_COOKIE));
+  if (fromCookie) {
+    rememberSchoolSlugHint(fromCookie);
+    return fromCookie;
+  }
+
+  return null;
+}
+
+function getCurrentPathSlug() {
+  const parts = String(window.location.pathname || '').split('/').filter(Boolean);
+  if (parts.length < 1) return null;
+  const first = parts[0] || '';
+  if (!first || first.includes('.') || first.toLowerCase() === 'api') return null;
+  return normalizeSchoolSlug(first);
+}
+
+function getRoleHomePage(role, schoolSlug = null) {
+  const normalizedRole = normalizeUserRole(role);
+  const page = normalizedRole === 'teacher'
+    ? 'teacher-dashboard.html'
+    : normalizedRole === 'admin'
+      ? 'admin.html'
+      : 'dashboard.html';
+
+  const scopedSlug = normalizeSchoolSlug(schoolSlug) || getStoredSchoolSlugHint() || getCurrentPathSlug();
+  if (!scopedSlug) return page;
+  rememberSchoolSlugHint(scopedSlug);
+  return `/${scopedSlug}/${page}`;
+}
+
+function getScopedPagePath(pageFile) {
+  const normalizedFile = String(pageFile || '').replace(/^\/+/, '');
+  const slug = getCurrentPathSlug() || getStoredSchoolSlugHint();
+  if (!slug) return `/${normalizedFile}`;
+  rememberSchoolSlugHint(slug);
+  return `/${slug}/${normalizedFile}`;
+}
+
+async function withTimeout(promise, timeoutMs, timeoutLabel = 'Operation timed out') {
+  let timer = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(timeoutLabel)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function ensureStudentRoleSession() {
+  if (!auth.requireAuth()) return null;
+
+  const session = auth.loadSession();
+  rememberSchoolSlugHint(session?.user?.school_slug);
+  const role = normalizeUserRole(session?.user?.role);
+  if (role !== 'student') {
+    window.location.replace(getRoleHomePage(role, session?.user?.school_slug));
+    return null;
+  }
+
+  return session;
+}
 
 function getShellRouteFromHash() {
   const hash = (window.location.hash || '').replace('#', '').trim();
@@ -38,7 +145,7 @@ function routeFromStandalonePage(page) {
 function redirectStandaloneStudentPageToShell(page) {
   const route = routeFromStandalonePage(page);
   if (!route) return false;
-  window.location.replace(`dashboard.html#${route}`);
+  window.location.replace(`${getScopedPagePath('dashboard.html')}#${route}`);
   return true;
 }
 
@@ -69,7 +176,12 @@ async function loadStudentShellRoute(route, options = {}) {
 
   const isFirstDashboard = route === 'dashboard' && currentShellRoute === null && document.getElementById('progressModule');
   if (!isFirstDashboard) {
-    const html = await fetch(STUDENT_SHELL_ROUTE_TO_FILE[route], { cache: 'no-store' }).then(r => r.text());
+    const pagePath = getScopedPagePath(STUDENT_SHELL_ROUTE_TO_FILE[route]);
+    const html = await withTimeout(
+      fetch(pagePath, { cache: 'no-store' }).then(r => r.text()),
+      8000,
+      `Route content load timed out for ${pagePath}`
+    );
     const parsed = new DOMParser().parseFromString(html, 'text/html');
     const nextContentArea = parsed.querySelector('.content-area');
     if (!nextContentArea) return;
@@ -79,10 +191,11 @@ async function loadStudentShellRoute(route, options = {}) {
   currentShellRoute = route;
   setActiveSidebarRoute(route);
 
+  const shellUrl = `${getScopedPagePath('dashboard.html')}#${route}`;
   if (replaceState) {
-    history.replaceState({ shellRoute: route }, '', `dashboard.html#${route}`);
+    history.replaceState({ shellRoute: route }, '', shellUrl);
   } else if (pushState) {
-    history.pushState({ shellRoute: route }, '', `dashboard.html#${route}`);
+    history.pushState({ shellRoute: route }, '', shellUrl);
   }
 
   if (route === 'dashboard') {
@@ -107,7 +220,7 @@ async function loadStudentShellRoute(route, options = {}) {
 }
 
 async function setupStudentShellRouter() {
-  const page = window.location.pathname.split('/').pop();
+  const page = resolveCurrentFrontendPage(window.location.pathname);
   if (page !== 'dashboard.html') return false;
 
   window.__elevateShellRouting = true;
@@ -135,6 +248,22 @@ async function setupStudentShellRouter() {
   const initialRoute = getShellRouteFromHash();
   await loadStudentShellRoute(initialRoute, { pushState: false, replaceState: true });
   return true;
+}
+
+function resolveCurrentFrontendPage(pathname) {
+  const segments = String(pathname || '').split('/').filter(Boolean);
+  if (segments.length === 0) return 'index.html';
+
+  const last = String(segments[segments.length - 1] || '').toLowerCase();
+  if (!last) return 'index.html';
+
+  if (last.endsWith('.html')) return last;
+  if (last === 'frontend') return 'index.html';
+
+  // Slug-root route (e.g., /nhitm) serves index.html and should initialize auth.
+  if (segments.length === 1) return 'index.html';
+
+  return last;
 }
 
 // Hydrate navbar user info ASAP from storage to avoid visible "Student" flicker
@@ -169,7 +298,7 @@ document.addEventListener('DOMContentLoaded', () => {
   sessionStorage.removeItem('navigating');
   
   const path = window.location.pathname;
-  const page = path.split('/').pop();
+  const page = resolveCurrentFrontendPage(path);
   
   console.log('Current Page Detected:', page || 'index (root)');
 
@@ -192,12 +321,34 @@ document.addEventListener('DOMContentLoaded', () => {
   else if (page === 'settings.html') {
     if (!redirectStandaloneStudentPageToShell(page)) initSettingsPage();
   }
+  else {
+    const hasAuthShell = Boolean(document.getElementById('authContainer'));
+    if (hasAuthShell) {
+      console.warn('Unknown path served with auth shell; initializing auth fallback for page:', page);
+      initAuthPage();
+    }
+  }
 });
 
 // ===== SESSION CHECK FUNCTION =====
 function checkExistingSession() {
   const loader = document.getElementById('sessionCheckLoader');
   const authContainer = document.getElementById('authContainer');
+
+  const revealAuth = () => {
+    if (loader) loader.style.display = 'none';
+    if (authContainer) authContainer.style.display = 'block';
+  };
+
+  // Safety net: never leave the page on an infinite loading state.
+  const loaderFailsafe = setTimeout(() => {
+    const authHidden = authContainer && authContainer.style.display === 'none';
+    const loaderVisible = loader && loader.style.display !== 'none';
+    if (loaderVisible && authHidden) {
+      console.warn('Session check timeout fallback triggered; revealing auth container.');
+      revealAuth();
+    }
+  }, 2500);
   
   console.log('🔍 Checking for existing session...');
   
@@ -205,20 +356,28 @@ function checkExistingSession() {
   const session = auth.loadSession();
   
   setTimeout(() => {
-    if (session && session.user && session.token) {
-      console.log('✅ Valid session found! User:', session.user.name);
-      console.log('🚀 Auto-redirecting to dashboard...');
-      
-      // Session exists, redirect based on role
-      const role = session.user.role || 'student';
-      const dest = role === 'teacher' ? 'teacher-dashboard.html' : 'dashboard.html';
-      window.location.replace(dest);
-    } else {
-      console.log('❌ No valid session found. Showing login page...');
-      
-      // No session, show login form
-      if (loader) loader.style.display = 'none';
-      if (authContainer) authContainer.style.display = 'block';
+    try {
+      if (session && session.user && session.token) {
+        console.log('✅ Valid session found! User:', session.user.name);
+        console.log('🚀 Auto-redirecting to dashboard...');
+
+        // Session exists, redirect based on role
+        const role = normalizeUserRole(session.user.role);
+        rememberSchoolSlugHint(session.user.school_slug);
+        const dest = getRoleHomePage(role, session.user.school_slug);
+        clearTimeout(loaderFailsafe);
+        window.location.replace(dest);
+      } else {
+        console.log('❌ No valid session found. Showing login page...');
+
+        // No session, show login form
+        clearTimeout(loaderFailsafe);
+        revealAuth();
+      }
+    } catch (error) {
+      console.error('Session bootstrap failed; falling back to auth form.', error);
+      clearTimeout(loaderFailsafe);
+      revealAuth();
     }
   }, 500); // Small delay for smooth UX
 }
@@ -248,6 +407,15 @@ function setupPasswordToggles() {
 // ===== AUTH PAGE (index.html) =====
 function initAuthPage() {
   console.log('Initializing Auth Page...');
+
+  rememberSchoolSlugHint(getStoredSchoolSlugHint() || getCurrentPathSlug());
+
+  const canonicalAuthPath = '/index.html';
+  const currentPath = String(window.location.pathname || '');
+  if (currentPath !== '/' && currentPath !== canonicalAuthPath) {
+    // Keep auth page URL slug-free until a successful login redirect chooses scoped route.
+    window.history.replaceState({}, document.title, `${canonicalAuthPath}${window.location.search || ''}`);
+  }
   
   // Check for existing session first
   checkExistingSession();
@@ -256,13 +424,17 @@ function initAuthPage() {
   setupPasswordToggles();
 
   // Setup role selector buttons (shared helper)
-  function setupRoleSelector(selectorId) {
+  function setupRoleSelector(selectorId, onChange) {
     const container = document.getElementById(selectorId);
     if (!container) return;
     container.querySelectorAll('.role-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         container.querySelectorAll('.role-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
+        const selectedRole = btn.getAttribute('data-role') || 'student';
+        if (typeof onChange === 'function') {
+          onChange(selectedRole);
+        }
       });
     });
   }
@@ -288,7 +460,111 @@ function initAuthPage() {
   }
 
   setupRoleSelector('loginRoleSelector');
-  setupRoleSelector('signupRoleSelector');
+
+  const signupStep1 = document.getElementById('signupStep1');
+  const signupStep2 = document.getElementById('signupStep2');
+  const signupNextBtn = document.getElementById('signupNextBtn');
+  const signupBackBtn = document.getElementById('signupBackBtn');
+  const signupSubmitBtn = document.getElementById('signupSubmitBtn');
+  const signupRoleHint = document.getElementById('signupRoleHint');
+  const signupGradeGroup = document.getElementById('signupGradeGroup');
+  const signupGradeInput = document.getElementById('signupGrade');
+  const signupAdminFields = document.getElementById('signupAdminFields');
+  const signupSchoolNameInput = document.getElementById('signupSchoolName');
+  const signupSchoolSlugInput = document.getElementById('signupSchoolSlug');
+  const signupStepper = document.getElementById('signupStepper');
+  let signupCurrentStep = 1;
+
+  function setSignupStep(stepNumber) {
+    signupCurrentStep = stepNumber === 2 ? 2 : 1;
+    if (signupStep1) signupStep1.style.display = signupCurrentStep === 1 ? 'block' : 'none';
+    if (signupStep2) signupStep2.style.display = signupCurrentStep === 2 ? 'block' : 'none';
+
+    if (signupStepper) {
+      signupStepper.querySelectorAll('.signup-step').forEach(stepNode => {
+        const step = Number(stepNode.getAttribute('data-step') || 1);
+        stepNode.classList.toggle('active', step === signupCurrentStep);
+      });
+    }
+  }
+
+  function syncSignupRoleUI() {
+    const role = getSelectedRole('signupRoleSelector');
+    const isAdmin = role === 'admin';
+
+    if (signupGradeGroup) signupGradeGroup.style.display = isAdmin ? 'none' : '';
+    if (signupAdminFields) signupAdminFields.style.display = isAdmin ? '' : 'none';
+
+    if (signupGradeInput) {
+      signupGradeInput.disabled = isAdmin;
+      signupGradeInput.required = !isAdmin;
+      if (isAdmin) signupGradeInput.value = '';
+    }
+
+    if (signupSchoolNameInput) {
+      signupSchoolNameInput.disabled = !isAdmin;
+      signupSchoolNameInput.required = isAdmin;
+      if (!isAdmin) signupSchoolNameInput.value = '';
+    }
+
+    if (signupSchoolSlugInput) {
+      signupSchoolSlugInput.disabled = !isAdmin;
+      signupSchoolSlugInput.required = isAdmin;
+      if (!isAdmin) signupSchoolSlugInput.value = '';
+    }
+
+    if (signupRoleHint) {
+      signupRoleHint.textContent = isAdmin
+        ? 'Admin setup skips grade and collects school profile details in Step 2.'
+        : 'Student/Teacher setup includes grade level in Step 2.';
+    }
+  }
+
+  function validateSignupStepOne() {
+    const name = document.getElementById('signupName')?.value?.trim() || '';
+    const email = document.getElementById('signupEmail')?.value?.trim() || '';
+    const password = document.getElementById('signupPassword')?.value || '';
+
+    if (!name || !email || !password) {
+      showAuthAlert('signupAlert', 'Please complete name, email, and password before continuing.', 'warning');
+      return false;
+    }
+
+    if (password.length < 8) {
+      showAuthAlert('signupAlert', 'Password must be at least 8 characters long.', 'warning');
+      return false;
+    }
+
+    return true;
+  }
+
+  function resetSignupFlow() {
+    setSignupStep(1);
+    hideAuthAlert('signupAlert');
+    syncSignupRoleUI();
+  }
+
+  setupRoleSelector('signupRoleSelector', () => {
+    syncSignupRoleUI();
+    hideAuthAlert('signupAlert');
+  });
+  syncSignupRoleUI();
+  setSignupStep(1);
+
+  if (signupNextBtn) {
+    signupNextBtn.addEventListener('click', () => {
+      hideAuthAlert('signupAlert');
+      if (!validateSignupStepOne()) return;
+      setSignupStep(2);
+    });
+  }
+
+  if (signupBackBtn) {
+    signupBackBtn.addEventListener('click', () => {
+      hideAuthAlert('signupAlert');
+      setSignupStep(1);
+    });
+  }
   
   const loginForm = document.getElementById('loginForm');
   const signupForm = document.getElementById('signupForm');
@@ -302,6 +578,7 @@ function initAuthPage() {
       loginForm.style.display = 'none';
       signupForm.style.display = 'block';
       hideAuthAlert('loginAlert');
+      resetSignupFlow();
     });
   }
   
@@ -311,6 +588,7 @@ function initAuthPage() {
       signupForm.style.display = 'none';
       loginForm.style.display = 'block';
       hideAuthAlert('signupAlert');
+      setSignupStep(1);
     });
   }
 
@@ -336,9 +614,9 @@ function initAuthPage() {
       if (result.success) {
         console.log('Login success, navigating by role...');
         const session = auth.loadSession();
-        const role = session && session.user ? session.user.role : 'student';
+        const role = normalizeUserRole(session && session.user ? session.user.role : 'student');
         const selectedRole = getSelectedRole('loginRoleSelector');
-        const dest = role === 'teacher' ? 'teacher-dashboard.html' : 'dashboard.html';
+        const dest = getRoleHomePage(role, session?.user?.school_slug);
 
         showAuthAlert('loginAlert', utils.getMessage('auth.login_success'), 'success');
 
@@ -362,24 +640,62 @@ function initAuthPage() {
   if (signupForm) {
     signupForm.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const name = document.getElementById('signupName').value;
-      const email = document.getElementById('signupEmail').value;
+      if (signupCurrentStep === 1) {
+        if (validateSignupStepOne()) {
+          setSignupStep(2);
+        }
+        return;
+      }
+
+      const name = document.getElementById('signupName').value.trim();
+      const email = document.getElementById('signupEmail').value.trim();
       const password = document.getElementById('signupPassword').value;
-      const grade = document.getElementById('signupGrade').value;
       const role = getSelectedRole('signupRoleSelector');
-      const btn = signupForm.querySelector('button');
+      const grade = role === 'admin' ? null : (document.getElementById('signupGrade').value || null);
+      const schoolName = role === 'admin' ? (document.getElementById('signupSchoolName')?.value?.trim() || '') : '';
+      const schoolSlug = role === 'admin' ? (document.getElementById('signupSchoolSlug')?.value?.trim() || '') : '';
+
+      if (role !== 'admin' && !grade) {
+        showAuthAlert('signupAlert', 'Please select a grade level to continue.', 'warning');
+        return;
+      }
+
+      if (role === 'admin' && !schoolName) {
+        showAuthAlert('signupAlert', 'Please enter a school name for the admin workspace.', 'warning');
+        return;
+      }
+
+      if (role === 'admin' && !schoolSlug) {
+        showAuthAlert('signupAlert', 'Please enter a school slug for URL routing.', 'warning');
+        return;
+      }
+
+      const btn = signupSubmitBtn || signupForm.querySelector('button[type="submit"]');
       
       const originalText = btn.innerText;
       btn.innerText = 'Creating account...';
       btn.disabled = true;
+
+      const signupPayload = {
+        name,
+        email,
+        password,
+        role,
+      };
+
+      if (grade) signupPayload.grade = grade;
+      if (role === 'admin') {
+        signupPayload.school_name = schoolName;
+        signupPayload.school_slug = schoolSlug;
+      }
       
-      const result = await auth.signup(name, email, password, grade, role);
+      const result = await auth.signup(signupPayload);
       
       if (result.success) {
         showAuthAlert('signupAlert', utils.getMessage('auth.signup_success'), 'success');
         const session = auth.loadSession();
-        const savedRole = (session && session.user ? session.user.role : null) || role;
-        const dest = savedRole === 'teacher' ? 'teacher-dashboard.html' : 'dashboard.html';
+        const savedRole = normalizeUserRole((session && session.user ? session.user.role : null) || role);
+        const dest = getRoleHomePage(savedRole, session?.user?.school_slug || schoolSlug);
         setTimeout(() => utils.navigateTo(dest, true), 1200);
       } else {
         console.error('Signup error:', result.error);
@@ -395,26 +711,39 @@ function initAuthPage() {
 const DASHBOARD_STATS_CACHE_KEY = 'elevate_dashboard_stats_v1';
 
 async function initDashboard() {
-  if (!auth.requireAuth()) return;
-  
+  if (!ensureStudentRoleSession()) return;
+
   console.log('Initializing Dashboard...');
-  updateUserInfo();
-  setupProfileMenu();
-  setupLogout();
 
-  if (await setupStudentShellRouter()) {
-    return;
+  try {
+    updateUserInfo();
+    setupProfileMenu();
+    setupLogout();
+
+    const shellReady = await withTimeout(
+      setupStudentShellRouter(),
+      9000,
+      'Dashboard shell initialization timed out'
+    );
+
+    if (shellReady) {
+      return;
+    }
+
+    installBackNavigationGuard();
+
+    // Clear cached stats when the tab/window is closed so the skeleton
+    // shows fresh on the next browser session.
+    window.addEventListener('beforeunload', () => {
+      sessionStorage.removeItem(DASHBOARD_STATS_CACHE_KEY);
+    });
+
+    await withTimeout(loadDashboardStats(), 10000, 'Dashboard stats load timed out');
+  } catch (error) {
+    console.error('Dashboard bootstrap failed:', error);
+    showDashboardPanel('empty');
+    utils.showNotification('Dashboard is taking too long. Showing fallback view.', 'warning');
   }
-
-  installBackNavigationGuard();
-
-  // Clear cached stats when the tab/window is closed so the skeleton
-  // shows fresh on the next browser session.
-  window.addEventListener('beforeunload', () => {
-    sessionStorage.removeItem(DASHBOARD_STATS_CACHE_KEY);
-  });
-
-  await loadDashboardStats();
 }
 
 // Apply raw stats object to the DOM elements.
@@ -634,6 +963,9 @@ function getApiSubjectValues(slug) {
 }
 
 function isCameraRequiredForLearning() {
+  if (getSelectedLearningMode() === 'assigned') {
+    return true;
+  }
   const settings = getEffectiveSettings();
   return settings.requireCamera !== false;
 }
@@ -716,8 +1048,10 @@ function setLearningControlsEnabled(enabled) {
     refreshAssignedBtn.style.opacity = enabled ? '1' : '0.6';
   }
 
+  // Keep mode switching always available so users can return to Practice even
+  // when Assigned mode currently requires camera/detection.
   document.querySelectorAll('input[name="learningMode"]').forEach(input => {
-    input.disabled = !enabled;
+    input.disabled = false;
   });
 
   document.querySelectorAll('.subject-btn').forEach(btn => {
@@ -868,7 +1202,7 @@ function startLearningReadinessWatcher() {
 }
 
 async function initLearningPage() {
-  if (!auth.requireAuth()) return;
+  if (!ensureStudentRoleSession()) return;
   
   updateUserInfo();
   setupProfileMenu();
@@ -1235,17 +1569,14 @@ function setupQuestionHandlers() {
   const learningModeInputs = document.querySelectorAll('input[name="learningMode"]');
   learningModeInputs.forEach(input => {
     input.addEventListener('change', () => {
-      if (!isLearningControlReady()) {
-        utils.showNotification('Start camera and wait for face detection to unlock learning mode.', 'warning');
-        updateLearningModeUI();
-        return;
-      }
-
       const nextMode = input.value === 'assigned' ? 'assigned' : 'practice';
       if (nextMode === 'practice') {
         setLearningMode('practice', { preserveAssignedSelection: false });
       } else {
         setLearningMode('assigned', { preserveAssignedSelection: true });
+        if (!isLearningControlReady()) {
+          utils.showNotification('Assigned tests require camera and live face detection. Start camera, then press OK.', 'info');
+        }
       }
 
       markLearningSelectionPending(false);
@@ -1305,6 +1636,16 @@ function normalizeQuestionBatch(questions, maxCount = 50) {
   }
 
   return cleaned;
+}
+
+function getApiErrorMessage(error, fallback = 'Request failed. Please try again.') {
+  const payload = error?.payload || {};
+  const serverMessage = payload.error || payload.message || error?.serverMessage || '';
+  return String(serverMessage || error?.userMessage || error?.message || fallback);
+}
+
+function isAssignmentIntegrityError(error) {
+  return String(error?.payload?.code || '').trim().toLowerCase() === 'assignment_integrity_required';
 }
 
 function finishPracticeSession() {
@@ -1512,6 +1853,16 @@ async function loadQuestionsForCurrentSelection() {
     }
   } catch (error) {
     console.error('❌ Failed to load questions:', error);
+
+    if (isAssignmentIntegrityError(error)) {
+      const message = getApiErrorMessage(
+        error,
+        'Assigned tests require active camera and emotion tracking. Please enable camera and keep face detection active.'
+      );
+      utils.showNotification(message, 'warning');
+      return;
+    }
+
     utils.showNotification('Failed to load questions. Please try again.', 'error');
     
     if (questionContainer) {
@@ -1733,6 +2084,10 @@ async function handleQuestionSubmit(options = {}) {
     
   } catch (error) {
     console.error('Failed to submit answer:', error);
+    if (isAssignmentIntegrityError(error)) {
+      utils.showNotification(getApiErrorMessage(error, 'Integrity checks failed. Keep camera and emotion tracking active.'), 'warning');
+      return;
+    }
     utils.showNotification('Failed to submit answer', 'error');
   }
 }
@@ -1796,6 +2151,10 @@ function loadNextQuestion(options = {}) {
           await loadAssignedLearningTests();
         } catch (error) {
           console.error('Failed to finish assigned test:', error);
+          if (isAssignmentIntegrityError(error)) {
+            utils.showNotification(getApiErrorMessage(error, 'Integrity checks failed. Keep camera and emotion tracking active.'), 'warning');
+            return;
+          }
           utils.showNotification('Failed to finalize assigned test.', 'error');
         }
       });
@@ -2282,7 +2641,7 @@ function buildBusinessRecommendations(summary, subjects, emotions, timeline) {
 }
 
 async function initReportsPage() {
-  if (!auth.requireAuth()) return;
+  if (!ensureStudentRoleSession()) return;
   updateUserInfo();
   setupProfileMenu();
   setupLogout();
@@ -3103,9 +3462,9 @@ function setupSettingsHandlers() {
     
     // Apply the change immediately - show message based on current page
     if (e.target.checked) {
-      utils.showNotification('Camera requirement enabled. You will need to start the camera on the learning page.', 'info');
+      utils.showNotification('Practice mode now requires camera. Assigned tests always require camera and emotion tracking.', 'info');
     } else {
-      utils.showNotification('Camera requirement disabled. You can access questions without starting the camera.', 'info');
+      utils.showNotification('Practice mode can run without camera. Assigned tests still require camera and emotion tracking.', 'info');
       if (currentShellRoute === 'learning' || window.location.pathname.includes('learning.html')) {
         updateLearningStatusCard();
         updateLearningApplyButtonState();
@@ -3230,11 +3589,11 @@ function updateEmotionSettingsDependency(requireCamera, enableEmotionFeedback) {
 
   if (hint) {
     if (!cameraEnabled) {
-      hint.textContent = 'Emotion settings are disabled because camera requirement is off.';
+      hint.textContent = 'Practice camera requirement is off. Assigned mode still enforces camera and emotion tracking.';
     } else if (!feedbackEnabled) {
       hint.textContent = 'Detection frequency is disabled until emotion-based feedback is enabled.';
     } else {
-      hint.textContent = 'Emotion feedback options are active because camera is required.';
+      hint.textContent = 'Emotion feedback options are active for practice mode when camera requirement is on.';
     }
   }
 }

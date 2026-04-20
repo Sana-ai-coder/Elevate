@@ -42,6 +42,7 @@ const GLOBAL_API_BASE = normalizeApiBase(
 export const config = {
   // API Configuration (will be used when backend is ready)
   API_BASE_URL: RUNTIME_API_BASE || GLOBAL_API_BASE || import.meta.env?.API_BASE_URL || SAME_ORIGIN_API,
+  API_REQUEST_TIMEOUT_MS: 30000,
   
   // Camera and Emotion Detection
   EMOTION_DETECTION_INTERVAL: 500, // ms

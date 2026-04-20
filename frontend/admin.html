@@ -4,10 +4,36 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Elevate Admin</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
   <link rel="stylesheet" href="css/styles.css" />
   <link rel="stylesheet" href="css/admin.css" />
 </head>
 <body>
+  <nav class="navbar navbar-expand-lg">
+    <div class="container-fluid">
+      <a class="navbar-brand" href="admin.html">
+        <i class="fas fa-graduation-cap me-2"></i>Elevate
+      </a>
+      <div class="user-info" id="adminUserInfo">
+        <span id="adminUserName">Admin</span>
+        <div class="profile-menu" id="adminProfileMenu">
+          <button class="profile-menu-toggle" id="adminProfileMenuToggle" type="button" aria-label="Open profile menu" aria-expanded="false">
+            <div class="user-avatar" id="adminUserAvatar" title="Profile">A</div>
+            <i class="fas fa-chevron-down profile-menu-caret"></i>
+          </button>
+          <div class="profile-menu-dropdown" id="adminProfileMenuDropdown">
+            <a class="profile-menu-item" href="settings.html">
+              <i class="fas fa-cog"></i> Settings
+            </a>
+            <button class="profile-menu-item profile-menu-logout" id="adminLogoutBtn" type="button">
+              <i class="fas fa-sign-out-alt"></i> Logout
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </nav>
+
   <main class="admin-container">
     <header class="admin-header">
       <h1>Elevate — Admin & Teacher Portal</h1>

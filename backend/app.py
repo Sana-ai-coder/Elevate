@@ -6,9 +6,10 @@ Changes from original:
   • All other code is identical to the original
 """
 
-from flask import Flask, send_from_directory, Response
+from flask import Flask, send_from_directory, Response, redirect
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
+from sqlalchemy import inspect, text
 import os
 import sys
 from dotenv import load_dotenv
@@ -22,7 +23,8 @@ from .config import get_config
 from .models import (
     db, User, School, Question, UserProgress, EmotionLog,
     SubjectPerformance, AnswerLog, Test, TestQuestion, TestResult,
-    TeacherRequest, SyllabusTopic, UserSetting,
+    TeacherIntervention, TeacherDocument, TeacherDocumentChunk,
+    TeacherRequest, SyllabusTopic, UserSetting, RagRetrievalEvent,
 )
 from .routes.auth      import auth_bp
 from .routes.questions import questions_bp
@@ -38,6 +40,48 @@ from .routes.settings  import settings_bp
 from .routes.ai_emotion import ai_emotion_bp, inspect_emotion_artifacts
 
 from .logging_config import configure_logging
+
+
+def _is_truthy_env(raw_value: str | None) -> bool:
+    value = str(raw_value or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _assert_gemini_key_startup_health(app: Flask, environment_name: str) -> None:
+    """Fail fast when Gemini credentials are required but not configured."""
+    if bool(app.config.get("TESTING")):
+        return
+
+    normalized_env = str(environment_name or "").strip().lower()
+    is_production_runtime = (
+        normalized_env == "production"
+        or bool(str(os.environ.get("RENDER_SERVICE_ID") or "").strip())
+        or _is_truthy_env(os.environ.get("RENDER"))
+        or bool(str(os.environ.get("K_SERVICE") or "").strip())
+    )
+
+    explicit_requirement = os.environ.get("ELEVATE_REQUIRE_GEMINI_KEY")
+    if explicit_requirement is None:
+        require_key = is_production_runtime or (not bool(app.config.get("DEBUG")))
+    else:
+        require_key = _is_truthy_env(explicit_requirement)
+
+    if not require_key:
+        return
+
+    gemini_key = (
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or ""
+    )
+    if str(gemini_key).strip():
+        return
+
+    raise RuntimeError(
+        "Gemini API key is required at startup but missing. "
+        "Set GEMINI_API_KEY (or GOOGLE_API_KEY). "
+        "To disable this assertion outside production, set ELEVATE_REQUIRE_GEMINI_KEY=0."
+    )
 
 
 def _log_emotion_deploy_status(app: Flask) -> None:
@@ -75,8 +119,125 @@ def _log_emotion_deploy_status(app: Flask) -> None:
         app.logger.warning("[EmotionDeploy] startup diagnostics failed: %s", exc)
 
 
+def _ensure_assignment_integrity_columns(app: Flask) -> None:
+    """Backfill integrity columns if schema migration was skipped in an existing DB."""
+    try:
+        inspector = inspect(db.engine)
+        table_names = set(inspector.get_table_names())
+        if "test_assignments" not in table_names:
+            return
+
+        existing_columns = {
+            str(col.get("name"))
+            for col in inspector.get_columns("test_assignments")
+            if col.get("name")
+        }
+        missing_columns = [
+            name for name in ("require_camera", "require_emotion")
+            if name not in existing_columns
+        ]
+        if not missing_columns:
+            return
+
+        app.logger.warning(
+            "[SchemaGuard] Missing test_assignments columns detected: %s. Applying compatibility patch.",
+            ", ".join(missing_columns),
+        )
+
+        default_true_literal = "1" if db.engine.dialect.name == "sqlite" else "TRUE"
+        for column_name in missing_columns:
+            db.session.execute(
+                text(
+                    f"ALTER TABLE test_assignments "
+                    f"ADD COLUMN {column_name} BOOLEAN NOT NULL DEFAULT {default_true_literal}"
+                )
+            )
+        db.session.commit()
+        app.logger.info(
+            "[SchemaGuard] Added missing test_assignments columns: %s",
+            ", ".join(missing_columns),
+        )
+    except Exception as exc:
+        db.session.rollback()
+        app.logger.exception(
+            "[SchemaGuard] Failed to apply assignment integrity compatibility patch: %s",
+            exc,
+        )
+
+
+def _ensure_teacher_interventions_table(app: Flask) -> None:
+    """Create teacher_interventions table if it doesn't exist yet."""
+    try:
+        inspector = inspect(db.engine)
+        if "teacher_interventions" in set(inspector.get_table_names()):
+            return
+
+        app.logger.warning(
+            "[SchemaGuard] Missing teacher_interventions table detected. Applying compatibility patch."
+        )
+        TeacherIntervention.__table__.create(bind=db.engine, checkfirst=True)
+        app.logger.info("[SchemaGuard] Created teacher_interventions table")
+    except Exception as exc:
+        app.logger.exception(
+            "[SchemaGuard] Failed to create teacher_interventions table: %s",
+            exc,
+        )
+
+
+def _ensure_teacher_rag_tables(app: Flask) -> None:
+    """Create teacher RAG document tables if they don't exist yet."""
+    try:
+        inspector = inspect(db.engine)
+        existing = set(inspector.get_table_names())
+        created = []
+
+        if "teacher_documents" not in existing:
+            TeacherDocument.__table__.create(bind=db.engine, checkfirst=True)
+            created.append("teacher_documents")
+
+        if "teacher_document_chunks" not in existing:
+            TeacherDocumentChunk.__table__.create(bind=db.engine, checkfirst=True)
+            created.append("teacher_document_chunks")
+
+        if "rag_retrieval_events" not in existing:
+            RagRetrievalEvent.__table__.create(bind=db.engine, checkfirst=True)
+            created.append("rag_retrieval_events")
+
+        if "teacher_document_chunks" in existing:
+            columns = {
+                str(col.get("name"))
+                for col in inspector.get_columns("teacher_document_chunks")
+                if col.get("name")
+            }
+            if "embedding_vector_pg" not in columns:
+                app.logger.warning(
+                    "[SchemaGuard] Missing teacher_document_chunks.embedding_vector_pg column detected. Applying compatibility patch."
+                )
+                db.session.execute(
+                    text("ALTER TABLE teacher_document_chunks ADD COLUMN embedding_vector_pg TEXT")
+                )
+                db.session.commit()
+
+        if created:
+            app.logger.warning(
+                "[SchemaGuard] Missing RAG tables detected. Applying compatibility patch for: %s",
+                ", ".join(created),
+            )
+    except Exception as exc:
+        db.session.rollback()
+        app.logger.exception(
+            "[SchemaGuard] Failed to create RAG compatibility tables: %s",
+            exc,
+        )
+
+
 def create_app(config_name: str | None = None) -> Flask:
     app = Flask(__name__)
+    SCHOOL_SLUG_HINT_COOKIE = 'elevate_school_slug_hint'
+
+    environment_name = str(
+        config_name or os.environ.get("FLASK_ENV", "development")
+    ).strip().lower() or "development"
 
     @app.route("/api/health", methods=["GET"])
     def health():
@@ -88,6 +249,7 @@ def create_app(config_name: str | None = None) -> Flask:
 
     cfg = get_config(config_name)
     app.config.from_object(cfg)
+    _assert_gemini_key_startup_health(app, environment_name)
 
     configure_logging(app)
     _log_emotion_deploy_status(app)
@@ -104,6 +266,11 @@ def create_app(config_name: str | None = None) -> Flask:
     )
 
     db.init_app(app)
+
+    with app.app_context():
+        _ensure_assignment_integrity_columns(app)
+        _ensure_teacher_interventions_table(app)
+        _ensure_teacher_rag_tables(app)
 
     # with app.app_context():
     #     db.create_all()
@@ -130,6 +297,31 @@ def create_app(config_name: str | None = None) -> Flask:
         os.path.join(os.path.dirname(__file__), '..', 'frontend')
     )
 
+    def _serve_frontend_file(filename: str):
+        if not filename or filename.startswith('api/'):
+            return None
+
+        normalized = filename.lstrip('/')
+        full = os.path.join(FRONTEND_DIR, normalized)
+        if os.path.exists(full):
+            return send_from_directory(FRONTEND_DIR, normalized)
+        return None
+
+    def _slug_hint_response(slug: str):
+        response = redirect('/index.html', code=302)
+        normalized = ''.join(ch for ch in str(slug or '').strip().lower() if ch.isalnum() or ch in ('-', '_', ' '))
+        normalized = '-'.join(part for part in normalized.replace('_', ' ').split() if part)
+        if normalized:
+            response.set_cookie(
+                SCHOOL_SLUG_HINT_COOKIE,
+                normalized,
+                max_age=60 * 60,
+                secure=False,
+                httponly=False,
+                samesite='Lax',
+            )
+        return response
+
     @app.get('/')
     def serve_index():
         return send_from_directory(FRONTEND_DIR, 'index.html')
@@ -138,17 +330,59 @@ def create_app(config_name: str | None = None) -> Flask:
     def serve_admin():
         return send_from_directory(FRONTEND_DIR, 'admin.html')
 
+    @app.get('/admin-schools')
+    @app.get('/admin-schools.html')
+    def redirect_admin_schools_to_admin():
+        return redirect('/admin', code=302)
+
     @app.get('/favicon.ico')
     def serve_favicon():
         return Response(status=204)
 
+    @app.get('/<slug>')
+    @app.get('/<slug>/')
+    def serve_slug_index(slug):
+        slug_str = str(slug).strip('/')
+        if slug_str.lower() == 'api':
+            return not_found(None)
+
+        # Single-segment frontend files (e.g. /index.html, /dashboard.html)
+        # must be served normally, not treated as school slug routes.
+        if '.' in slug_str:
+            served = _serve_frontend_file(slug_str)
+            if served is not None:
+                return served
+            return not_found(None)
+
+        # Public auth page must never expose school slug in URL.
+        return _slug_hint_response(slug_str)
+
+    @app.get('/<slug>/<path:filename>')
+    def serve_slug_frontend_files(slug, filename):
+        if str(slug).lower() == 'api' or str(filename).startswith('api/'):
+            return not_found(None)
+
+        if str(filename).strip('/').lower() == 'index.html':
+            # Canonicalize auth page to non-slug URL.
+            return _slug_hint_response(str(slug).strip('/'))
+
+        # Avoid collisions with real static asset folders (e.g. /css/styles.css, /js/main.js)
+        # that would otherwise be misread as /<slug>/<file> routes.
+        combined = f"{str(slug).strip('/')}/{str(filename).lstrip('/')}"
+        served = _serve_frontend_file(combined)
+        if served is not None:
+            return served
+
+        served = _serve_frontend_file(filename)
+        if served is not None:
+            return served
+        return not_found(None)
+
     @app.get('/<path:filename>')
     def serve_frontend_files(filename):
-        if filename.startswith('api/'):
-            return not_found(None)
-        full = os.path.join(FRONTEND_DIR, filename)
-        if os.path.exists(full):
-            return send_from_directory(FRONTEND_DIR, filename)
+        served = _serve_frontend_file(filename)
+        if served is not None:
+            return served
         return not_found(None)
 
     @app.errorhandler(404)

@@ -3,6 +3,59 @@ import { utils } from './utils.js';
 import { api } from './api.js';
 
 const SESSION_KEY = 'elevate_user_session';
+const PUBLIC_INDEX_PATH = '/index.html';
+const SCHOOL_SLUG_HINT_KEY = 'elevate_school_slug_hint';
+const SCHOOL_SLUG_HINT_COOKIE = 'elevate_school_slug_hint';
+
+function normalizeSchoolSlug(slug) {
+  const normalized = String(slug || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\s_-]/g, '')
+    .replace(/[\s_]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return normalized || null;
+}
+
+function readCookie(name) {
+  const encoded = encodeURIComponent(String(name || ''));
+  const chunks = String(document.cookie || '').split(';');
+  for (const rawChunk of chunks) {
+    const chunk = rawChunk.trim();
+    if (!chunk.startsWith(`${encoded}=`)) continue;
+    return decodeURIComponent(chunk.slice(encoded.length + 1));
+  }
+  return null;
+}
+
+function rememberSchoolSlugHint(slug) {
+  const normalized = normalizeSchoolSlug(slug);
+  if (!normalized) return null;
+
+  sessionStorage.setItem(SCHOOL_SLUG_HINT_KEY, normalized);
+  document.cookie = `${SCHOOL_SLUG_HINT_COOKIE}=${encodeURIComponent(normalized)}; path=/; max-age=3600; samesite=lax`;
+  return normalized;
+}
+
+function clearSchoolSlugHint() {
+  sessionStorage.removeItem(SCHOOL_SLUG_HINT_KEY);
+  localStorage.removeItem(SCHOOL_SLUG_HINT_KEY);
+  document.cookie = `${SCHOOL_SLUG_HINT_COOKIE}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; samesite=lax`;
+}
+
+function getSchoolSlugHint() {
+  const fromSession = normalizeSchoolSlug(sessionStorage.getItem(SCHOOL_SLUG_HINT_KEY));
+  if (fromSession) return fromSession;
+
+  const fromCookie = normalizeSchoolSlug(readCookie(SCHOOL_SLUG_HINT_COOKIE));
+  if (fromCookie) {
+    rememberSchoolSlugHint(fromCookie);
+    return fromCookie;
+  }
+
+  return null;
+}
 
 export const auth = {
   // ------- Session helpers (supports both localStorage and sessionStorage) -------
@@ -24,6 +77,7 @@ export const auth = {
       const session = JSON.parse(raw);
       if (session && session.user && session.token) {
         console.log(`✅ Session loaded from ${storage}`);
+        rememberSchoolSlugHint(session.user.school_slug);
         updateState({ currentUser: session.user });
         return session;
       }
@@ -37,6 +91,7 @@ export const auth = {
 
   saveSession(user, token, rememberMe = false) {
     const session = { user, token };
+    rememberSchoolSlugHint(user?.school_slug);
     
     if (rememberMe) {
       // Remember Me checked: use localStorage (persists across browser restarts)
@@ -56,6 +111,7 @@ export const auth = {
   clearSession() {
     localStorage.removeItem(SESSION_KEY);
     sessionStorage.removeItem(SESSION_KEY);
+    clearSchoolSlugHint();
     updateState({ currentUser: null });
   },
 
@@ -67,7 +123,7 @@ export const auth = {
         return { success: false, error: 'Please enter both email and password' };
       }
 
-      const result = await api.auth.login(email, password);
+      const result = await api.auth.login(email, password, getSchoolSlugHint());
       console.log('Login result:', { hasUser: !!result.user, hasToken: !!result.token, rememberMe });
       this.saveSession(result.user, result.token, rememberMe);
       return { success: true };
@@ -80,18 +136,43 @@ export const auth = {
     }
   },
 
-  async signup(name, email, password, grade, role = 'student') {
+  async signup(nameOrPayload, email, password, grade, role = 'student') {
     try {
-      if (!name || !email || !password || !grade) {
+      const payload = (typeof nameOrPayload === 'object' && nameOrPayload !== null)
+        ? {
+          ...nameOrPayload,
+          role: String(nameOrPayload.role || 'student').toLowerCase(),
+        }
+        : {
+          name: nameOrPayload,
+          email,
+          password,
+          grade,
+          role: String(role || 'student').toLowerCase(),
+        };
+
+      if (!payload.name || !payload.email || !payload.password) {
         return { success: false, error: 'All fields are required' };
       }
 
+      if (payload.role !== 'admin' && !payload.grade) {
+        return { success: false, error: 'Grade level is required for student and teacher accounts' };
+      }
+
+      if (payload.role === 'admin' && !payload.school_name) {
+        return { success: false, error: 'School name is required for admin account setup' };
+      }
+
+      if (payload.role === 'admin' && !payload.school_slug) {
+        return { success: false, error: 'School slug is required for admin account setup' };
+      }
+
       // Basic client-side validation
-      if (password.length < 8) {
+      if (String(payload.password).length < 8) {
         return { success: false, error: 'Password must be at least 8 characters long' };
       }
 
-      const result = await api.auth.signup(name, email, password, grade, role);
+      const result = await api.auth.signup(payload);
       this.saveSession(result.user, result.token);
       return { success: true };
     } catch (error) {
@@ -115,7 +196,7 @@ export const auth = {
     this.clearSession();
     // Replace current page (dashboard/learning/etc) with login so back button
     // does not re-open protected pages from this session
-    utils.navigateTo('index.html', true);
+    utils.navigateTo(PUBLIC_INDEX_PATH, true);
   },
 
   // Check Auth
@@ -126,7 +207,7 @@ export const auth = {
     }
     console.warn('No session found, redirecting to login.');
     // Use replace to avoid a broken page in the back-stack
-    window.location.replace('index.html');
+    window.location.replace(PUBLIC_INDEX_PATH);
     return false;
   }
 };

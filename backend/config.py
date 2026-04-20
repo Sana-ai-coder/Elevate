@@ -129,21 +129,27 @@ def _parse_cors_origins(raw_value: str | None):
 
 
 def _engine_options_for(uri: str):
+    if uri.startswith("sqlite"):
+        # QueuePool-only options are invalid with SQLite StaticPool
+        # (commonly used in tests, especially with sqlite:///:memory:).
+        return {
+            "connect_args": {"check_same_thread": False}
+        }
+
     options = {
         "pool_pre_ping": True,
         "pool_recycle": 300,
-        "pool_size":      3,        # add — small pool for free tier
-        "max_overflow":   2,        # add
-        "pool_timeout":   10,       # add — fail fast
+        "pool_size": 3,
+        "max_overflow": 2,
+        "pool_timeout": 10,
     }
 
-    if uri.startswith("sqlite"):
-        options["connect_args"] = {"check_same_thread": False}
-    elif uri.startswith("postgresql"):
+    if uri.startswith("postgresql"):
         options["connect_args"] = {
             "connect_timeout": 8,
             "options": "-c statement_timeout=25000"
         }
+
     return options
 
 

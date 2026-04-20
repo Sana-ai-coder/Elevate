@@ -2,16 +2,23 @@ from ..question_generator import generate_fallback_mcqs
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 import random
 import concurrent.futures
+import threading
 import time
 
 from flask import Blueprint, jsonify, request, g, current_app
 from sqlalchemy import and_, func, or_
+from werkzeug.utils import secure_filename
 
 from ..models import (
     Test,
     TestResult,
+    TeacherIntervention,
+    TeacherDocument,
+    TeacherDocumentChunk,
+    RagRetrievalEvent,
     User,
     Question,
     TestQuestion,
@@ -29,11 +36,39 @@ from ..ai_topic_service import (
     get_topic_ai_service_url,
 )
 from ..at_risk_predictor import get_at_risk_predictions_for_students
+from ..rag_service import (
+    ALLOWED_DOCUMENT_EXTENSIONS,
+    assemble_context_text,
+    attach_question_provenance,
+    build_deterministic_chunks,
+    build_embedding_payload,
+    delete_document_from_r2,
+    get_rag_async_min_bytes,
+    get_rag_cleanup_batch_size,
+    get_rag_max_chunk_candidates,
+    get_rag_max_documents_per_teacher,
+    get_rag_max_selected_docs,
+    get_rag_max_storage_bytes_per_teacher,
+    extract_document_text,
+    get_rag_max_upload_bytes,
+    get_rag_min_confidence,
+    get_rag_retention_days,
+    is_pgvector_enabled,
+    is_allowed_document_extension,
+    normalize_document_extension,
+    resolve_document_storage_backend,
+    resolve_vector_store_choice,
+    score_chunks_for_query,
+    store_pgvector_embeddings,
+    summarize_retrieval_confidence,
+    upload_document_to_r2,
+)
 
 teacher_bp = Blueprint("teacher", __name__)
 
 VALID_DIFFICULTIES = {"easy", "medium", "hard"}
 VALID_GRADES = {"elementary", "middle", "high", "college"}
+INTERVENTION_STATUSES = {"planned", "in_progress", "monitoring", "completed", "cancelled"}
 
 
 def _utcnow():
@@ -47,6 +82,19 @@ def _clamp_int(raw, default_value, min_value, max_value):
     except (TypeError, ValueError):
         value = default_value
     return max(min_value, min(max_value, value))
+
+
+RAG_INGESTION_WORKERS = _clamp_int(os.environ.get("RAG_INGESTION_WORKERS", 2), 2, 1, 8)
+RAG_INGESTION_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=RAG_INGESTION_WORKERS)
+RAG_INGESTION_LOCK = threading.Lock()
+
+
+def _clamp_float(raw, default_value, min_value, max_value):
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = float(default_value)
+    return max(float(min_value), min(float(max_value), value))
 
 
 def _parse_bool_flag(raw_value, default=False):
@@ -76,6 +124,328 @@ def _parse_iso_datetime(raw_value):
         return datetime.fromisoformat(str(raw_value))
     except (TypeError, ValueError):
         return None
+
+
+def _parse_int_list(values):
+    if not isinstance(values, list):
+        return []
+
+    normalized = []
+    seen = set()
+    for value in values:
+        try:
+            item = int(value)
+        except (TypeError, ValueError):
+            continue
+        if item <= 0 or item in seen:
+            continue
+        seen.add(item)
+        normalized.append(item)
+    return normalized
+
+
+def _teacher_document_storage_root() -> str:
+    root = os.path.join(current_app.instance_path, "teacher_docs")
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _teacher_document_storage_path(teacher_id: int, original_filename: str) -> str:
+    safe_name = secure_filename(original_filename or "document.txt") or "document.txt"
+    teacher_folder = os.path.join(_teacher_document_storage_root(), str(int(teacher_id)))
+    os.makedirs(teacher_folder, exist_ok=True)
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    random_suffix = f"{random.randint(1000, 9999)}"
+    stored_name = f"{timestamp}_{random_suffix}_{safe_name}"
+    return os.path.join(teacher_folder, stored_name)
+
+
+def _safe_remove_local_file(path: str | None) -> None:
+    if not path:
+        return
+    if not os.path.exists(path):
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        current_app.logger.warning("Failed to remove local teacher document file: %s", path)
+
+
+def _delete_teacher_document_storage(storage_path: str | None, metadata: dict | None) -> None:
+    details = metadata if isinstance(metadata, dict) else {}
+    backend = str(details.get("storage_backend") or "").strip().lower()
+    path = str(storage_path or "").strip()
+
+    if backend == "r2" or path.startswith("r2://"):
+        try:
+            delete_document_from_r2(path, details)
+        except Exception:
+            current_app.logger.warning("Failed to delete R2 teacher document object: %s", path)
+        return
+
+    if path:
+        _safe_remove_local_file(path)
+
+
+def _cleanup_expired_teacher_documents(
+    teacher_id: int,
+    *,
+    dry_run: bool = False,
+    limit: int | None = None,
+) -> dict:
+    retention_days = get_rag_retention_days()
+    max_batch = limit if limit is not None else get_rag_cleanup_batch_size()
+    batch_size = _clamp_int(max_batch, get_rag_cleanup_batch_size(), 1, 200)
+    cutoff = _utcnow() - timedelta(days=retention_days)
+
+    stale_docs = TeacherDocument.query.filter(
+        TeacherDocument.teacher_id == int(teacher_id),
+        TeacherDocument.uploaded_at < cutoff,
+    ).order_by(
+        TeacherDocument.uploaded_at.asc(),
+    ).limit(batch_size).all()
+
+    if dry_run:
+        return {
+            "retention_days": retention_days,
+            "cutoff": cutoff.isoformat(),
+            "deleted_count": 0,
+            "candidate_count": len(stale_docs),
+            "document_ids": [int(doc.id) for doc in stale_docs],
+        }
+
+    deleted_ids = []
+    for doc in stale_docs:
+        deleted_ids.append(int(doc.id))
+        _delete_teacher_document_storage(doc.storage_path, doc.metadata_json if isinstance(doc.metadata_json, dict) else {})
+        db.session.delete(doc)
+
+    if deleted_ids:
+        db.session.commit()
+
+    return {
+        "retention_days": retention_days,
+        "cutoff": cutoff.isoformat(),
+        "deleted_count": len(deleted_ids),
+        "candidate_count": len(stale_docs),
+        "document_ids": deleted_ids,
+    }
+
+
+def _enforce_teacher_document_quota(teacher_id: int, incoming_size_bytes: int) -> str | None:
+    max_docs = get_rag_max_documents_per_teacher()
+    max_storage = get_rag_max_storage_bytes_per_teacher()
+
+    current_docs = TeacherDocument.query.filter(
+        TeacherDocument.teacher_id == int(teacher_id),
+    ).count()
+
+    if current_docs >= max_docs:
+        return (
+            f"Document quota exceeded. Maximum {max_docs} documents per teacher is allowed. "
+            "Delete older documents before uploading new ones."
+        )
+
+    used_storage = db.session.query(
+        func.coalesce(func.sum(TeacherDocument.file_size_bytes), 0),
+    ).filter(
+        TeacherDocument.teacher_id == int(teacher_id),
+    ).scalar() or 0
+
+    projected = int(used_storage) + int(max(0, incoming_size_bytes))
+    if projected > max_storage:
+        limit_mb = int(max_storage / (1024 * 1024))
+        used_mb = int(int(used_storage) / (1024 * 1024))
+        return (
+            f"Storage quota exceeded for your document library ({used_mb}MB/{limit_mb}MB used). "
+            "Delete documents or upload a smaller file."
+        )
+
+    return None
+
+
+def _process_teacher_document_ingestion(
+    *,
+    teacher_id: int,
+    document_id: int,
+    source_file_path: str,
+    extension: str,
+    content_sha: str,
+    chunk_size: int,
+    overlap: int,
+    vector_store_choice: dict,
+    cleanup_source_file: bool,
+) -> dict:
+    doc = TeacherDocument.query.filter_by(id=document_id, teacher_id=teacher_id).first()
+    if not doc:
+        raise ValueError("Document record not found for ingestion")
+
+    try:
+        text = extract_document_text(source_file_path, extension)
+        if not text:
+            raise ValueError("No readable text found in uploaded document.")
+
+        chunks = build_deterministic_chunks(
+            text,
+            document_fingerprint=content_sha,
+            chunk_size=chunk_size,
+            overlap=overlap,
+        )
+        if not chunks:
+            raise ValueError("Document text is too short to chunk.")
+
+        TeacherDocumentChunk.query.filter_by(document_id=doc.id).delete(synchronize_session=False)
+
+        total_tokens = 0
+        chunk_vectors = []
+        for chunk in chunks:
+            embedding = build_embedding_payload(chunk.get("text") or "")
+            total_tokens += int(chunk.get("token_count") or 0)
+
+            vector = embedding.get("embedding_vector") or []
+            chunk_id = chunk.get("chunk_id")
+            db.session.add(TeacherDocumentChunk(
+                document_id=doc.id,
+                teacher_id=teacher_id,
+                chunk_id=chunk_id,
+                chunk_index=int(chunk.get("chunk_index") or 0),
+                text=chunk.get("text") or "",
+                text_hash=chunk.get("text_hash") or hashlib.sha256((chunk.get("text") or "").encode("utf-8")).hexdigest(),
+                char_start=chunk.get("char_start"),
+                char_end=chunk.get("char_end"),
+                token_count=int(chunk.get("token_count") or 0),
+                embedding_vector=vector if isinstance(vector, list) else [],
+                embedding_dim=embedding.get("embedding_dim"),
+                embedding_provider=embedding.get("embedding_provider"),
+                embedding_model=embedding.get("embedding_model"),
+                embedding_status=embedding.get("embedding_status") or "embedded",
+                vector_store=vector_store_choice.get("effective") or "python",
+                metadata_json={
+                    "source": "teacher_upload",
+                    "embedding_error": embedding.get("embedding_error"),
+                },
+            ))
+
+            if chunk_id and isinstance(vector, list) and vector:
+                chunk_vectors.append({
+                    "chunk_id": str(chunk_id),
+                    "vector": vector,
+                })
+
+        db.session.flush()
+
+        vector_store_effective = vector_store_choice.get("effective") or "python"
+        vector_store_fallback_reason = vector_store_choice.get("fallback_reason")
+        if vector_store_effective == "pgvector" and is_pgvector_enabled():
+            try:
+                stored_count = store_pgvector_embeddings(doc.id, chunk_vectors)
+                if stored_count <= 0:
+                    vector_store_effective = "python"
+                    vector_store_fallback_reason = "pgvector_write_noop"
+            except Exception as exc:
+                vector_store_effective = "python"
+                vector_store_fallback_reason = f"pgvector_write_failed:{str(exc)[:160]}"
+
+        metadata = doc.metadata_json if isinstance(doc.metadata_json, dict) else {}
+        metadata.update(
+            {
+                "chunk_size": chunk_size,
+                "overlap": overlap,
+                "vector_store_requested": vector_store_choice.get("requested"),
+                "vector_store_effective": vector_store_effective,
+                "vector_store_fallback_reason": vector_store_fallback_reason,
+                "ingestion_mode": metadata.get("ingestion_mode") or "sync",
+                "ingested_at": _utcnow().isoformat(),
+            }
+        )
+
+        doc.metadata_json = metadata
+        doc.status = "processed"
+        doc.error_message = None
+        doc.chunk_count = len(chunks)
+        doc.token_count = total_tokens
+        doc.processed_at = _utcnow()
+        doc.updated_at = _utcnow()
+        db.session.commit()
+
+        return {
+            "document": doc.as_dict(),
+            "chunk_count": len(chunks),
+            "vector_store_effective": vector_store_effective,
+            "vector_store_fallback_reason": vector_store_fallback_reason,
+        }
+    except Exception as exc:
+        db.session.rollback()
+        failed = TeacherDocument.query.filter_by(id=document_id, teacher_id=teacher_id).first()
+        if failed:
+            failed.status = "failed"
+            failed.error_message = str(exc)[:1200]
+            failed.updated_at = _utcnow()
+            db.session.commit()
+        raise
+    finally:
+        if cleanup_source_file:
+            _safe_remove_local_file(source_file_path)
+
+
+def _run_background_ingestion(app, **kwargs):
+    with app.app_context():
+        try:
+            _process_teacher_document_ingestion(**kwargs)
+        except Exception as exc:
+            current_app.logger.exception("Background teacher document ingestion failed: %s", exc)
+
+
+def _record_rag_retrieval_event(
+    *,
+    teacher_id: int,
+    test_id: int | None,
+    generation_status: dict,
+    requested_count: int,
+    generated_count: int,
+) -> None:
+    status_payload = generation_status if isinstance(generation_status, dict) else {}
+    rag_metrics = status_payload.get("rag_metrics") if isinstance(status_payload.get("rag_metrics"), dict) else {}
+    fallback_reason = (
+        status_payload.get("rag_fallback_reason")
+        or status_payload.get("vector_store_fallback_reason")
+        or None
+    )
+
+    has_error = bool(status_payload.get("service_error")) and int(generated_count or 0) <= 0
+    event_status = "error" if has_error else ("fallback" if fallback_reason else "success")
+
+    event = RagRetrievalEvent(
+        teacher_id=int(teacher_id),
+        test_id=int(test_id) if test_id else None,
+        generation_mode_requested=str(status_payload.get("generation_mode_requested") or "standard"),
+        generation_mode_effective=str(status_payload.get("generation_mode_effective") or "standard"),
+        vector_store_requested=status_payload.get("vector_store_requested"),
+        vector_store_effective=status_payload.get("vector_store_effective"),
+        status=event_status,
+        fallback_reason=str(fallback_reason)[:128] if fallback_reason else None,
+        error_message=str(status_payload.get("service_error") or "")[:1200] or None,
+        selected_doc_count=len(status_payload.get("rag_selected_document_ids") or []),
+        candidate_chunk_count=int(status_payload.get("rag_candidate_chunk_count") or 0),
+        retrieval_count=int(status_payload.get("rag_retrieval_count") or 0),
+        confidence=float(status_payload.get("rag_confidence") or 0.0),
+        avg_similarity=float(status_payload.get("rag_avg_similarity") or 0.0),
+        max_similarity=float(status_payload.get("rag_max_similarity") or 0.0),
+        provenance_count=int(rag_metrics.get("provenance_count") or 0),
+        coverage=float(rag_metrics.get("coverage") or 0.0),
+        relevance=float(rag_metrics.get("relevance") or 0.0),
+        duplication=float(rag_metrics.get("duplication") or 0.0),
+        requested_count=int(requested_count or 0),
+        generated_count=int(generated_count or 0),
+        service_latency_ms=float(status_payload.get("service_latency_ms") or 0.0) if status_payload.get("service_latency_ms") is not None else None,
+        metadata_json={
+            "service_status_code": status_payload.get("service_status_code"),
+            "service_endpoint": status_payload.get("service_endpoint"),
+            "technical_fallback_used": bool(status_payload.get("technical_fallback_used")),
+        },
+    )
+    db.session.add(event)
 
 
 def _teacher_student_filter(teacher, grade=None):
@@ -116,6 +486,255 @@ def _ensure_teacher_school(teacher):
     teacher.school_id = school.id
     db.session.flush()
     return school.id
+
+
+def _normalize_grade_for_generation(value, fallback="high"):
+    normalized = sanitize_string(value or "", max_length=32).lower()
+    if normalized in VALID_GRADES:
+        return normalized
+    fallback_normalized = sanitize_string(fallback or "", max_length=32).lower()
+    if fallback_normalized in VALID_GRADES:
+        return fallback_normalized
+    return "high"
+
+
+def _scope_teacher_students(teacher, grade=None):
+    students_query, effective_grade = _teacher_student_filter(teacher, grade=grade)
+    students = students_query.order_by(User.name.asc()).all()
+    return students, [int(s.id) for s in students], effective_grade
+
+
+def _score_pct_expression():
+    return func.coalesce(
+        (TestResult.correct_answers * 100.0) / func.nullif(TestResult.total_questions, 0),
+        0,
+    )
+
+
+def _topic_accuracy_rows(student_ids, cutoff, subject=None):
+    if not student_ids:
+        return []
+
+    query = db.session.query(
+        AnswerLog.user_id.label("student_id"),
+        Question.subject.label("subject"),
+        Question.syllabus_topic.label("topic"),
+        func.count(AnswerLog.id).label("attempts"),
+        func.avg(func.cast(AnswerLog.is_correct, db.Integer) * 100.0).label("accuracy"),
+    ).join(
+        Question,
+        AnswerLog.question_id == Question.id,
+    ).filter(
+        AnswerLog.user_id.in_(student_ids),
+        AnswerLog.answered_at >= cutoff,
+        Question.syllabus_topic.isnot(None),
+    )
+
+    if subject:
+        query = query.filter(Question.subject == subject)
+
+    rows = query.group_by(
+        AnswerLog.user_id,
+        Question.subject,
+        Question.syllabus_topic,
+    ).all()
+
+    return [
+        {
+            "student_id": int(row.student_id),
+            "subject": str(row.subject or "").strip().lower() or None,
+            "topic": str(row.topic or "").strip().lower() or None,
+            "attempts": int(row.attempts or 0),
+            "accuracy": round(float(row.accuracy or 0), 2),
+        }
+        for row in rows
+    ]
+
+
+def _select_subject_for_students(student_ids, cutoff, preferred_subject=None):
+    preferred = sanitize_string(preferred_subject or "", max_length=64) or None
+    if preferred:
+        return preferred
+
+    if not student_ids:
+        return "science"
+
+    rows = db.session.query(
+        TestResult.subject,
+        func.avg(_score_pct_expression()).label("avg_score"),
+        func.count(TestResult.id).label("attempts"),
+    ).filter(
+        TestResult.user_id.in_(student_ids),
+        TestResult.started_at >= cutoff,
+    ).group_by(
+        TestResult.subject,
+    ).order_by(
+        func.avg(_score_pct_expression()).asc(),
+        func.count(TestResult.id).desc(),
+    ).all()
+
+    if rows:
+        return sanitize_string(rows[0].subject or "science", max_length=64)
+    return "science"
+
+
+def _build_generated_intervention_test(
+    teacher,
+    *,
+    title,
+    subject,
+    grade,
+    difficulty,
+    topic,
+    question_count,
+    time_limit,
+    description,
+    seed=None,
+):
+    school_id = _ensure_teacher_school(teacher)
+    if not school_id:
+        raise ValueError("Unable to resolve teacher school context")
+
+    resolved_grade = _normalize_grade_for_generation(grade, teacher.grade or "high")
+    resolved_subject = sanitize_string(subject or "science", max_length=64)
+    resolved_difficulty = sanitize_string(difficulty or "easy", max_length=16).lower()
+    if resolved_difficulty not in VALID_DIFFICULTIES:
+        resolved_difficulty = "easy"
+
+    resolved_topic = sanitize_string(topic or "", max_length=128) or None
+    resolved_title = sanitize_string(title or "Intervention Test", max_length=255) or "Intervention Test"
+    resolved_description = sanitize_string(description or "", max_length=1000) or None
+
+    test = Test(
+        title=resolved_title,
+        description=resolved_description,
+        subject=resolved_subject,
+        grade=resolved_grade,
+        topic=resolved_topic,
+        difficulty=resolved_difficulty,
+        question_count=int(max(1, question_count)),
+        time_limit=int(max(5, time_limit)),
+        created_by=teacher.id,
+        school_id=school_id,
+        total_points=int(max(1, question_count)),
+        is_published=True,
+        is_active=True,
+    )
+    db.session.add(test)
+    db.session.flush()
+
+    questions, generation_status = _pick_or_generate_questions(
+        teacher_id=teacher.id,
+        subject=resolved_subject,
+        grade=resolved_grade,
+        difficulty=resolved_difficulty,
+        topic=resolved_topic,
+        count=int(max(1, question_count)),
+        seed=seed,
+        test_title=resolved_title,
+        test_description=resolved_description,
+    )
+
+    if not questions:
+        raise RuntimeError(
+            generation_status.get("service_error") or
+            "Question generation is temporarily unavailable"
+        )
+
+    for index, question in enumerate(questions, start=1):
+        db.session.add(TestQuestion(test_id=test.id, question_id=question.id, order=index, points=1))
+
+    warning = None
+    if len(questions) < int(max(1, question_count)):
+        warning = (
+            f"Requested {int(max(1, question_count))} questions, "
+            f"but generated {len(questions)}."
+        )
+    test.question_count = len(questions)
+    test.total_points = len(questions)
+
+    return test, generation_status, warning
+
+
+def _build_assignments_for_students(
+    teacher,
+    *,
+    test,
+    student_ids,
+    due_at,
+    notes,
+    is_mandatory=True,
+    allow_late=False,
+):
+    if not student_ids:
+        return []
+
+    school_id = _ensure_teacher_school(teacher)
+    if not school_id:
+        return []
+
+    scoped_students = User.query.filter(
+        User.id.in_([int(sid) for sid in student_ids]),
+        User.role == "student",
+        User.school_id == school_id,
+    ).all()
+
+    created = []
+    for student in scoped_students:
+        assignment = TestAssignment(
+            test_id=test.id,
+            student_id=student.id,
+            assigned_by=teacher.id,
+            notes=notes,
+            due_at=due_at,
+            is_mandatory=bool(is_mandatory),
+            allow_late=bool(allow_late),
+            require_camera=True,
+            require_emotion=True,
+            status="assigned",
+        )
+        db.session.add(assignment)
+        created.append(assignment)
+
+    return created
+
+
+def _create_intervention_entry(
+    teacher,
+    *,
+    action_type,
+    title,
+    notes,
+    status,
+    subject=None,
+    topic=None,
+    due_at=None,
+    classroom_id=None,
+    related_test_id=None,
+    student_ids=None,
+    assignment_ids=None,
+    cluster_payload=None,
+    metadata_json=None,
+):
+    intervention = TeacherIntervention(
+        teacher_id=teacher.id,
+        action_type=sanitize_string(action_type or "note", max_length=64) or "note",
+        title=sanitize_string(title or "Intervention", max_length=255) or "Intervention",
+        notes=sanitize_string(notes or "", max_length=4000) or None,
+        status=sanitize_string(status or "planned", max_length=32).lower() or "planned",
+        subject=sanitize_string(subject or "", max_length=64) or None,
+        topic=sanitize_string(topic or "", max_length=128) or None,
+        due_at=due_at,
+        classroom_id=classroom_id,
+        related_test_id=related_test_id,
+        student_ids=student_ids or [],
+        assignment_ids=assignment_ids or [],
+        cluster_payload=cluster_payload or [],
+        metadata_json=metadata_json or {},
+    )
+    db.session.add(intervention)
+    db.session.flush()
+    return intervention
 
 
 def _get_teacher_classroom_or_404(teacher_id, classroom_id):
@@ -256,6 +875,15 @@ def _build_generated_question_records(
             "seed": seed,
             "source": source,
         }
+
+        item_provenance = item.get("provenance") if isinstance(item, dict) else None
+        if isinstance(item_provenance, dict) and item_provenance:
+            generation_meta["provenance"] = item_provenance
+
+        item_retrieval_trace = item.get("retrieval_trace") if isinstance(item, dict) else None
+        if isinstance(item_retrieval_trace, list) and item_retrieval_trace:
+            generation_meta["retrieval_trace"] = item_retrieval_trace
+
         if generation_meta_extras:
             generation_meta.update(generation_meta_extras)
 
@@ -364,8 +992,25 @@ def _pick_or_generate_questions(
     seed=None,
     test_title=None,
     test_description=None,
+    generation_mode="standard",
+    rag_options=None,
 ):
     pool = []
+    normalized_mode = sanitize_string(generation_mode or "standard", max_length=16).lower()
+    if normalized_mode not in {"standard", "rag"}:
+        normalized_mode = "standard"
+
+    rag_options = rag_options if isinstance(rag_options, dict) else {}
+    selected_document_ids = _parse_int_list(rag_options.get("selected_document_ids"))
+    rag_top_k = _clamp_int(rag_options.get("top_k", 4), 4, 1, 12)
+    rag_min_confidence = _clamp_float(
+        rag_options.get("min_confidence", get_rag_min_confidence()),
+        get_rag_min_confidence(),
+        0.0,
+        1.0,
+    )
+    vector_store_choice = resolve_vector_store_choice(rag_options.get("vector_store"))
+
     generation_status = {
         "requested_count": count,
         "generated_count": 0,
@@ -380,7 +1025,131 @@ def _pick_or_generate_questions(
         "service_latency_ms": None,
         "source_mode": "strict_llm",
         "technical_fallback_used": False,
+        "generation_mode_requested": normalized_mode,
+        "generation_mode_effective": "standard",
+        "rag_selected_document_ids": selected_document_ids,
+        "rag_candidate_chunk_count": 0,
+        "rag_top_k": rag_top_k,
+        "rag_retrieval_count": 0,
+        "rag_confidence": 0.0,
+        "rag_min_confidence": rag_min_confidence,
+        "rag_fallback_reason": None,
+        "rag_error": None,
+        "rag_metrics": {
+            "coverage": 0.0,
+            "relevance": 0.0,
+            "duplication": 0.0,
+            "provenance_count": 0,
+        },
+        "vector_store_requested": vector_store_choice.get("requested"),
+        "vector_store_effective": vector_store_choice.get("effective"),
+        "vector_store_fallback_reason": vector_store_choice.get("fallback_reason"),
     }
+
+    retrieved_chunks = []
+    rag_context = None
+    effective_generation_mode = "standard"
+
+    if normalized_mode == "rag":
+        try:
+            max_doc_window = get_rag_max_selected_docs()
+            max_chunk_candidates = get_rag_max_chunk_candidates()
+
+            doc_query = TeacherDocument.query.filter(
+                TeacherDocument.teacher_id == teacher_id,
+                TeacherDocument.status == "processed",
+            )
+            if selected_document_ids:
+                effective_document_ids = selected_document_ids[:max_doc_window]
+            else:
+                effective_document_ids = [
+                    int(row.id)
+                    for row in doc_query.with_entities(TeacherDocument.id)
+                    .order_by(TeacherDocument.uploaded_at.desc())
+                    .limit(max_doc_window)
+                    .all()
+                ]
+
+            generation_status["rag_selected_document_ids"] = effective_document_ids
+
+            query_text = " ".join(
+                item
+                for item in [
+                    sanitize_string(subject or "", max_length=64),
+                    sanitize_string(grade or "", max_length=32),
+                    sanitize_string(difficulty or "", max_length=16),
+                    sanitize_string(topic or "", max_length=128),
+                    sanitize_string(test_title or "", max_length=255),
+                    sanitize_string(test_description or "", max_length=1000),
+                ]
+                if item
+            )
+
+            if vector_store_choice.get("effective") == "pgvector":
+                retrieved_chunks = score_chunks_for_query(
+                    query_text,
+                    [],
+                    top_k=rag_top_k,
+                    vector_store="pgvector",
+                    teacher_id=teacher_id,
+                    selected_document_ids=effective_document_ids,
+                )
+                if not retrieved_chunks:
+                    generation_status["vector_store_effective"] = "python"
+                    generation_status["vector_store_fallback_reason"] = "pgvector_retrieval_empty"
+
+            if not retrieved_chunks:
+                chunk_query = TeacherDocumentChunk.query.join(
+                    TeacherDocument,
+                    TeacherDocumentChunk.document_id == TeacherDocument.id,
+                ).filter(
+                    TeacherDocumentChunk.teacher_id == teacher_id,
+                    TeacherDocument.teacher_id == teacher_id,
+                    TeacherDocument.status == "processed",
+                )
+
+                if effective_document_ids:
+                    chunk_query = chunk_query.filter(TeacherDocumentChunk.document_id.in_(effective_document_ids))
+
+                chunk_rows = chunk_query.order_by(
+                    TeacherDocumentChunk.document_id.asc(),
+                    TeacherDocumentChunk.chunk_index.asc(),
+                ).limit(max_chunk_candidates).all()
+                generation_status["rag_candidate_chunk_count"] = len(chunk_rows)
+
+                retrieved_chunks = score_chunks_for_query(
+                    query_text,
+                    chunk_rows,
+                    top_k=rag_top_k,
+                    vector_store="python",
+                )
+            else:
+                generation_status["rag_candidate_chunk_count"] = len(retrieved_chunks)
+
+            confidence_summary = summarize_retrieval_confidence(retrieved_chunks)
+            generation_status["rag_retrieval_count"] = len(retrieved_chunks)
+            generation_status["rag_confidence"] = confidence_summary.get("confidence", 0.0)
+            generation_status["rag_avg_similarity"] = confidence_summary.get("avg_similarity", 0.0)
+            generation_status["rag_max_similarity"] = confidence_summary.get("max_similarity", 0.0)
+
+            if retrieved_chunks and confidence_summary.get("confidence", 0.0) >= rag_min_confidence:
+                rag_context = assemble_context_text(retrieved_chunks)
+                if rag_context:
+                    effective_generation_mode = "rag"
+                    generation_status["source_mode"] = "rag_grounded"
+                    generation_status["generation_mode_effective"] = "rag"
+                else:
+                    generation_status["rag_fallback_reason"] = "empty_retrieval_context"
+            elif not retrieved_chunks:
+                generation_status["rag_fallback_reason"] = "no_relevant_documents_found"
+            else:
+                generation_status["rag_fallback_reason"] = "low_retrieval_confidence"
+        except Exception as exc:
+            generation_status["rag_error"] = str(exc)
+            generation_status["rag_fallback_reason"] = "retrieval_error"
+
+    if generation_status["generation_mode_effective"] != "rag":
+        effective_generation_mode = "standard"
 
     service_result = generate_topic_mcqs(
         subject=subject,
@@ -391,6 +1160,8 @@ def _pick_or_generate_questions(
         seed=seed,
         test_title=test_title,
         test_description=test_description,
+        rag_context=rag_context,
+        generation_mode=effective_generation_mode,
     )
 
     service_meta = service_result.get("meta") if isinstance(service_result.get("meta"), dict) else {}
@@ -409,13 +1180,24 @@ def _pick_or_generate_questions(
                 continue
             service_payload.append({
                 **row,
-                "source": "topic_ai_service",
+                "source": "topic_ai_service_rag" if effective_generation_mode == "rag" else "topic_ai_service",
             })
     elif service_result.get("error"):
         current_app.logger.warning(
             "Topic AI service call failed during test generation: %s",
             service_result.get("error"),
         )
+
+    if effective_generation_mode == "rag" and service_payload and retrieved_chunks:
+        enriched = attach_question_provenance(service_payload, retrieved_chunks)
+        service_payload = enriched.get("questions") or service_payload
+        rag_metrics = enriched.get("metrics") or {}
+        generation_status["rag_metrics"] = {
+            "coverage": float(rag_metrics.get("coverage", 0.0) or 0.0),
+            "relevance": float(rag_metrics.get("relevance", 0.0) or 0.0),
+            "duplication": float(rag_metrics.get("duplication", 0.0) or 0.0),
+            "provenance_count": int(rag_metrics.get("provenance_count", 0) or 0),
+        }
 
     generated_records = _build_generated_question_records(
         service_payload,
@@ -430,6 +1212,15 @@ def _pick_or_generate_questions(
             "service_meta": service_meta,
             "test_title": sanitize_string(test_title or "", max_length=255) or None,
             "test_description": sanitize_string(test_description or "", max_length=1000) or None,
+            "generation_mode_requested": normalized_mode,
+            "generation_mode_effective": effective_generation_mode,
+            "rag_selected_document_ids": generation_status.get("rag_selected_document_ids") or selected_document_ids,
+            "rag_candidate_chunk_count": generation_status.get("rag_candidate_chunk_count"),
+            "rag_retrieval_count": generation_status.get("rag_retrieval_count"),
+            "rag_confidence": generation_status.get("rag_confidence"),
+            "rag_metrics": generation_status.get("rag_metrics") or {},
+            "vector_store_requested": generation_status.get("vector_store_requested"),
+            "vector_store_effective": generation_status.get("vector_store_effective"),
         },
     )
 
@@ -461,6 +1252,8 @@ def _pick_or_generate_questions(
                 "fallback_reason": "topic_ai_service_technical_failure",
                 "service_error": service_result.get("error"),
                 "service_status_code": service_result.get("status_code"),
+                "generation_mode_requested": normalized_mode,
+                "generation_mode_effective": effective_generation_mode,
             },
         )
         for record in sample_records:
@@ -473,7 +1266,275 @@ def _pick_or_generate_questions(
 
     final_pool = pool[:count]
     generation_status["generated_count"] = len(final_pool)
+    generation_status["generation_mode_effective"] = effective_generation_mode
     return final_pool, generation_status
+
+
+@teacher_bp.get("/documents")
+@require_auth
+@role_required("teacher")
+def list_teacher_documents():
+    teacher = g.current_user
+    docs = TeacherDocument.query.filter_by(teacher_id=teacher.id).order_by(TeacherDocument.uploaded_at.desc()).all()
+    return jsonify({
+        "count": len(docs),
+        "documents": [item.as_dict() for item in docs],
+    }), 200
+
+
+@teacher_bp.post("/documents/upload")
+@require_auth
+@role_required("teacher")
+def upload_teacher_document():
+    teacher = g.current_user
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return jsonify({"error": "A file is required."}), 400
+
+    original_filename = str(upload.filename or "").strip()
+    extension = normalize_document_extension(original_filename)
+    if not is_allowed_document_extension(original_filename):
+        allowed = ", ".join(sorted(ALLOWED_DOCUMENT_EXTENSIONS))
+        return jsonify({"error": f"Unsupported file type. Allowed: {allowed}"}), 400
+
+    raw_bytes = upload.read()
+    if not raw_bytes:
+        return jsonify({"error": "Uploaded file is empty."}), 400
+
+    max_bytes = get_rag_max_upload_bytes()
+    if len(raw_bytes) > max_bytes:
+        return jsonify({"error": f"File exceeds max size of {int(max_bytes / (1024 * 1024))} MB."}), 400
+
+    try:
+        _cleanup_expired_teacher_documents(teacher.id, dry_run=False)
+    except Exception as cleanup_exc:
+        db.session.rollback()
+        current_app.logger.warning("Teacher document cleanup skipped due to error: %s", cleanup_exc)
+
+    content_sha = hashlib.sha256(raw_bytes).hexdigest()
+    duplicate = TeacherDocument.query.filter_by(
+        teacher_id=teacher.id,
+        content_sha256=content_sha,
+    ).order_by(TeacherDocument.uploaded_at.desc()).first()
+    if duplicate and duplicate.status in {"processing", "processed"}:
+        return jsonify({
+            "message": "Document already indexed.",
+            "deduplicated": True,
+            "document": duplicate.as_dict(),
+        }), 200
+
+    quota_error = _enforce_teacher_document_quota(teacher.id, len(raw_bytes))
+    if quota_error:
+        return jsonify({"error": quota_error}), 409
+
+    school_id = _ensure_teacher_school(teacher)
+    if not school_id:
+        return jsonify({"error": "Unable to resolve teacher school context"}), 500
+
+    temp_storage_path = _teacher_document_storage_path(teacher.id, original_filename)
+    storage_resolution = resolve_document_storage_backend(request.form.get("document_storage"))
+    if storage_resolution.get("effective") == "invalid":
+        return jsonify({
+            "error": "R2 storage was requested but is not available in strict mode.",
+            "reason": storage_resolution.get("fallback_reason"),
+        }), 503
+
+    uploaded_r2 = None
+    storage_path = temp_storage_path
+
+    requested_title = request.form.get("title") or os.path.splitext(original_filename)[0]
+    title = sanitize_string(requested_title, max_length=255) or "Teacher Document"
+    content_type = sanitize_string(upload.mimetype or "", max_length=128) or None
+    chunk_size = _clamp_int(request.form.get("chunk_size", 1200), 1200, 300, 3000)
+    overlap = _clamp_int(request.form.get("overlap", 220), 220, 0, int(chunk_size / 2))
+    vector_store_choice = resolve_vector_store_choice(request.form.get("vector_store"))
+
+    force_async = _parse_bool_flag(request.form.get("async_ingestion"), False)
+    should_async = force_async or len(raw_bytes) >= get_rag_async_min_bytes()
+
+    try:
+        with open(temp_storage_path, "wb") as handle:
+            handle.write(raw_bytes)
+
+        storage_metadata = {
+            "storage_backend_requested": storage_resolution.get("requested"),
+            "storage_backend_effective": storage_resolution.get("effective"),
+            "storage_backend_fallback_reason": storage_resolution.get("fallback_reason"),
+            "ingestion_mode": "async" if should_async else "sync",
+        }
+
+        if storage_resolution.get("effective") == "r2":
+            uploaded_r2 = upload_document_to_r2(
+                raw_bytes,
+                teacher_id=teacher.id,
+                teacher_name=teacher.name,
+                original_filename=original_filename,
+                content_sha256=content_sha,
+                content_type=content_type,
+            )
+            storage_path = str(uploaded_r2.get("storage_path") or storage_path)
+            storage_metadata.update(
+                {
+                    "storage_backend": "r2",
+                    "r2_bucket": uploaded_r2.get("bucket"),
+                    "r2_key": uploaded_r2.get("key"),
+                    "r2_endpoint": uploaded_r2.get("endpoint"),
+                    "r2_public_url": uploaded_r2.get("public_url"),
+                }
+            )
+        else:
+            storage_metadata["storage_backend"] = "local"
+
+        document = TeacherDocument(
+            teacher_id=teacher.id,
+            school_id=school_id,
+            title=title,
+            filename=original_filename,
+            file_ext=extension,
+            content_type=content_type,
+            file_size_bytes=len(raw_bytes),
+            content_sha256=content_sha,
+            storage_path=storage_path,
+            status="processing",
+            metadata_json={
+                "chunk_size": chunk_size,
+                "overlap": overlap,
+                "vector_store_requested": vector_store_choice.get("requested"),
+                "vector_store_effective": vector_store_choice.get("effective"),
+                "vector_store_fallback_reason": vector_store_choice.get("fallback_reason"),
+                **storage_metadata,
+            },
+        )
+        db.session.add(document)
+        db.session.commit()
+
+        ingestion_kwargs = {
+            "teacher_id": int(teacher.id),
+            "document_id": int(document.id),
+            "source_file_path": temp_storage_path,
+            "extension": extension,
+            "content_sha": content_sha,
+            "chunk_size": chunk_size,
+            "overlap": overlap,
+            "vector_store_choice": vector_store_choice,
+            "cleanup_source_file": storage_resolution.get("effective") == "r2",
+        }
+
+        if should_async:
+            app_obj = current_app._get_current_object()
+            with RAG_INGESTION_LOCK:
+                RAG_INGESTION_EXECUTOR.submit(_run_background_ingestion, app_obj, **ingestion_kwargs)
+
+            return jsonify({
+                "message": "Document uploaded. Background indexing started.",
+                "queued": True,
+                "document": document.as_dict(),
+            }), 202
+
+        ingestion_result = _process_teacher_document_ingestion(**ingestion_kwargs)
+        refreshed_document = TeacherDocument.query.filter_by(id=document.id, teacher_id=teacher.id).first()
+        return jsonify({
+            "message": "Document uploaded and indexed successfully.",
+            "queued": False,
+            "document": (refreshed_document or document).as_dict(),
+            "ingestion": {
+                "chunk_count": ingestion_result.get("chunk_count"),
+                "vector_store_effective": ingestion_result.get("vector_store_effective"),
+                "vector_store_fallback_reason": ingestion_result.get("vector_store_fallback_reason"),
+            },
+        }), 201
+    except ValueError as exc:
+        current_app.logger.warning(
+            "Teacher document upload validation failed (teacher_id=%s, filename=%s): %s",
+            teacher.id,
+            original_filename,
+            exc,
+        )
+        if uploaded_r2:
+            try:
+                delete_document_from_r2(
+                    str(uploaded_r2.get("storage_path") or ""),
+                    {
+                        "r2_bucket": uploaded_r2.get("bucket"),
+                        "r2_key": uploaded_r2.get("key"),
+                    },
+                )
+            except Exception:
+                current_app.logger.warning("Failed to rollback R2 upload after validation error.")
+
+        _safe_remove_local_file(temp_storage_path)
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        current_app.logger.exception(
+            "Teacher document upload failed (teacher_id=%s, filename=%s)",
+            teacher.id,
+            original_filename,
+        )
+        db.session.rollback()
+        if uploaded_r2:
+            try:
+                delete_document_from_r2(
+                    str(uploaded_r2.get("storage_path") or ""),
+                    {
+                        "r2_bucket": uploaded_r2.get("bucket"),
+                        "r2_key": uploaded_r2.get("key"),
+                    },
+                )
+            except Exception:
+                current_app.logger.warning("Failed to rollback R2 upload after server error.")
+
+        _safe_remove_local_file(temp_storage_path)
+        return jsonify({"error": f"Failed to upload document: {str(exc)}"}), 500
+
+
+@teacher_bp.delete("/documents/<int:document_id>")
+@require_auth
+@role_required("teacher")
+def delete_teacher_document(document_id):
+    teacher = g.current_user
+    document = TeacherDocument.query.filter_by(id=document_id, teacher_id=teacher.id).first()
+    if not document:
+        return jsonify({"error": "Document not found"}), 404
+
+    storage_path = document.storage_path
+    storage_metadata = document.metadata_json if isinstance(document.metadata_json, dict) else {}
+    try:
+        db.session.delete(document)
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to delete document: {str(exc)}"}), 500
+
+    _delete_teacher_document_storage(storage_path, storage_metadata)
+
+    return jsonify({"message": "Document deleted successfully", "document_id": document_id}), 200
+
+
+@teacher_bp.post("/documents/cleanup")
+@require_auth
+@role_required("teacher")
+def cleanup_teacher_documents():
+    teacher = g.current_user
+    payload = request.get_json(silent=True) if request.is_json else {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    dry_run = _parse_bool_flag(payload.get("dry_run", request.args.get("dry_run")), False)
+    limit = _clamp_int(payload.get("limit", request.args.get("limit", get_rag_cleanup_batch_size())), get_rag_cleanup_batch_size(), 1, 200)
+
+    try:
+        result = _cleanup_expired_teacher_documents(
+            teacher.id,
+            dry_run=dry_run,
+            limit=limit,
+        )
+        return jsonify({
+            "message": "Cleanup completed" if not dry_run else "Cleanup dry-run completed",
+            **result,
+        }), 200
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to cleanup documents: {str(exc)}"}), 500
 
 
 @teacher_bp.get("/dashboard")
@@ -483,6 +1544,7 @@ def teacher_dashboard():
     """Get teacher dashboard data with scoped school/grade metrics."""
     teacher = g.current_user
     days = _parse_days_arg(30)
+    include_at_risk = _parse_bool_flag(request.args.get("include_at_risk"), False)
     cutoff = _utcnow() - timedelta(days=days)
 
     students_query, effective_grade = _teacher_student_filter(teacher)
@@ -523,18 +1585,19 @@ def teacher_dashboard():
     ).count()
     classrooms_count = Classroom.query.filter_by(teacher_id=teacher.id).count()
 
-    at_risk_payload = {}
-    try:
-        # Compute predictions only for the small sample shown on the landing dashboard.
-        # Avoid SHAP on initial dashboard load to keep first-request latency low.
-        sample_student_ids = [s.id for s in students[:8]]
-        at_risk_payload = get_at_risk_predictions_for_students(
-            sample_student_ids,
-            cutoff=cutoff,
-            top_k_shap=0,
-        )
-    except Exception:
-        at_risk_payload = {"at_risk_students": [], "meta": {"reason": "at_risk_failed"}}
+    at_risk_payload = {"at_risk_students": [], "meta": {"reason": "skipped_for_dashboard_performance"}}
+    if include_at_risk:
+        try:
+            # Compute predictions only for the small sample shown on the landing dashboard.
+            # Avoid SHAP on initial dashboard load to keep first-request latency low.
+            sample_student_ids = [s.id for s in students[:8]]
+            at_risk_payload = get_at_risk_predictions_for_students(
+                sample_student_ids,
+                cutoff=cutoff,
+                top_k_shap=0,
+            )
+        except Exception:
+            at_risk_payload = {"at_risk_students": [], "meta": {"reason": "at_risk_failed"}}
 
     at_risk_by_id = {int(x.get("student_id")): x for x in at_risk_payload.get("at_risk_students", []) if x.get("student_id") is not None}
     return jsonify({
@@ -618,6 +1681,7 @@ def teacher_generate_question_bank():
         seed=seed,
         test_title=test_title,
         test_description=test_description,
+        generation_mode="standard",
     )
 
     service_meta = service_result.get("meta") if isinstance(service_result.get("meta"), dict) else {}
@@ -815,6 +1879,30 @@ def create_test():
     question_count = _clamp_int(data.get("question_count", 10), 10, 1, 50)
     time_limit = _clamp_int(data.get("time_limit", 30), 30, 5, 240)
     description = sanitize_string(data.get("description") or "", max_length=1000) or None
+    generation_mode = sanitize_string(data.get("generation_mode") or "standard", max_length=16).lower() or "standard"
+    if generation_mode not in {"standard", "rag"}:
+        return jsonify({"error": "generation_mode must be either 'standard' or 'rag'"}), 400
+    if generation_mode == "standard" and not topic:
+        return jsonify({"error": "Sub topic is required for topic-based generation."}), 400
+
+    selected_document_ids = _parse_int_list(
+        data.get("selected_document_ids") if isinstance(data.get("selected_document_ids"), list) else []
+    )
+    max_selected_docs = get_rag_max_selected_docs()
+    if len(selected_document_ids) > max_selected_docs:
+        return jsonify({
+            "error": f"You can select up to {max_selected_docs} documents per request.",
+        }), 400
+
+    rag_top_k = _clamp_int(data.get("rag_top_k", 4), 4, 1, 12)
+    rag_min_confidence_default = 0.0 if generation_mode == "rag" else get_rag_min_confidence()
+    rag_min_confidence = _clamp_float(
+        data.get("rag_min_confidence", rag_min_confidence_default),
+        rag_min_confidence_default,
+        0.0,
+        1.0,
+    )
+    rag_vector_store = sanitize_string(data.get("rag_vector_store") or "", max_length=32) or None
 
     seed_raw = data.get("seed")
     seed = None
@@ -832,6 +1920,21 @@ def create_test():
     school_id = _ensure_teacher_school(teacher)
     if not school_id:
         return jsonify({"error": "Unable to resolve teacher school context"}), 500
+
+    if generation_mode == "rag":
+        processed_docs_query = TeacherDocument.query.filter(
+            TeacherDocument.teacher_id == teacher.id,
+            TeacherDocument.status == "processed",
+        )
+
+        if selected_document_ids:
+            available_count = processed_docs_query.filter(
+                TeacherDocument.id.in_(selected_document_ids),
+            ).count()
+            if available_count != len(selected_document_ids):
+                return jsonify({"error": "One or more selected documents are unavailable for RAG."}), 400
+        elif processed_docs_query.count() <= 0:
+            return jsonify({"error": "Upload at least one processed document before using document based generation."}), 400
 
     try:
         test = Test(
@@ -860,6 +1963,13 @@ def create_test():
             seed=seed,
             test_title=title,
             test_description=description,
+            generation_mode=generation_mode,
+            rag_options={
+                "selected_document_ids": selected_document_ids,
+                "top_k": rag_top_k,
+                "min_confidence": rag_min_confidence,
+                "vector_store": rag_vector_store,
+            },
         )
 
         warning = None
@@ -901,6 +2011,14 @@ def create_test():
                 order=idx,
                 points=1,
             ))
+
+        _record_rag_retrieval_event(
+            teacher_id=teacher.id,
+            test_id=test.id,
+            generation_status=generation_status,
+            requested_count=question_count,
+            generated_count=generated_count,
+        )
 
         db.session.commit()
 
@@ -982,6 +2100,7 @@ def get_test(test_id):
         question = db.session.get(Question, tq.question_id)
         if not question:
             continue
+        generation_meta = question.generation_meta if isinstance(question.generation_meta, dict) else {}
         questions_data.append({
             "id": question.id,
             "text": question.text,
@@ -993,6 +2112,9 @@ def get_test(test_id):
             "topic": question.syllabus_topic,
             "hint": question.hint,
             "explanation": question.explanation,
+            "source": generation_meta.get("source"),
+            "provenance": generation_meta.get("provenance") if isinstance(generation_meta.get("provenance"), dict) else None,
+            "retrieval_trace": generation_meta.get("retrieval_trace") if isinstance(generation_meta.get("retrieval_trace"), list) else [],
         })
 
     test_data = test.as_dict()
@@ -1436,6 +2558,14 @@ def create_assignment():
     due_at = _parse_iso_datetime(data.get("due_at"))
     is_mandatory = bool(data.get("is_mandatory", True))
     allow_late = bool(data.get("allow_late", False))
+    requested_require_camera = data.get("require_camera")
+    requested_require_emotion = data.get("require_emotion")
+
+    if requested_require_camera is False or requested_require_emotion is False:
+        return jsonify({"error": "Assignments must enforce camera and emotion tracking"}), 400
+
+    require_camera = True
+    require_emotion = True
 
     if not classroom_id and not student_id:
         return jsonify({"error": "classroom_id or student_id is required"}), 400
@@ -1462,6 +2592,8 @@ def create_assignment():
             due_at=due_at,
             is_mandatory=is_mandatory,
             allow_late=allow_late,
+            require_camera=require_camera,
+            require_emotion=require_emotion,
             status='assigned',
         )
         db.session.add(assignment)
@@ -1480,6 +2612,8 @@ def create_assignment():
             due_at=due_at,
             is_mandatory=is_mandatory,
             allow_late=allow_late,
+            require_camera=require_camera,
+            require_emotion=require_emotion,
             status='assigned',
         )
         db.session.add(assignment)
@@ -1523,6 +2657,14 @@ def update_assignment(assignment_id):
 
     if 'notes' in data:
         assignment.notes = sanitize_string(data.get('notes') or '', max_length=1000) or None
+
+    if 'require_camera' in data or 'require_emotion' in data:
+        require_camera = bool(data.get('require_camera', True))
+        require_emotion = bool(data.get('require_emotion', True))
+        if not require_camera or not require_emotion:
+            return jsonify({"error": "Assignments must enforce camera and emotion tracking"}), 400
+        assignment.require_camera = True
+        assignment.require_emotion = True
 
     try:
         db.session.commit()
@@ -1589,6 +2731,113 @@ def teacher_reports():
         "period_days": days,
         "grade": effective_grade,
         "items": items,
+    }), 200
+
+
+@teacher_bp.get("/rag/observability")
+@require_auth
+@role_required("teacher")
+def teacher_rag_observability():
+    teacher = g.current_user
+    days = _parse_days_arg(30)
+    limit = _clamp_int(request.args.get("limit", 500), 500, 20, 3000)
+    cutoff = _utcnow() - timedelta(days=days)
+
+    events = RagRetrievalEvent.query.filter(
+        RagRetrievalEvent.teacher_id == teacher.id,
+        RagRetrievalEvent.created_at >= cutoff,
+    ).order_by(
+        RagRetrievalEvent.created_at.desc(),
+    ).limit(limit).all()
+
+    total = len(events)
+    rag_events = [event for event in events if str(event.generation_mode_requested or "").lower() == "rag"]
+    success = sum(1 for event in events if event.status == "success")
+    fallback = sum(1 for event in events if event.status == "fallback")
+    errors = sum(1 for event in events if event.status == "error")
+
+    rag_confidences = [float(event.confidence or 0.0) for event in rag_events]
+    rag_relevance = [float(event.relevance or 0.0) for event in rag_events]
+    rag_coverage = [float(event.coverage or 0.0) for event in rag_events]
+    rag_duplication = [float(event.duplication or 0.0) for event in rag_events]
+    rag_latency = [float(event.service_latency_ms or 0.0) for event in rag_events if event.service_latency_ms is not None]
+
+    fallback_reasons = {}
+    for event in events:
+        reason = str(event.fallback_reason or "").strip()
+        if not reason:
+            continue
+        fallback_reasons[reason] = int(fallback_reasons.get(reason, 0)) + 1
+
+    daily = {}
+    for event in events:
+        if not event.created_at:
+            continue
+        key = event.created_at.date().isoformat()
+        if key not in daily:
+            daily[key] = {
+                "date": key,
+                "total": 0,
+                "success": 0,
+                "fallback": 0,
+                "error": 0,
+            }
+        daily[key]["total"] += 1
+        daily[key][str(event.status or "success")] = daily[key].get(str(event.status or "success"), 0) + 1
+
+    status_rows = db.session.query(
+        TeacherDocument.status,
+        func.count(TeacherDocument.id),
+    ).filter(
+        TeacherDocument.teacher_id == teacher.id,
+    ).group_by(
+        TeacherDocument.status,
+    ).all()
+    status_counts = {str(row[0] or "unknown"): int(row[1] or 0) for row in status_rows}
+
+    doc_storage_bytes = db.session.query(
+        func.coalesce(func.sum(TeacherDocument.file_size_bytes), 0),
+    ).filter(
+        TeacherDocument.teacher_id == teacher.id,
+    ).scalar() or 0
+
+    avg_confidence = (sum(rag_confidences) / len(rag_confidences)) if rag_confidences else 0.0
+    avg_relevance = (sum(rag_relevance) / len(rag_relevance)) if rag_relevance else 0.0
+    avg_coverage = (sum(rag_coverage) / len(rag_coverage)) if rag_coverage else 0.0
+    avg_duplication = (sum(rag_duplication) / len(rag_duplication)) if rag_duplication else 0.0
+    avg_latency = (sum(rag_latency) / len(rag_latency)) if rag_latency else 0.0
+
+    return jsonify({
+        "period_days": days,
+        "summary": {
+            "total_events": total,
+            "rag_events": len(rag_events),
+            "success_events": success,
+            "fallback_events": fallback,
+            "error_events": errors,
+            "fallback_rate": round((fallback / total), 4) if total > 0 else 0.0,
+            "error_rate": round((errors / total), 4) if total > 0 else 0.0,
+            "avg_confidence": round(avg_confidence, 4),
+            "avg_relevance": round(avg_relevance, 4),
+            "avg_coverage": round(avg_coverage, 4),
+            "avg_duplication": round(avg_duplication, 4),
+            "avg_latency_ms": round(avg_latency, 2),
+        },
+        "fallback_reasons": [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(fallback_reasons.items(), key=lambda item: item[1], reverse=True)
+        ],
+        "daily": [daily[key] for key in sorted(daily.keys())],
+        "documents": {
+            "total": int(sum(status_counts.values())),
+            "storage_bytes": int(doc_storage_bytes),
+            "storage_mb": round(float(doc_storage_bytes) / (1024 * 1024), 2),
+            "status_counts": status_counts,
+            "retention_days": get_rag_retention_days(),
+            "max_docs": get_rag_max_documents_per_teacher(),
+            "max_storage_mb": round(get_rag_max_storage_bytes_per_teacher() / (1024 * 1024), 2),
+        },
+        "recent_events": [event.as_dict() for event in events[:20]],
     }), 200
 
 
@@ -1851,3 +3100,679 @@ def teacher_analytics():
         ],
         "at_risk_meta": at_risk_payload.get("meta") or {},
     }), 200
+
+
+@teacher_bp.get("/interventions")
+@require_auth
+@role_required("teacher")
+def list_interventions():
+    teacher = g.current_user
+    status = sanitize_string(request.args.get("status") or "", max_length=32).lower() or None
+    limit = _clamp_int(request.args.get("limit", 100), 100, 1, 500)
+
+    query = TeacherIntervention.query.filter_by(teacher_id=teacher.id)
+    if status:
+        if status not in INTERVENTION_STATUSES:
+            return jsonify({"error": "Invalid intervention status"}), 400
+        query = query.filter(TeacherIntervention.status == status)
+
+    rows = query.order_by(TeacherIntervention.updated_at.desc(), TeacherIntervention.created_at.desc()).limit(limit).all()
+    return jsonify({
+        "count": len(rows),
+        "items": [row.as_dict() for row in rows],
+    }), 200
+
+
+@teacher_bp.post("/interventions")
+@require_auth
+@role_required("teacher")
+def create_intervention():
+    teacher = g.current_user
+    data = request.get_json(silent=True) or {}
+
+    title = sanitize_string(data.get("title") or "", max_length=255)
+    if not title:
+        return jsonify({"error": "title is required"}), 400
+
+    status = sanitize_string(data.get("status") or "planned", max_length=32).lower() or "planned"
+    if status not in INTERVENTION_STATUSES:
+        return jsonify({"error": "Invalid intervention status"}), 400
+
+    due_at = _parse_iso_datetime(data.get("due_at"))
+    if data.get("due_at") and due_at is None:
+        return jsonify({"error": "due_at must be ISO datetime"}), 400
+
+    classroom_id = data.get("classroom_id")
+    if classroom_id:
+        classroom = Classroom.query.filter_by(id=classroom_id, teacher_id=teacher.id).first()
+        if not classroom:
+            return jsonify({"error": "Classroom not found"}), 404
+
+    related_test_id = data.get("related_test_id")
+    if related_test_id:
+        test = Test.query.filter_by(id=related_test_id, created_by=teacher.id).first()
+        if not test:
+            return jsonify({"error": "Related test not found"}), 404
+
+    allowed_student_ids = {
+        int(row.id)
+        for row in User.query.filter_by(role="student", school_id=teacher.school_id).all()
+    }
+    student_ids = []
+    if isinstance(data.get("student_ids"), list):
+        for raw_id in data.get("student_ids"):
+            try:
+                sid = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if sid in allowed_student_ids:
+                student_ids.append(sid)
+    student_ids = sorted(set(student_ids))
+
+    assignment_ids = []
+    if isinstance(data.get("assignment_ids"), list):
+        allowed_assignment_ids = {
+            int(row.id)
+            for row in TestAssignment.query.filter(
+                TestAssignment.assigned_by == teacher.id,
+                TestAssignment.id.in_([int(x) for x in data.get("assignment_ids") if str(x).isdigit()]),
+            ).all()
+        }
+        assignment_ids = sorted(allowed_assignment_ids)
+
+    try:
+        intervention = _create_intervention_entry(
+            teacher,
+            action_type=sanitize_string(data.get("action_type") or "note", max_length=64) or "note",
+            title=title,
+            notes=data.get("notes"),
+            status=status,
+            subject=sanitize_string(data.get("subject") or "", max_length=64) or None,
+            topic=sanitize_string(data.get("topic") or "", max_length=128) or None,
+            due_at=due_at,
+            classroom_id=classroom_id,
+            related_test_id=related_test_id,
+            student_ids=student_ids,
+            assignment_ids=assignment_ids,
+            cluster_payload=data.get("cluster_payload") if isinstance(data.get("cluster_payload"), list) else [],
+            metadata_json=data.get("metadata") if isinstance(data.get("metadata"), dict) else {},
+        )
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to create intervention: {str(exc)}"}), 500
+
+    return jsonify({"message": "Intervention created", "intervention": intervention.as_dict()}), 201
+
+
+@teacher_bp.patch("/interventions/<int:intervention_id>")
+@require_auth
+@role_required("teacher")
+def update_intervention(intervention_id):
+    teacher = g.current_user
+    intervention = TeacherIntervention.query.filter_by(id=intervention_id, teacher_id=teacher.id).first()
+    if not intervention:
+        return jsonify({"error": "Intervention not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+
+    if "title" in data:
+        title = sanitize_string(data.get("title") or "", max_length=255)
+        if not title:
+            return jsonify({"error": "title cannot be empty"}), 400
+        intervention.title = title
+
+    if "notes" in data:
+        intervention.notes = sanitize_string(data.get("notes") or "", max_length=4000) or None
+
+    if "status" in data:
+        status = sanitize_string(data.get("status") or "", max_length=32).lower()
+        if status not in INTERVENTION_STATUSES:
+            return jsonify({"error": "Invalid intervention status"}), 400
+        intervention.status = status
+
+    if "due_at" in data:
+        parsed_due = _parse_iso_datetime(data.get("due_at"))
+        if data.get("due_at") and parsed_due is None:
+            return jsonify({"error": "due_at must be ISO datetime"}), 400
+        intervention.due_at = parsed_due
+
+    if "subject" in data:
+        intervention.subject = sanitize_string(data.get("subject") or "", max_length=64) or None
+
+    if "topic" in data:
+        intervention.topic = sanitize_string(data.get("topic") or "", max_length=128) or None
+
+    if "student_ids" in data and isinstance(data.get("student_ids"), list):
+        allowed_student_ids = {
+            int(row.id)
+            for row in User.query.filter_by(role="student", school_id=teacher.school_id).all()
+        }
+        filtered_ids = []
+        for raw_id in data.get("student_ids"):
+            try:
+                sid = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if sid in allowed_student_ids:
+                filtered_ids.append(sid)
+        intervention.student_ids = sorted(set(filtered_ids))
+
+    if "metadata" in data and isinstance(data.get("metadata"), dict):
+        intervention.metadata_json = data.get("metadata")
+
+    try:
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to update intervention: {str(exc)}"}), 500
+
+    return jsonify({"message": "Intervention updated", "intervention": intervention.as_dict()}), 200
+
+
+@teacher_bp.post("/interventions/actions/remedial-assignment")
+@require_auth
+@role_required("teacher")
+def action_assign_remedial_test():
+    teacher = g.current_user
+    data = request.get_json(silent=True) or {}
+
+    days = _clamp_int(data.get("days", 30), 30, 7, 365)
+    due_days = _clamp_int(data.get("due_days", 7), 7, 1, 120)
+    max_students = _clamp_int(data.get("max_students", 12), 12, 1, 200)
+    min_topic_attempts = _clamp_int(data.get("min_topic_attempts", 2), 2, 1, 30)
+    question_count = _clamp_int(data.get("question_count", 8), 8, 3, 30)
+    time_limit = _clamp_int(data.get("time_limit", 20), 20, 5, 180)
+    accuracy_threshold = _clamp_float(data.get("accuracy_threshold", 65), 65, 1, 99)
+
+    subject = sanitize_string(data.get("subject") or "", max_length=64) or None
+    selected_topic = sanitize_string(data.get("topic") or "", max_length=128)
+    selected_topic = selected_topic.lower() if selected_topic else None
+
+    _, student_ids, effective_grade = _scope_teacher_students(teacher, grade=data.get("grade"))
+    if not student_ids:
+        return jsonify({"error": "No students available in teacher scope"}), 400
+
+    cutoff = _utcnow() - timedelta(days=days)
+    topic_rows = _topic_accuracy_rows(student_ids, cutoff, subject=subject)
+
+    weakest_topic = selected_topic
+    weakest_subject = subject
+    if not weakest_topic:
+        rollup = {}
+        for row in topic_rows:
+            if row["attempts"] < min_topic_attempts or not row["topic"]:
+                continue
+            key = (row["topic"], row["subject"])
+            bucket = rollup.setdefault(key, {"attempts": 0, "weighted_accuracy": 0.0})
+            bucket["attempts"] += row["attempts"]
+            bucket["weighted_accuracy"] += row["accuracy"] * row["attempts"]
+
+        ranked_topics = sorted(
+            [
+                {
+                    "topic": key[0],
+                    "subject": key[1],
+                    "attempts": value["attempts"],
+                    "accuracy": (value["weighted_accuracy"] / value["attempts"]) if value["attempts"] else 100.0,
+                }
+                for key, value in rollup.items()
+            ],
+            key=lambda item: (item["accuracy"], -item["attempts"]),
+        )
+        if ranked_topics:
+            weakest_topic = ranked_topics[0]["topic"]
+            weakest_subject = ranked_topics[0]["subject"]
+
+    candidate_rows = [
+        row for row in topic_rows
+        if row.get("topic") == weakest_topic
+        and (not weakest_subject or row.get("subject") == weakest_subject)
+        and row.get("attempts", 0) >= min_topic_attempts
+        and row.get("accuracy", 100.0) <= accuracy_threshold
+    ]
+    candidate_rows.sort(key=lambda row: (row.get("accuracy", 100.0), -row.get("attempts", 0)))
+    target_student_ids = [int(row["student_id"]) for row in candidate_rows[:max_students]]
+
+    if not target_student_ids:
+        score_expr = _score_pct_expression()
+        low_rows = db.session.query(
+            TestResult.user_id,
+            func.avg(score_expr).label("avg_score"),
+        ).filter(
+            TestResult.user_id.in_(student_ids),
+            TestResult.started_at >= cutoff,
+        ).group_by(
+            TestResult.user_id,
+        ).having(
+            func.avg(score_expr) <= accuracy_threshold,
+        ).order_by(
+            func.avg(score_expr).asc(),
+        ).limit(max_students).all()
+        target_student_ids = [int(row.user_id) for row in low_rows]
+
+    if not target_student_ids:
+        target_student_ids = student_ids[:max_students]
+
+    if not target_student_ids:
+        return jsonify({"error": "No target students found for remedial assignment"}), 400
+
+    selected_subject = _select_subject_for_students(target_student_ids, cutoff, preferred_subject=weakest_subject or subject)
+
+    students_by_id = {
+        int(s.id): s
+        for s in User.query.filter(User.id.in_(target_student_ids)).all()
+    }
+    grade_votes = {}
+    for sid in target_student_ids:
+        grade_key = _normalize_grade_for_generation(getattr(students_by_id.get(sid), "grade", None), effective_grade or teacher.grade)
+        grade_votes[grade_key] = grade_votes.get(grade_key, 0) + 1
+    selected_grade = sorted(grade_votes.items(), key=lambda item: item[1], reverse=True)[0][0] if grade_votes else _normalize_grade_for_generation(effective_grade, teacher.grade)
+
+    due_at = _utcnow() + timedelta(days=due_days)
+    action_notes = sanitize_string(data.get("notes") or "", max_length=1000) or (
+        f"Remedial support for weak topic: {weakest_topic or 'general revision'}"
+    )
+
+    try:
+        test, generation_status, warning = _build_generated_intervention_test(
+            teacher,
+            title=f"Remedial: {to_title_case(weakest_topic) if weakest_topic else to_title_case(selected_subject)}",
+            subject=selected_subject,
+            grade=selected_grade,
+            difficulty="easy",
+            topic=weakest_topic,
+            question_count=question_count,
+            time_limit=time_limit,
+            description="Auto-generated remedial intervention from teacher reports.",
+            seed=data.get("seed"),
+        )
+
+        created_assignments = _build_assignments_for_students(
+            teacher,
+            test=test,
+            student_ids=target_student_ids,
+            due_at=due_at,
+            notes=action_notes,
+            is_mandatory=True,
+            allow_late=False,
+        )
+        db.session.flush()
+
+        intervention = _create_intervention_entry(
+            teacher,
+            action_type="assign_remedial_test",
+            title=f"Assign remedial test for {weakest_topic or selected_subject}",
+            notes=action_notes,
+            status="planned",
+            subject=selected_subject,
+            topic=weakest_topic,
+            due_at=due_at,
+            related_test_id=test.id,
+            student_ids=target_student_ids,
+            assignment_ids=[int(row.id) for row in created_assignments],
+            metadata_json={
+                "days": days,
+                "accuracy_threshold": accuracy_threshold,
+                "generation_status": generation_status,
+                "warning": warning,
+            },
+        )
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to create remedial action: {str(exc)}"}), 500
+
+    return jsonify({
+        "message": "Remedial action created",
+        "action": "assign_remedial_test",
+        "topic": weakest_topic,
+        "subject": selected_subject,
+        "target_student_count": len(target_student_ids),
+        "created_assignments": len(created_assignments),
+        "test": test.as_dict(),
+        "intervention": intervention.as_dict(),
+        "warning": warning,
+    }), 201
+
+
+@teacher_bp.post("/interventions/actions/focused-practice")
+@require_auth
+@role_required("teacher")
+def action_create_focused_practice():
+    teacher = g.current_user
+    data = request.get_json(silent=True) or {}
+
+    days = _clamp_int(data.get("days", 30), 30, 7, 365)
+    due_days = _clamp_int(data.get("due_days", 5), 5, 1, 120)
+    max_students = _clamp_int(data.get("max_students", 15), 15, 1, 200)
+    min_attempts = _clamp_int(data.get("min_attempts", 1), 1, 1, 50)
+    question_count = _clamp_int(data.get("question_count", 10), 10, 3, 40)
+    time_limit = _clamp_int(data.get("time_limit", 20), 20, 5, 180)
+    low_accuracy_threshold = _clamp_float(data.get("low_accuracy_threshold", 60), 60, 1, 99)
+
+    grade = data.get("grade")
+    subject = sanitize_string(data.get("subject") or "", max_length=64) or None
+    topic = sanitize_string(data.get("topic") or "", max_length=128) or None
+
+    _, student_ids, effective_grade = _scope_teacher_students(teacher, grade=grade)
+    if not student_ids:
+        return jsonify({"error": "No students available in teacher scope"}), 400
+
+    cutoff = _utcnow() - timedelta(days=days)
+    score_expr = _score_pct_expression()
+
+    perf_query = db.session.query(
+        TestResult.user_id,
+        func.avg(score_expr).label("avg_score"),
+        func.count(TestResult.id).label("attempts"),
+    ).filter(
+        TestResult.user_id.in_(student_ids),
+        TestResult.started_at >= cutoff,
+    )
+    if subject:
+        perf_query = perf_query.filter(TestResult.subject == subject)
+
+    low_rows = perf_query.group_by(
+        TestResult.user_id,
+    ).having(
+        and_(
+            func.count(TestResult.id) >= min_attempts,
+            func.avg(score_expr) <= low_accuracy_threshold,
+        )
+    ).order_by(
+        func.avg(score_expr).asc(),
+        func.count(TestResult.id).desc(),
+    ).limit(max_students).all()
+
+    target_student_ids = [int(row.user_id) for row in low_rows]
+    if not target_student_ids:
+        return jsonify({"error": "No low-accuracy students found for focused practice"}), 400
+
+    selected_subject = _select_subject_for_students(target_student_ids, cutoff, preferred_subject=subject)
+
+    selected_topic = topic
+    if not selected_topic:
+        topic_rows = _topic_accuracy_rows(target_student_ids, cutoff, subject=selected_subject)
+        if topic_rows:
+            topic_rows.sort(key=lambda row: (row.get("accuracy", 100.0), -row.get("attempts", 0)))
+            selected_topic = topic_rows[0].get("topic")
+
+    due_at = _utcnow() + timedelta(days=due_days)
+    notes = sanitize_string(data.get("notes") or "", max_length=1000) or "Focused practice set for low-accuracy students"
+
+    try:
+        test, generation_status, warning = _build_generated_intervention_test(
+            teacher,
+            title=f"Focused Practice: {to_title_case(selected_subject)}",
+            subject=selected_subject,
+            grade=_normalize_grade_for_generation(effective_grade, teacher.grade),
+            difficulty="easy",
+            topic=selected_topic,
+            question_count=question_count,
+            time_limit=time_limit,
+            description="Auto-created focused practice set based on low accuracy insights.",
+            seed=data.get("seed"),
+        )
+
+        created_assignments = _build_assignments_for_students(
+            teacher,
+            test=test,
+            student_ids=target_student_ids,
+            due_at=due_at,
+            notes=notes,
+            is_mandatory=False,
+            allow_late=True,
+        )
+        db.session.flush()
+
+        intervention = _create_intervention_entry(
+            teacher,
+            action_type="create_focused_practice_set",
+            title=f"Focused practice for low accuracy ({selected_subject})",
+            notes=notes,
+            status="planned",
+            subject=selected_subject,
+            topic=selected_topic,
+            due_at=due_at,
+            related_test_id=test.id,
+            student_ids=target_student_ids,
+            assignment_ids=[int(row.id) for row in created_assignments],
+            metadata_json={
+                "days": days,
+                "low_accuracy_threshold": low_accuracy_threshold,
+                "generation_status": generation_status,
+                "warning": warning,
+            },
+        )
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to create focused practice action: {str(exc)}"}), 500
+
+    return jsonify({
+        "message": "Focused practice action created",
+        "action": "create_focused_practice_set",
+        "subject": selected_subject,
+        "topic": selected_topic,
+        "target_student_count": len(target_student_ids),
+        "created_assignments": len(created_assignments),
+        "test": test.as_dict(),
+        "intervention": intervention.as_dict(),
+        "warning": warning,
+    }), 201
+
+
+@teacher_bp.post("/interventions/actions/follow-up-assignment")
+@require_auth
+@role_required("teacher")
+def action_schedule_follow_up_assignment():
+    teacher = g.current_user
+    data = request.get_json(silent=True) or {}
+
+    days = _clamp_int(data.get("days", 30), 30, 7, 365)
+    due_days = _clamp_int(data.get("due_days", 10), 10, 1, 180)
+    max_students = _clamp_int(data.get("max_students", 12), 12, 1, 200)
+    question_count = _clamp_int(data.get("question_count", 8), 8, 3, 30)
+    time_limit = _clamp_int(data.get("time_limit", 25), 25, 5, 240)
+    at_risk_threshold = _clamp_float(data.get("at_risk_threshold", 0.55), 0.55, 0.01, 0.99)
+
+    _, student_ids, effective_grade = _scope_teacher_students(teacher, grade=data.get("grade"))
+    if not student_ids:
+        return jsonify({"error": "No students available in teacher scope"}), 400
+
+    cutoff = _utcnow() - timedelta(days=days)
+    selected_subject = _select_subject_for_students(
+        student_ids,
+        cutoff,
+        preferred_subject=sanitize_string(data.get("subject") or "", max_length=64) or None,
+    )
+    selected_topic = sanitize_string(data.get("topic") or "", max_length=128) or None
+
+    at_risk_payload = {}
+    try:
+        at_risk_payload = get_at_risk_predictions_for_students(student_ids, cutoff=cutoff, top_k_shap=0)
+    except Exception:
+        at_risk_payload = {"at_risk_students": [], "meta": {"reason": "at_risk_failed"}}
+
+    def _probability(item):
+        return _clamp_float(item.get("at_risk_probability", 0), 0, 0, 1)
+
+    at_risk_rows = sorted(
+        [item for item in (at_risk_payload.get("at_risk_students") or []) if item.get("student_id") is not None],
+        key=_probability,
+        reverse=True,
+    )
+    target_student_ids = [
+        int(item.get("student_id"))
+        for item in at_risk_rows
+        if _probability(item) >= at_risk_threshold
+    ][:max_students]
+
+    if not target_student_ids:
+        target_student_ids = [int(item.get("student_id")) for item in at_risk_rows[:max_students] if item.get("student_id") is not None]
+
+    if not target_student_ids:
+        return jsonify({"error": "No at-risk students found for follow-up assignment"}), 400
+
+    due_at = _utcnow() + timedelta(days=due_days)
+    notes = sanitize_string(data.get("notes") or "", max_length=1000) or "Scheduled follow-up assignment for at-risk students"
+
+    try:
+        test, generation_status, warning = _build_generated_intervention_test(
+            teacher,
+            title=f"Follow-up Check-in: {to_title_case(selected_subject)}",
+            subject=selected_subject,
+            grade=_normalize_grade_for_generation(effective_grade, teacher.grade),
+            difficulty="medium",
+            topic=selected_topic,
+            question_count=question_count,
+            time_limit=time_limit,
+            description="Auto-scheduled follow-up assignment for at-risk learners.",
+            seed=data.get("seed"),
+        )
+
+        created_assignments = _build_assignments_for_students(
+            teacher,
+            test=test,
+            student_ids=target_student_ids,
+            due_at=due_at,
+            notes=notes,
+            is_mandatory=True,
+            allow_late=True,
+        )
+        db.session.flush()
+
+        intervention = _create_intervention_entry(
+            teacher,
+            action_type="schedule_follow_up_assignment",
+            title=f"Follow-up assignment for at-risk students ({selected_subject})",
+            notes=notes,
+            status="planned",
+            subject=selected_subject,
+            topic=selected_topic,
+            due_at=due_at,
+            related_test_id=test.id,
+            student_ids=target_student_ids,
+            assignment_ids=[int(row.id) for row in created_assignments],
+            metadata_json={
+                "days": days,
+                "at_risk_threshold": at_risk_threshold,
+                "at_risk_meta": at_risk_payload.get("meta") or {},
+                "generation_status": generation_status,
+                "warning": warning,
+            },
+        )
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to create follow-up action: {str(exc)}"}), 500
+
+    return jsonify({
+        "message": "Follow-up assignment action created",
+        "action": "schedule_follow_up_assignment",
+        "subject": selected_subject,
+        "topic": selected_topic,
+        "target_student_count": len(target_student_ids),
+        "created_assignments": len(created_assignments),
+        "test": test.as_dict(),
+        "intervention": intervention.as_dict(),
+        "warning": warning,
+    }), 201
+
+
+@teacher_bp.post("/interventions/actions/weakness-clusters")
+@require_auth
+@role_required("teacher")
+def action_group_by_weakness_cluster():
+    teacher = g.current_user
+    data = request.get_json(silent=True) or {}
+
+    days = _clamp_int(data.get("days", 30), 30, 7, 365)
+    min_attempts = _clamp_int(data.get("min_attempts", 2), 2, 1, 30)
+    subject = sanitize_string(data.get("subject") or "", max_length=64) or None
+
+    students, student_ids, effective_grade = _scope_teacher_students(teacher, grade=data.get("grade"))
+    if not student_ids:
+        return jsonify({"error": "No students available in teacher scope"}), 400
+
+    students_by_id = {int(s.id): s for s in students}
+    cutoff = _utcnow() - timedelta(days=days)
+    topic_rows = _topic_accuracy_rows(student_ids, cutoff, subject=subject)
+
+    weakest_by_student = {}
+    for row in topic_rows:
+        if row.get("attempts", 0) < min_attempts or not row.get("topic"):
+            continue
+        sid = int(row.get("student_id"))
+        current = weakest_by_student.get(sid)
+        if not current or row.get("accuracy", 100.0) < current.get("accuracy", 100.0):
+            weakest_by_student[sid] = row
+
+    clusters_map = {}
+    for sid, row in weakest_by_student.items():
+        key = (row.get("topic"), row.get("subject"))
+        bucket = clusters_map.setdefault(key, {
+            "topic": row.get("topic"),
+            "subject": row.get("subject"),
+            "student_ids": [],
+            "student_names": [],
+            "accuracy_values": [],
+        })
+        bucket["student_ids"].append(sid)
+        bucket["student_names"].append(getattr(students_by_id.get(sid), "name", f"Student {sid}"))
+        bucket["accuracy_values"].append(float(row.get("accuracy", 0)))
+
+    clusters = []
+    for bucket in clusters_map.values():
+        acc_values = bucket.pop("accuracy_values", [])
+        avg_accuracy = round(sum(acc_values) / len(acc_values), 2) if acc_values else 0.0
+        bucket["student_count"] = len(bucket["student_ids"])
+        bucket["average_accuracy"] = avg_accuracy
+        clusters.append(bucket)
+
+    clusters.sort(key=lambda item: (-item.get("student_count", 0), item.get("average_accuracy", 100.0)))
+    if not clusters:
+        return jsonify({"error": "No weakness clusters found for selected filters"}), 400
+
+    all_cluster_student_ids = sorted({sid for cluster in clusters for sid in cluster.get("student_ids", [])})
+    notes = sanitize_string(data.get("notes") or "", max_length=1000) or "Grouped students by weakness cluster for classroom intervention planning"
+
+    try:
+        intervention = _create_intervention_entry(
+            teacher,
+            action_type="group_weakness_clusters",
+            title="Student weakness clusters for classroom intervention",
+            notes=notes,
+            status="planned",
+            subject=subject,
+            topic=None,
+            due_at=None,
+            related_test_id=None,
+            student_ids=all_cluster_student_ids,
+            assignment_ids=[],
+            cluster_payload=clusters,
+            metadata_json={
+                "days": days,
+                "min_attempts": min_attempts,
+                "grade": effective_grade,
+            },
+        )
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to create weakness clusters: {str(exc)}"}), 500
+
+    return jsonify({
+        "message": "Weakness clusters created",
+        "action": "group_weakness_clusters",
+        "cluster_count": len(clusters),
+        "clusters": clusters,
+        "intervention": intervention.as_dict(),
+    }), 201
+
+
+def to_title_case(value):
+    return " ".join(
+        token.capitalize() for token in str(value or "").replace("_", " ").replace("-", " ").split() if token
+    )

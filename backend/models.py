@@ -321,6 +321,8 @@ class TestAssignment(db.Model):
     status = db.Column(db.String(32), default='assigned', nullable=False, index=True)
     is_mandatory = db.Column(db.Boolean, default=True, nullable=False)
     allow_late = db.Column(db.Boolean, default=False, nullable=False)
+    require_camera = db.Column(db.Boolean, default=True, nullable=False)
+    require_emotion = db.Column(db.Boolean, default=True, nullable=False)
     started_at = db.Column(db.DateTime, nullable=True)
     submitted_at = db.Column(db.DateTime, nullable=True)
     reviewed_at = db.Column(db.DateTime, nullable=True)
@@ -345,6 +347,8 @@ class TestAssignment(db.Model):
             'status': self.status,
             'is_mandatory': self.is_mandatory,
             'allow_late': self.allow_late,
+            'require_camera': self.require_camera,
+            'require_emotion': self.require_emotion,
             'started_at': self.started_at.isoformat() if self.started_at else None,
             'submitted_at': self.submitted_at.isoformat() if self.submitted_at else None,
             'reviewed_at': self.reviewed_at.isoformat() if self.reviewed_at else None,
@@ -435,6 +439,241 @@ class SyllabusTopic(db.Model):
             'title': self.title,
             'description': self.description,
             'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+
+class TeacherIntervention(db.Model):
+    __tablename__ = "teacher_interventions"
+
+    id = db.Column(db.Integer, primary_key=True)
+    teacher_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    action_type = db.Column(db.String(64), nullable=False, default="note", index=True)
+    title = db.Column(db.String(255), nullable=False)
+    notes = db.Column(db.Text, nullable=True)
+    status = db.Column(db.String(32), nullable=False, default="planned", index=True)
+
+    subject = db.Column(db.String(64), nullable=True, index=True)
+    topic = db.Column(db.String(128), nullable=True, index=True)
+    due_at = db.Column(db.DateTime, nullable=True, index=True)
+
+    classroom_id = db.Column(db.Integer, db.ForeignKey("classrooms.id", ondelete="SET NULL"), nullable=True, index=True)
+    related_test_id = db.Column(db.Integer, db.ForeignKey("tests.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    student_ids = db.Column(db.JSON, nullable=True)
+    assignment_ids = db.Column(db.JSON, nullable=True)
+    cluster_payload = db.Column(db.JSON, nullable=True)
+    metadata_json = db.Column(db.JSON, nullable=True)
+
+    created_at = db.Column(db.DateTime, default=utcnow, nullable=False, index=True)
+    updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    teacher = db.relationship("User", foreign_keys=[teacher_id])
+    classroom = db.relationship("Classroom", foreign_keys=[classroom_id])
+    related_test = db.relationship("Test", foreign_keys=[related_test_id])
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "teacher_id": self.teacher_id,
+            "action_type": self.action_type,
+            "title": self.title,
+            "notes": self.notes,
+            "status": self.status,
+            "subject": self.subject,
+            "topic": self.topic,
+            "due_at": self.due_at.isoformat() if self.due_at else None,
+            "classroom_id": self.classroom_id,
+            "related_test_id": self.related_test_id,
+            "student_ids": self.student_ids or [],
+            "assignment_ids": self.assignment_ids or [],
+            "cluster_payload": self.cluster_payload or [],
+            "metadata": self.metadata_json or {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class TeacherDocument(db.Model):
+    __tablename__ = "teacher_documents"
+
+    id = db.Column(db.Integer, primary_key=True)
+    teacher_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    school_id = db.Column(db.Integer, db.ForeignKey("schools.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    title = db.Column(db.String(255), nullable=False)
+    filename = db.Column(db.String(255), nullable=False)
+    file_ext = db.Column(db.String(16), nullable=True, index=True)
+    content_type = db.Column(db.String(128), nullable=True)
+    file_size_bytes = db.Column(db.Integer, nullable=False)
+    content_sha256 = db.Column(db.String(64), nullable=False, index=True)
+    storage_path = db.Column(db.String(512), nullable=True)
+
+    status = db.Column(db.String(32), nullable=False, default="processing", index=True)
+    error_message = db.Column(db.Text, nullable=True)
+    chunk_count = db.Column(db.Integer, nullable=False, default=0)
+    token_count = db.Column(db.Integer, nullable=False, default=0)
+    metadata_json = db.Column(db.JSON, nullable=True)
+
+    uploaded_at = db.Column(db.DateTime, default=utcnow, nullable=False, index=True)
+    processed_at = db.Column(db.DateTime, nullable=True)
+    updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    teacher = db.relationship("User", foreign_keys=[teacher_id])
+    school = db.relationship("School", foreign_keys=[school_id])
+    chunks = db.relationship(
+        "TeacherDocumentChunk",
+        back_populates="document",
+        lazy="dynamic",
+        cascade="all, delete-orphan",
+    )
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "teacher_id": self.teacher_id,
+            "school_id": self.school_id,
+            "title": self.title,
+            "filename": self.filename,
+            "file_ext": self.file_ext,
+            "content_type": self.content_type,
+            "file_size_bytes": self.file_size_bytes,
+            "content_sha256": self.content_sha256,
+            "status": self.status,
+            "error_message": self.error_message,
+            "chunk_count": self.chunk_count,
+            "token_count": self.token_count,
+            "metadata": self.metadata_json or {},
+            "uploaded_at": self.uploaded_at.isoformat() if self.uploaded_at else None,
+            "processed_at": self.processed_at.isoformat() if self.processed_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class TeacherDocumentChunk(db.Model):
+    __tablename__ = "teacher_document_chunks"
+
+    id = db.Column(db.Integer, primary_key=True)
+    document_id = db.Column(db.Integer, db.ForeignKey("teacher_documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    teacher_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    chunk_id = db.Column(db.String(64), nullable=False, index=True)
+    chunk_index = db.Column(db.Integer, nullable=False)
+    text = db.Column(db.Text, nullable=False)
+    text_hash = db.Column(db.String(64), nullable=False, index=True)
+    char_start = db.Column(db.Integer, nullable=True)
+    char_end = db.Column(db.Integer, nullable=True)
+    token_count = db.Column(db.Integer, nullable=False, default=0)
+
+    embedding_vector = db.Column(db.JSON, nullable=True)
+    # Optional pgvector-backed storage (kept as text in ORM for sqlite test compatibility).
+    embedding_vector_pg = db.Column(db.Text, nullable=True)
+    embedding_dim = db.Column(db.Integer, nullable=True)
+    embedding_provider = db.Column(db.String(64), nullable=True)
+    embedding_model = db.Column(db.String(128), nullable=True)
+    embedding_status = db.Column(db.String(32), nullable=False, default="pending", index=True)
+    vector_store = db.Column(db.String(32), nullable=False, default="python")
+    metadata_json = db.Column(db.JSON, nullable=True)
+
+    created_at = db.Column(db.DateTime, default=utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    document = db.relationship("TeacherDocument", back_populates="chunks")
+    teacher = db.relationship("User", foreign_keys=[teacher_id])
+
+    __table_args__ = (
+        db.UniqueConstraint("document_id", "chunk_index", name="uix_teacher_document_chunk_order"),
+        db.UniqueConstraint("document_id", "chunk_id", name="uix_teacher_document_chunk_id"),
+    )
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "document_id": self.document_id,
+            "teacher_id": self.teacher_id,
+            "chunk_id": self.chunk_id,
+            "chunk_index": self.chunk_index,
+            "char_start": self.char_start,
+            "char_end": self.char_end,
+            "token_count": self.token_count,
+            "embedding_dim": self.embedding_dim,
+            "embedding_provider": self.embedding_provider,
+            "embedding_model": self.embedding_model,
+            "embedding_status": self.embedding_status,
+            "vector_store": self.vector_store,
+            "metadata": self.metadata_json or {},
+        }
+
+
+class RagRetrievalEvent(db.Model):
+    __tablename__ = "rag_retrieval_events"
+
+    id = db.Column(db.Integer, primary_key=True)
+    teacher_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    test_id = db.Column(db.Integer, db.ForeignKey("tests.id", ondelete="SET NULL"), nullable=True, index=True)
+    document_id = db.Column(db.Integer, db.ForeignKey("teacher_documents.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    generation_mode_requested = db.Column(db.String(32), nullable=False, default="standard", index=True)
+    generation_mode_effective = db.Column(db.String(32), nullable=False, default="standard", index=True)
+    vector_store_requested = db.Column(db.String(32), nullable=True)
+    vector_store_effective = db.Column(db.String(32), nullable=True, index=True)
+
+    status = db.Column(db.String(32), nullable=False, default="success", index=True)
+    fallback_reason = db.Column(db.String(128), nullable=True, index=True)
+    error_message = db.Column(db.Text, nullable=True)
+
+    selected_doc_count = db.Column(db.Integer, nullable=False, default=0)
+    candidate_chunk_count = db.Column(db.Integer, nullable=False, default=0)
+    retrieval_count = db.Column(db.Integer, nullable=False, default=0)
+    confidence = db.Column(db.Float, nullable=False, default=0.0)
+    avg_similarity = db.Column(db.Float, nullable=False, default=0.0)
+    max_similarity = db.Column(db.Float, nullable=False, default=0.0)
+
+    provenance_count = db.Column(db.Integer, nullable=False, default=0)
+    coverage = db.Column(db.Float, nullable=False, default=0.0)
+    relevance = db.Column(db.Float, nullable=False, default=0.0)
+    duplication = db.Column(db.Float, nullable=False, default=0.0)
+
+    requested_count = db.Column(db.Integer, nullable=False, default=0)
+    generated_count = db.Column(db.Integer, nullable=False, default=0)
+    service_latency_ms = db.Column(db.Float, nullable=True)
+
+    metadata_json = db.Column(db.JSON, nullable=True)
+    created_at = db.Column(db.DateTime, default=utcnow, nullable=False, index=True)
+    updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    teacher = db.relationship("User", foreign_keys=[teacher_id])
+    test = db.relationship("Test", foreign_keys=[test_id])
+    document = db.relationship("TeacherDocument", foreign_keys=[document_id])
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "teacher_id": self.teacher_id,
+            "test_id": self.test_id,
+            "document_id": self.document_id,
+            "generation_mode_requested": self.generation_mode_requested,
+            "generation_mode_effective": self.generation_mode_effective,
+            "vector_store_requested": self.vector_store_requested,
+            "vector_store_effective": self.vector_store_effective,
+            "status": self.status,
+            "fallback_reason": self.fallback_reason,
+            "error_message": self.error_message,
+            "selected_doc_count": self.selected_doc_count,
+            "candidate_chunk_count": self.candidate_chunk_count,
+            "retrieval_count": self.retrieval_count,
+            "confidence": self.confidence,
+            "avg_similarity": self.avg_similarity,
+            "max_similarity": self.max_similarity,
+            "provenance_count": self.provenance_count,
+            "coverage": self.coverage,
+            "relevance": self.relevance,
+            "duplication": self.duplication,
+            "requested_count": self.requested_count,
+            "generated_count": self.generated_count,
+            "service_latency_ms": self.service_latency_ms,
+            "metadata": self.metadata_json or {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
 

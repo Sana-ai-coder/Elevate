@@ -199,64 +199,212 @@ def _extract_error_message(raw_body: str) -> str:
             nested_message = detail.get("message") or detail.get("error")
             if nested_message:
                 return str(nested_message)
+        if parsed.get("message"):
+            return str(parsed.get("message"))
         if parsed.get("error"):
             return str(parsed.get("error"))
 
     return body
 
-def _calculate_smart_batches(total_questions: int, max_parallel: int = 5) -> list[int]:
-    """
-    Intelligently splits the requested questions across parallel workers.
-    Example: 7 questions -> [2, 2, 1, 1, 1]
-    Example: 30 questions -> [6, 6, 6, 6, 6]
-    """
-    if total_questions <= 0:
-        return []
-    
-    # If they ask for less than 5 questions, we don't need 5 workers
-    workers = min(total_questions, max_parallel)
-    base = total_questions // workers
-    remainder = total_questions % workers
-    
-    batches = []
-    for i in range(workers):
-        if i < remainder:
-            batches.append(base + 1)
-        else:
-            batches.append(base)
-            
-    return [b for b in batches if b > 0]
 
-def _fetch_single_batch(
-    count: int, subject: str, grade: str, difficulty: str, source_topic: str, 
-    seed: int, test_title: str, test_description: str, base_url: str, endpoint: str, headers: dict, timeout: int
-) -> list:
-    """Helper function to execute a single HTTP request to your custom HF Space."""
-    import json
-    from urllib import request as urlrequest
-    
+def _build_service_headers() -> Dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    token = get_topic_ai_service_token()
+    if token:
+        headers["Authorization"] = f"{get_topic_ai_auth_scheme()} {token}"
+    return headers
+
+
+def _get_gemini_api_key() -> str:
+    return str(
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or ""
+    ).strip()
+
+
+def _get_gemini_model_name() -> str:
+    raw = str(os.environ.get("AI_TOPIC_GEMINI_MODEL") or "gemini-2.5-flash").strip()
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]", "", raw)
+    return cleaned or "gemini-2.5-flash"
+
+
+def _parse_question_candidates(raw_text: str) -> List[Any]:
+    text = str(raw_text or "").strip()
+    if not text:
+        return []
+
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text, flags=re.IGNORECASE)
+    text = text.strip()
+
+    parsed: Any = None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    if parsed is None:
+        match = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", text)
+        if match:
+            try:
+                parsed = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                parsed = None
+
+    if isinstance(parsed, dict):
+        rows = parsed.get("questions") or parsed.get("mcqs") or []
+        return rows if isinstance(rows, list) else []
+
+    if isinstance(parsed, list):
+        return parsed
+
+    return []
+
+
+def _extract_gemini_text(response_data: Dict[str, Any]) -> str:
+    candidates = response_data.get("candidates")
+    if not isinstance(candidates, list):
+        return ""
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        content = candidate.get("content")
+        if not isinstance(content, dict):
+            continue
+        parts = content.get("parts")
+        if not isinstance(parts, list):
+            continue
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+
+    return ""
+
+
+def _build_generation_context(
+    *,
+    subject: str,
+    grade: str,
+    difficulty: str,
+    topic: str | None,
+    requested_count: int,
+    test_title: str | None,
+    test_description: str | None,
+    rag_context: str | None,
+    generation_mode: str | None,
+) -> Dict[str, Any]:
+    clean_topic = _derive_source_topic(topic, subject, grade)
+    clean_subject = sanitize_string(subject or "", max_length=64) or "general"
+    clean_grade = sanitize_string(grade or "", max_length=32) or "high"
+    clean_difficulty = sanitize_string(difficulty or "", max_length=16) or "medium"
+    clean_title = sanitize_string(test_title or "", max_length=255) or ""
+    clean_description = sanitize_string(test_description or "", max_length=1200) or ""
+    clean_mode = sanitize_string(generation_mode or "standard", max_length=24) or "standard"
+    clean_rag_context = sanitize_string(rag_context or "", max_length=12000) or ""
+
+    return {
+        "topic": clean_topic,
+        "subject": clean_subject,
+        "grade": clean_grade,
+        "difficulty": clean_difficulty,
+        "requested_count": int(max(1, min(requested_count, 50))),
+        "test_title": clean_title,
+        "test_description": clean_description,
+        "generation_mode": clean_mode,
+        "rag_context": clean_rag_context,
+    }
+
+
+def _build_default_gemini_prompt(context: Dict[str, Any]) -> str:
+    rag_context = context.get("rag_context") or ""
+    rag_block = ""
+    if rag_context:
+        rag_block = (
+            "RAG CONTEXT (must be treated as the primary factual source when relevant):\n"
+            f"{rag_context}\n\n"
+        )
+
+    title = context.get("test_title") or ""
+    description = context.get("test_description") or ""
+    title_block = ""
+    if title or description:
+        title_block = (
+            "TEST CONFIGURATION:\n"
+            f"- Test Title: {title or 'N/A'}\n"
+            f"- Test Description: {description or 'N/A'}\n"
+        )
+
+    return (
+        "You are an elite assessment designer for STEM education.\n"
+        "Generate multiple-choice questions that align exactly with the user configuration.\n\n"
+        "USER CONFIGURATION:\n"
+        f"- Generation Mode: {context.get('generation_mode')}\n"
+        f"- Subject: {context.get('subject')}\n"
+        f"- Grade: {context.get('grade')}\n"
+        f"- Difficulty: {context.get('difficulty')}\n"
+        f"- Topic/Sub-topic: {context.get('topic')}\n"
+        f"- Required Question Count: {context.get('requested_count')}\n"
+        f"{title_block}\n"
+        f"{rag_block}"
+        "RESPONSE RULES:\n"
+        "- Return ONLY valid JSON. No markdown. No prose outside JSON.\n"
+        "- JSON schema: {\"questions\":[{\"text\":string,\"options\":[string,string,string,string],\"correct_index\":0-3,\"explanation\":string,\"topic\":string}]}\n"
+        "- Each question must have exactly 4 distinct options and exactly one correct answer.\n"
+        "- Distractors must be plausible for the chosen grade and difficulty.\n"
+        "- Explanations must be concise and instructional.\n"
+        "- Ensure all generated questions reflect all fields provided in USER CONFIGURATION.\n"
+        "- Generate exactly the requested question count; do not under-generate.\n"
+    )
+
+
+def _optimize_prompt_with_hf_service(context: Dict[str, Any]) -> Dict[str, Any]:
+    endpoint = f"{get_topic_ai_service_url().rstrip('/')}/prompt/optimize"
+    timeout_seconds = max(5, min(get_topic_ai_timeout_seconds(), 30))
     payload = {
         "source_type": "topic",
-        "source": source_topic,
-        "num_questions": count,
-        "difficulty": difficulty.strip().lower(),
-        "subject": subject.strip().lower(),
-        "grade": grade.strip().lower(),
-        "seed": seed,
-        "test_title": test_title,
-        "test_description": test_description
+        "source": context.get("topic"),
+        "subject": context.get("subject"),
+        "grade": context.get("grade"),
+        "difficulty": context.get("difficulty"),
+        "num_questions": context.get("requested_count"),
+        "generation_mode": context.get("generation_mode"),
+        "test_title": context.get("test_title"),
+        "test_description": context.get("test_description"),
+        "rag_context": context.get("rag_context"),
     }
-    
-    request_body = json.dumps(payload).encode("utf-8")
-    req = urlrequest.Request(endpoint, data=request_body, method="POST", headers=headers)
-    
-    try:
-        with urlrequest.urlopen(req, timeout=timeout) as response:
-            parsed = json.loads(response.read().decode("utf-8"))
-            return parsed.get("mcqs", [])
-    except Exception as e:
-        print(f"[Batch Error] Failed to generate chunk of {count}: {e}")
-        return []
+
+    req = urlrequest.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers=_build_service_headers(),
+    )
+
+    with urlrequest.urlopen(req, timeout=timeout_seconds) as response:
+        status = int(getattr(response, "status", 200) or 200)
+        body = response.read().decode("utf-8", errors="ignore")
+
+    if status >= 400:
+        raise ValueError(_extract_error_message(body))
+
+    parsed = json.loads(body or "{}")
+    if not isinstance(parsed, dict):
+        raise ValueError("Prompt optimizer returned an invalid response.")
+
+    prompt = sanitize_string(parsed.get("optimized_prompt") or parsed.get("prompt") or "", max_length=24000)
+    if not prompt:
+        raise ValueError("Prompt optimizer returned an empty prompt.")
+
+    return {
+        "prompt": prompt,
+        "endpoint": endpoint,
+        "source": sanitize_string(parsed.get("source") or "hf_prompt_optimizer", max_length=64) or "hf_prompt_optimizer",
+    }
 
 
 def generate_topic_mcqs(
@@ -269,103 +417,178 @@ def generate_topic_mcqs(
     seed: int | None = None,
     test_title: str | None = None,
     test_description: str | None = None,
+    rag_context: str | None = None,
+    generation_mode: str | None = None,
 ) -> Dict[str, Any]:
-    import time
-    import json
-    import os
-    from urllib import request as urlrequest
-
     requested_count = max(1, min(int(count), 50))
     source_topic = _derive_source_topic(topic, subject, grade)
-    
-    # Direct Groq API Endpoint
-    base_url = "https://api.groq.com/openai/v1/chat/completions"
-    api_key = os.environ.get("GROQ_API_KEY", "")
-    
     request_started = time.perf_counter()
 
-    # 1. High-Quality Prompt Engineering
-    sys_prompt = "You are an expert STEM educator. You must output ONLY valid JSON using the exact schema requested."
-    
-    context_block = ""
-    if test_title or test_description:
-        context_block = f"Test Context: {test_title} - {test_description}\n"
+    context = _build_generation_context(
+        subject=subject,
+        grade=grade,
+        difficulty=difficulty,
+        topic=source_topic,
+        requested_count=requested_count,
+        test_title=test_title,
+        test_description=test_description,
+        rag_context=rag_context,
+        generation_mode=generation_mode,
+    )
 
-    user_prompt = f"""
-    Generate exactly {requested_count} highly logical and factual multiple-choice questions.
-    Topic: {source_topic}
-    Subject: {subject.capitalize()}
-    Grade Level: {grade.capitalize()}
-    Difficulty: {difficulty.capitalize()}
-    {context_block}
-    
-    CRITICAL INSTRUCTIONS:
-    - Make distractors (wrong options) plausible and challenging.
-    - Ensure the 'explanation' clearly states why the answer is correct.
-    
-    Format required (strictly adhere to this JSON structure):
-    {{
-      "questions": [
-        {{
-          "text": "The actual question text here?",
-          "options": ["Option A", "Option B", "Option C", "Option D"],
-          "correct_index": 0,
-          "explanation": "Clear, educational explanation here."
-        }}
-      ]
-    }}
-    """
+    prompt_text = _build_default_gemini_prompt(context)
+    prompt_source = "deterministic"
+    prompt_optimizer_endpoint = None
+    prompt_optimizer_error = None
 
-    # 2. Build the Groq Payload
-    payload = {
-        "model": "llama-3.3-70b-versatile", # Groq's fastest, smartest 70B model
-        "messages": [
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": user_prompt}
+    if str(os.environ.get("AI_TOPIC_PROMPT_OPTIMIZER_ENABLED") or "1").strip().lower() not in {"0", "false", "no", "off"}:
+        try:
+            optimized = _optimize_prompt_with_hf_service(context)
+            prompt_text = optimized.get("prompt") or prompt_text
+            prompt_source = optimized.get("source") or "hf_prompt_optimizer"
+            prompt_optimizer_endpoint = optimized.get("endpoint")
+        except Exception as exc:
+            prompt_optimizer_error = str(exc)
+
+    gemini_api_key = _get_gemini_api_key()
+    if not gemini_api_key:
+        return {
+            "ok": False,
+            "status_code": 503,
+            "error": "Gemini API key is missing. Set GEMINI_API_KEY or GOOGLE_API_KEY.",
+            "questions": [],
+            "meta": {
+                "provider": "gemini",
+                "model": _get_gemini_model_name(),
+                "prompt_source": prompt_source,
+                "prompt_optimizer_endpoint": prompt_optimizer_endpoint,
+                "prompt_optimizer_error": prompt_optimizer_error,
+            },
+            "requested_count": requested_count,
+            "generated_count": 0,
+            "service_latency_ms": int((time.perf_counter() - request_started) * 1000),
+        }
+
+    model_name = _get_gemini_model_name()
+    gemini_endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_api_key}"
+
+    request_payload = {
+        "systemInstruction": {
+            "parts": [
+                {
+                    "text": "You generate high-quality STEM MCQs and return only valid JSON."
+                }
+            ]
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": prompt_text}],
+            }
         ],
-        "temperature": 0.6, # Add slight randomness so duplicate parameters yield fresh questions
-        "response_format": {"type": "json_object"} # Forces perfect JSON output
+        "generationConfig": {
+            "temperature": 0.35,
+            "topP": 0.9,
+            "responseMimeType": "application/json",
+        },
     }
 
-    request_body = json.dumps(payload).encode("utf-8")
-    request_headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
-    }
+    request_obj = urlrequest.Request(
+        gemini_endpoint,
+        data=json.dumps(request_payload).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
 
-    request_obj = urlrequest.Request(base_url, data=request_body, method="POST", headers=request_headers)
-
-    # 3. Execute the Request
     try:
-        with urlrequest.urlopen(request_obj, timeout=30) as response:
+        with urlrequest.urlopen(request_obj, timeout=get_topic_ai_timeout_seconds()) as response:
             status_code = int(getattr(response, "status", 200) or 200)
-            raw_response = response.read().decode("utf-8")
+            raw_response = response.read().decode("utf-8", errors="ignore")
+    except urlerror.HTTPError as exc:
+        raw_error = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
+        return {
+            "ok": False,
+            "status_code": int(getattr(exc, "code", 502) or 502),
+            "error": _extract_error_message(raw_error),
+            "questions": [],
+            "meta": {
+                "provider": "gemini",
+                "model": model_name,
+                "prompt_source": prompt_source,
+                "prompt_optimizer_endpoint": prompt_optimizer_endpoint,
+                "prompt_optimizer_error": prompt_optimizer_error,
+            },
+            "service_endpoint": gemini_endpoint,
+            "requested_count": requested_count,
+            "generated_count": 0,
+            "service_latency_ms": int((time.perf_counter() - request_started) * 1000),
+        }
+    except urlerror.URLError as exc:
+        return {
+            "ok": False,
+            "status_code": 503,
+            "error": f"Gemini API unavailable: {exc.reason}",
+            "questions": [],
+            "meta": {
+                "provider": "gemini",
+                "model": model_name,
+                "prompt_source": prompt_source,
+                "prompt_optimizer_endpoint": prompt_optimizer_endpoint,
+                "prompt_optimizer_error": prompt_optimizer_error,
+            },
+            "service_endpoint": gemini_endpoint,
+            "requested_count": requested_count,
+            "generated_count": 0,
+            "service_latency_ms": int((time.perf_counter() - request_started) * 1000),
+        }
     except Exception as exc:
         return {
-            "ok": False, "status_code": 503, "error": f"Groq API unavailable: {exc}",
-            "questions": [], "meta": {}, "requested_count": requested_count, "generated_count": 0,
+            "ok": False,
+            "status_code": 503,
+            "error": f"Gemini request failed: {exc}",
+            "questions": [],
+            "meta": {
+                "provider": "gemini",
+                "model": model_name,
+                "prompt_source": prompt_source,
+                "prompt_optimizer_endpoint": prompt_optimizer_endpoint,
+                "prompt_optimizer_error": prompt_optimizer_error,
+            },
+            "service_endpoint": gemini_endpoint,
+            "requested_count": requested_count,
+            "generated_count": 0,
             "service_latency_ms": int((time.perf_counter() - request_started) * 1000),
         }
 
-    # 4. Parse the Groq Response
     try:
         response_data = json.loads(raw_response)
-        ai_content_str = response_data["choices"][0]["message"]["content"]
-        ai_json = json.loads(ai_content_str)
-        candidates = ai_json.get("questions", [])
-    except (json.JSONDecodeError, KeyError, IndexError):
+    except json.JSONDecodeError:
         return {
-            "ok": False, "status_code": 502, "error": "Invalid JSON from AI.",
-            "questions": [], "meta": {}, "requested_count": requested_count, "generated_count": 0,
+            "ok": False,
+            "status_code": 502,
+            "error": "Gemini response was not valid JSON.",
+            "questions": [],
+            "meta": {
+                "provider": "gemini",
+                "model": model_name,
+                "prompt_source": prompt_source,
+                "prompt_optimizer_endpoint": prompt_optimizer_endpoint,
+                "prompt_optimizer_error": prompt_optimizer_error,
+            },
+            "service_endpoint": gemini_endpoint,
+            "requested_count": requested_count,
+            "generated_count": 0,
             "service_latency_ms": int((time.perf_counter() - request_started) * 1000),
         }
 
-    # 5. Normalize using your existing Elevate logic
+    ai_content_text = _extract_gemini_text(response_data)
+    candidates = _parse_question_candidates(ai_content_text)
+
     rows = []
     if isinstance(candidates, list):
         for candidate in candidates:
             normalized = _normalize_service_question(candidate, source_topic)
-            if normalized: 
+            if normalized:
                 rows.append(normalized)
 
     rows = rows[:requested_count]
@@ -373,9 +596,16 @@ def generate_topic_mcqs(
     return {
         "ok": len(rows) > 0,
         "status_code": status_code,
-        "error": None if rows else "Failed to parse questions",
+        "error": None if rows else "Gemini did not return parseable questions.",
         "questions": rows,
-        "meta": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "meta": {
+            "provider": "gemini",
+            "model": model_name,
+            "prompt_source": prompt_source,
+            "prompt_optimizer_endpoint": prompt_optimizer_endpoint,
+            "prompt_optimizer_error": prompt_optimizer_error,
+        },
+        "service_endpoint": gemini_endpoint,
         "requested_count": requested_count,
         "generated_count": len(rows),
         "service_latency_ms": int((time.perf_counter() - request_started) * 1000),

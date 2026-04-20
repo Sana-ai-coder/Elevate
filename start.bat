@@ -8,6 +8,15 @@ set "VENV_PY=.venv\Scripts\python.exe"
 set "AI_SERVICE_URL=http://127.0.0.1:7860"
 set "AI_START_SCRIPT=ai\start.bat"
 set "AI_LOG_FILE=%cd%\ai\topic_ai_service.log"
+set "AI_HEALTH_TIMEOUT_SECONDS=45"
+if not "%ELEVATE_AI_HEALTH_TIMEOUT_SECONDS%"=="" set "AI_HEALTH_TIMEOUT_SECONDS=%ELEVATE_AI_HEALTH_TIMEOUT_SECONDS%"
+if not defined AI_HEALTH_TIMEOUT_SECONDS set "AI_HEALTH_TIMEOUT_SECONDS=45"
+for /f "delims=0123456789" %%A in ("%AI_HEALTH_TIMEOUT_SECONDS%") do set "AI_HEALTH_TIMEOUT_SECONDS=45"
+if %AI_HEALTH_TIMEOUT_SECONDS% LSS 5 set "AI_HEALTH_TIMEOUT_SECONDS=5"
+if %AI_HEALTH_TIMEOUT_SECONDS% GTR 300 set "AI_HEALTH_TIMEOUT_SECONDS=300"
+set /a AI_HEALTH_MAX_LOOPS=AI_HEALTH_TIMEOUT_SECONDS*2
+set "AI_DO_WARMUP=0"
+if /I "%ELEVATE_AI_WARMUP%"=="1" set "AI_DO_WARMUP=1"
 
 echo.
 echo  ================================================
@@ -27,6 +36,7 @@ if errorlevel 1 (
 
 :: ── Validate/repair virtual environment ─────────────────────────────────────
 set "NEEDS_SETUP=0"
+set "NEEDS_PIP_SYNC=0"
 if not exist "%VENV_PY%" (
     set "NEEDS_SETUP=1"
 ) else (
@@ -34,6 +44,12 @@ if not exist "%VENV_PY%" (
     if errorlevel 1 (
         echo  [WARN] Existing virtual environment is broken or incomplete.
         set "NEEDS_SETUP=1"
+    ) else (
+        "%VENV_PY%" -c "import pypdf, docx, boto3" >nul 2>&1
+        if errorlevel 1 (
+            echo  [WARN] Runtime dependencies are missing for document upload.
+            set "NEEDS_PIP_SYNC=1"
+        )
     )
 )
 
@@ -98,6 +114,23 @@ if "%NEEDS_SETUP%"=="1" (
     echo  [INFO] Virtual environment found and healthy.
 )
 
+if "%NEEDS_SETUP%"=="0" if "%NEEDS_PIP_SYNC%"=="1" (
+    echo  [SETUP] Syncing missing dependencies from requirements.txt ...
+    "%VENV_PY%" -m pip install -r requirements.txt
+    if errorlevel 1 (
+        echo  [ERROR] Dependency sync failed.
+        pause
+        exit /b 1
+    )
+
+    "%VENV_PY%" -c "import pypdf, docx, boto3" >nul 2>&1
+    if errorlevel 1 (
+        echo  [ERROR] Dependency verification failed after sync.
+        pause
+        exit /b 1
+    )
+)
+
 echo  [CHECK] Running startup healthcheck...
 "%VENV_PY%" scripts\startup_healthcheck.py
 if errorlevel 1 (
@@ -106,41 +139,33 @@ if errorlevel 1 (
     exit /b 1
 )
 
-powershell -NoProfile -Command "try { Invoke-RestMethod -Uri '%AI_SERVICE_URL%/health' -TimeoutSec 2 | Out-Null; exit 0 } catch { exit 1 }"
-if errorlevel 1 (
-    if not exist "%AI_START_SCRIPT%" (
-        echo  [WARN] %AI_START_SCRIPT% is missing.
-        echo  [WARN] Skipping Topic AI startup. Teacher AI generation may be unavailable.
+if /I "%ELEVATE_SKIP_AI%"=="1" (
+    echo  [AI] Skipping Topic AI startup ^(ELEVATE_SKIP_AI=1^).
+) else (
+    set "AI_ALREADY_RUNNING=0"
+    netstat -ano | findstr /I ":7860" | findstr /I "LISTENING" >nul 2>&1
+    if not errorlevel 1 set "AI_ALREADY_RUNNING=1"
+
+    if "!AI_ALREADY_RUNNING!"=="1" (
+        echo  [AI] Topic AI service already running.
     ) else (
-        echo  [AI] Ensuring Topic AI environment via %AI_START_SCRIPT% ...
-        call "%AI_START_SCRIPT%" --ensure-env
-        if errorlevel 1 (
-            echo  [WARN] Topic AI environment setup failed.
+        if not exist "%AI_START_SCRIPT%" (
+            echo  [WARN] %AI_START_SCRIPT% is missing.
             echo  [WARN] Skipping Topic AI startup. Teacher AI generation may be unavailable.
         ) else (
-            echo  [AI] Starting Topic AI service at %AI_SERVICE_URL% ...
-            if exist "%AI_LOG_FILE%" del /q "%AI_LOG_FILE%" >nul 2>&1
-            start "" /B cmd /c "cd /d ""%cd%\ai"" && call start.bat --serve >> ""%AI_LOG_FILE%"" 2>&1"
-
-            powershell -NoProfile -Command "$ready=$false; for($i=0; $i -lt 240; $i++){ try { Invoke-RestMethod -Uri '%AI_SERVICE_URL%/health' -TimeoutSec 2 | Out-Null; $ready=$true; break } catch {}; Start-Sleep -Milliseconds 500 }; if($ready){ exit 0 } else { exit 1 }"
+            echo  [AI] Ensuring Topic AI environment via %AI_START_SCRIPT% ...
+            call "%AI_START_SCRIPT%" --ensure-env
             if errorlevel 1 (
-                echo  [WARN] Topic AI service did not become healthy in time. Teacher AI generation may be unavailable.
-                if exist "%AI_LOG_FILE%" (
-                    echo  [AI] Last log lines from %AI_LOG_FILE%:
-                    powershell -NoProfile -Command "Get-Content -Path '%AI_LOG_FILE%' -Tail 40"
-                )
+                echo  [WARN] Topic AI environment setup failed.
+                echo  [WARN] Skipping Topic AI startup. Teacher AI generation may be unavailable.
             ) else (
-                powershell -NoProfile -Command "try { Invoke-RestMethod -Uri '%AI_SERVICE_URL%/warmup' -Method POST -TimeoutSec 45 | Out-Null; exit 0 } catch { exit 1 }"
-                if errorlevel 1 (
-                    echo  [AI] Warmup timed out or was skipped. First AI request may be slow.
-                ) else (
-                    echo  [AI] Topic AI service healthy and warmed.
-                )
+                echo  [AI] Starting Topic AI service at %AI_SERVICE_URL% in background ...
+                if exist "%AI_LOG_FILE%" del /q "%AI_LOG_FILE%" >nul 2>&1
+                start "" /B cmd /c "cd /d ""%cd%\ai"" && call start.bat --serve >> ""%AI_LOG_FILE%"" 2>&1"
+                echo  [AI] Topic AI startup triggered. Check %AI_LOG_FILE% if generation fails.
             )
         )
     )
-) else (
-    echo  [AI] Topic AI service already running.
 )
 
 :: ── Launch ───────────────────────────────────────────────────────────────────
