@@ -34,6 +34,7 @@ from ..validation import validate_required_fields, sanitize_string
 from ..ai_topic_service import (
     generate_topic_mcqs,
     get_topic_ai_service_url,
+    process_document_with_ai_service,
 )
 from ..at_risk_predictor import get_at_risk_predictions_for_students
 from ..rag_service import (
@@ -111,6 +112,17 @@ def _parse_bool_flag(raw_value, default=False):
         if value in {"0", "false", "no", "n", "off"}:
             return False
     return default
+
+
+def _get_rag_ingestion_processor() -> str:
+    raw = str(os.environ.get("RAG_INGESTION_PROCESSOR") or "ai_service").strip().lower()
+    if raw in {"ai_service", "hf", "huggingface", "ai"}:
+        return "ai_service"
+    return "local"
+
+
+def _is_rag_ingestion_processor_strict() -> bool:
+    return _parse_bool_flag(os.environ.get("RAG_INGESTION_PROCESSOR_STRICT"), False)
 
 
 def _parse_days_arg(default_value=30):
@@ -286,57 +298,187 @@ def _process_teacher_document_ingestion(
         if not text:
             raise ValueError("No readable text found in uploaded document.")
 
-        chunks = build_deterministic_chunks(
-            text,
-            document_fingerprint=content_sha,
-            chunk_size=chunk_size,
-            overlap=overlap,
-        )
-        if not chunks:
-            raise ValueError("Document text is too short to chunk.")
+        processor_requested = _get_rag_ingestion_processor()
+        processor_effective = "local"
+        processor_error = None
+        ai_ingestion = None
+
+        if processor_requested == "ai_service":
+            ai_ingestion = process_document_with_ai_service(
+                document_text=text,
+                content_sha256=content_sha,
+                chunk_size=chunk_size,
+                overlap=overlap,
+                vector_store_requested=vector_store_choice.get("requested"),
+            )
+            if ai_ingestion.get("ok"):
+                processor_effective = "ai_service"
+            else:
+                processor_error = str(ai_ingestion.get("error") or "AI ingestion failed")
+                if _is_rag_ingestion_processor_strict():
+                    raise ValueError(processor_error)
+                current_app.logger.warning(
+                    "AI ingestion failed; falling back to local processing (doc_id=%s): %s",
+                    document_id,
+                    processor_error,
+                )
+
+        prepared_chunks = []
+        chunk_vectors = []
+        total_tokens = 0
+
+        if processor_effective == "ai_service" and ai_ingestion:
+            for chunk in ai_ingestion.get("chunks") or []:
+                if not isinstance(chunk, dict):
+                    continue
+
+                chunk_text = str(chunk.get("text") or "")
+                if not chunk_text.strip():
+                    continue
+
+                chunk_id = sanitize_string(chunk.get("chunk_id") or "", max_length=64)
+                if not chunk_id:
+                    chunk_id = hashlib.sha256(
+                        f"{content_sha}:{int(chunk.get('chunk_index') or 0)}:{chunk_text}".encode("utf-8")
+                    ).hexdigest()[:40]
+
+                vector = chunk.get("embedding_vector") if isinstance(chunk.get("embedding_vector"), list) else []
+                try:
+                    token_count = int(chunk.get("token_count") or 0)
+                except (TypeError, ValueError):
+                    token_count = 0
+                token_count = max(0, token_count)
+                total_tokens += token_count
+
+                chunk_metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+                chunk_metadata = {
+                    "source": "teacher_upload_ai_service",
+                    **chunk_metadata,
+                }
+
+                prepared_chunks.append(
+                    {
+                        "chunk_id": str(chunk_id),
+                        "chunk_index": int(chunk.get("chunk_index") or 0),
+                        "text": chunk_text,
+                        "text_hash": sanitize_string(chunk.get("text_hash") or "", max_length=64)
+                        or hashlib.sha256(chunk_text.encode("utf-8")).hexdigest(),
+                        "char_start": chunk.get("char_start"),
+                        "char_end": chunk.get("char_end"),
+                        "token_count": token_count,
+                        "embedding_vector": vector,
+                        "embedding_dim": chunk.get("embedding_dim"),
+                        "embedding_provider": sanitize_string(chunk.get("embedding_provider") or "", max_length=64) or None,
+                        "embedding_model": sanitize_string(chunk.get("embedding_model") or "", max_length=128) or None,
+                        "embedding_status": sanitize_string(chunk.get("embedding_status") or "embedded", max_length=32) or "embedded",
+                        "metadata_json": chunk_metadata,
+                    }
+                )
+
+                if chunk_id and isinstance(vector, list) and vector:
+                    chunk_vectors.append(
+                        {
+                            "chunk_id": str(chunk_id),
+                            "vector": vector,
+                        }
+                    )
+
+            if total_tokens <= 0:
+                try:
+                    total_tokens = int(ai_ingestion.get("token_count") or 0)
+                except (TypeError, ValueError):
+                    total_tokens = 0
+
+        if not prepared_chunks:
+            processor_effective = "local"
+            chunks = build_deterministic_chunks(
+                text,
+                document_fingerprint=content_sha,
+                chunk_size=chunk_size,
+                overlap=overlap,
+            )
+            if not chunks:
+                raise ValueError("Document text is too short to chunk.")
+
+            for chunk in chunks:
+                embedding = build_embedding_payload(chunk.get("text") or "")
+                token_count = int(chunk.get("token_count") or 0)
+                total_tokens += token_count
+
+                vector = embedding.get("embedding_vector") or []
+                chunk_id = chunk.get("chunk_id")
+                prepared_chunks.append(
+                    {
+                        "chunk_id": str(chunk_id),
+                        "chunk_index": int(chunk.get("chunk_index") or 0),
+                        "text": chunk.get("text") or "",
+                        "text_hash": chunk.get("text_hash") or hashlib.sha256((chunk.get("text") or "").encode("utf-8")).hexdigest(),
+                        "char_start": chunk.get("char_start"),
+                        "char_end": chunk.get("char_end"),
+                        "token_count": token_count,
+                        "embedding_vector": vector if isinstance(vector, list) else [],
+                        "embedding_dim": embedding.get("embedding_dim"),
+                        "embedding_provider": embedding.get("embedding_provider"),
+                        "embedding_model": embedding.get("embedding_model"),
+                        "embedding_status": embedding.get("embedding_status") or "embedded",
+                        "metadata_json": {
+                            "source": "teacher_upload_local",
+                            "embedding_error": embedding.get("embedding_error"),
+                        },
+                    }
+                )
+
+                if chunk_id and isinstance(vector, list) and vector:
+                    chunk_vectors.append(
+                        {
+                            "chunk_id": str(chunk_id),
+                            "vector": vector,
+                        }
+                    )
+
+        if not prepared_chunks:
+            raise ValueError("Document ingestion produced zero chunks.")
 
         TeacherDocumentChunk.query.filter_by(document_id=doc.id).delete(synchronize_session=False)
-
-        total_tokens = 0
-        chunk_vectors = []
-        for chunk in chunks:
-            embedding = build_embedding_payload(chunk.get("text") or "")
-            total_tokens += int(chunk.get("token_count") or 0)
-
-            vector = embedding.get("embedding_vector") or []
-            chunk_id = chunk.get("chunk_id")
-            db.session.add(TeacherDocumentChunk(
-                document_id=doc.id,
-                teacher_id=teacher_id,
-                chunk_id=chunk_id,
-                chunk_index=int(chunk.get("chunk_index") or 0),
-                text=chunk.get("text") or "",
-                text_hash=chunk.get("text_hash") or hashlib.sha256((chunk.get("text") or "").encode("utf-8")).hexdigest(),
-                char_start=chunk.get("char_start"),
-                char_end=chunk.get("char_end"),
-                token_count=int(chunk.get("token_count") or 0),
-                embedding_vector=vector if isinstance(vector, list) else [],
-                embedding_dim=embedding.get("embedding_dim"),
-                embedding_provider=embedding.get("embedding_provider"),
-                embedding_model=embedding.get("embedding_model"),
-                embedding_status=embedding.get("embedding_status") or "embedded",
-                vector_store=vector_store_choice.get("effective") or "python",
-                metadata_json={
-                    "source": "teacher_upload",
-                    "embedding_error": embedding.get("embedding_error"),
-                },
-            ))
-
-            if chunk_id and isinstance(vector, list) and vector:
-                chunk_vectors.append({
-                    "chunk_id": str(chunk_id),
-                    "vector": vector,
-                })
+        for item in prepared_chunks:
+            db.session.add(
+                TeacherDocumentChunk(
+                    document_id=doc.id,
+                    teacher_id=teacher_id,
+                    chunk_id=item.get("chunk_id"),
+                    chunk_index=int(item.get("chunk_index") or 0),
+                    text=item.get("text") or "",
+                    text_hash=item.get("text_hash") or hashlib.sha256((item.get("text") or "").encode("utf-8")).hexdigest(),
+                    char_start=item.get("char_start"),
+                    char_end=item.get("char_end"),
+                    token_count=int(item.get("token_count") or 0),
+                    embedding_vector=item.get("embedding_vector") if isinstance(item.get("embedding_vector"), list) else [],
+                    embedding_dim=item.get("embedding_dim"),
+                    embedding_provider=item.get("embedding_provider"),
+                    embedding_model=item.get("embedding_model"),
+                    embedding_status=item.get("embedding_status") or "embedded",
+                    vector_store=vector_store_choice.get("effective") or "python",
+                    metadata_json=item.get("metadata_json") if isinstance(item.get("metadata_json"), dict) else {},
+                )
+            )
 
         db.session.flush()
 
         vector_store_effective = vector_store_choice.get("effective") or "python"
         vector_store_fallback_reason = vector_store_choice.get("fallback_reason")
+
+        if ai_ingestion:
+            ai_vector_store_effective = sanitize_string(ai_ingestion.get("vector_store_effective") or "", max_length=32)
+            ai_vector_store_fallback_reason = sanitize_string(ai_ingestion.get("vector_store_fallback_reason") or "", max_length=160)
+            if ai_vector_store_effective:
+                vector_store_effective = ai_vector_store_effective
+            if ai_vector_store_fallback_reason and not vector_store_fallback_reason:
+                vector_store_fallback_reason = ai_vector_store_fallback_reason
+
+        if vector_store_effective == "pgvector" and not is_pgvector_enabled():
+            vector_store_effective = "python"
+            vector_store_fallback_reason = vector_store_fallback_reason or "pgvector_not_available"
+
         if vector_store_effective == "pgvector" and is_pgvector_enabled():
             try:
                 stored_count = store_pgvector_embeddings(doc.id, chunk_vectors)
@@ -355,6 +497,11 @@ def _process_teacher_document_ingestion(
                 "vector_store_requested": vector_store_choice.get("requested"),
                 "vector_store_effective": vector_store_effective,
                 "vector_store_fallback_reason": vector_store_fallback_reason,
+                "ingestion_processor_requested": processor_requested,
+                "ingestion_processor_effective": processor_effective,
+                "ingestion_processor_error": processor_error,
+                "ingestion_processor_endpoint": ai_ingestion.get("service_endpoint") if ai_ingestion else None,
+                "ingestion_processor_latency_ms": ai_ingestion.get("service_latency_ms") if ai_ingestion else None,
                 "ingestion_mode": metadata.get("ingestion_mode") or "sync",
                 "ingested_at": _utcnow().isoformat(),
             }
@@ -363,7 +510,7 @@ def _process_teacher_document_ingestion(
         doc.metadata_json = metadata
         doc.status = "processed"
         doc.error_message = None
-        doc.chunk_count = len(chunks)
+        doc.chunk_count = len(prepared_chunks)
         doc.token_count = total_tokens
         doc.processed_at = _utcnow()
         doc.updated_at = _utcnow()
@@ -371,9 +518,11 @@ def _process_teacher_document_ingestion(
 
         return {
             "document": doc.as_dict(),
-            "chunk_count": len(chunks),
+            "chunk_count": len(prepared_chunks),
             "vector_store_effective": vector_store_effective,
             "vector_store_fallback_reason": vector_store_fallback_reason,
+            "ingestion_processor_effective": processor_effective,
+            "ingestion_processor_error": processor_error,
         }
     except Exception as exc:
         db.session.rollback()

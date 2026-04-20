@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -213,6 +214,272 @@ def _build_service_headers() -> Dict[str, str]:
     if token:
         headers["Authorization"] = f"{get_topic_ai_auth_scheme()} {token}"
     return headers
+
+
+def get_topic_ai_ingestion_timeout_seconds() -> int:
+    raw_value = os.environ.get(
+        "AI_TOPIC_INGESTION_TIMEOUT_SECONDS",
+        os.environ.get("AI_TOPIC_SERVICE_TIMEOUT_SECONDS", "180"),
+    )
+    try:
+        timeout = int(raw_value)
+    except (TypeError, ValueError):
+        timeout = 180
+    return max(10, min(timeout, 600))
+
+
+def _normalize_numeric_vector(raw: Any, *, max_len: int = 4096) -> List[float]:
+    if not isinstance(raw, list):
+        return []
+
+    vector: List[float] = []
+    for item in raw:
+        if len(vector) >= max_len:
+            break
+        try:
+            vector.append(float(item))
+        except (TypeError, ValueError):
+            continue
+    return vector
+
+
+def _normalize_ai_ingestion_chunk(
+    row: Any,
+    *,
+    default_fingerprint: str,
+    fallback_index: int,
+) -> Dict[str, Any] | None:
+    if not isinstance(row, dict):
+        return None
+
+    text = sanitize_string(row.get("text") or "", max_length=60000)
+    if not text:
+        return None
+
+    try:
+        chunk_index = int(row.get("chunk_index"))
+    except (TypeError, ValueError):
+        chunk_index = int(fallback_index)
+
+    text_hash = sanitize_string(row.get("text_hash") or "", max_length=64)
+    if not text_hash:
+        text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    chunk_id = sanitize_string(row.get("chunk_id") or "", max_length=64)
+    if not chunk_id:
+        chunk_id = hashlib.sha256(
+            f"{default_fingerprint}:{chunk_index}:{text_hash}".encode("utf-8")
+        ).hexdigest()[:40]
+
+    try:
+        token_count = int(row.get("token_count") or 0)
+    except (TypeError, ValueError):
+        token_count = 0
+    if token_count <= 0:
+        token_count = max(1, int(round(len(re.findall(r"\\S+", text)) * 1.2)))
+
+    vector = _normalize_numeric_vector(row.get("embedding_vector"), max_len=4096)
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+
+    return {
+        "chunk_id": chunk_id,
+        "chunk_index": chunk_index,
+        "text": text,
+        "text_hash": text_hash,
+        "char_start": row.get("char_start"),
+        "char_end": row.get("char_end"),
+        "token_count": token_count,
+        "embedding_vector": vector,
+        "embedding_dim": int(row.get("embedding_dim") or (len(vector) if vector else 0)) or None,
+        "embedding_provider": sanitize_string(row.get("embedding_provider") or "", max_length=64) or None,
+        "embedding_model": sanitize_string(row.get("embedding_model") or "", max_length=128) or None,
+        "embedding_status": sanitize_string(row.get("embedding_status") or "embedded", max_length=32) or "embedded",
+        "metadata": metadata,
+    }
+
+
+def process_document_with_ai_service(
+    *,
+    document_text: str,
+    content_sha256: str | None,
+    chunk_size: int,
+    overlap: int,
+    vector_store_requested: str | None = None,
+) -> Dict[str, Any]:
+    text = sanitize_string(document_text or "", max_length=600000)
+    if not text:
+        return {
+            "ok": False,
+            "status_code": 400,
+            "error": "Document text is empty; cannot process with AI service.",
+            "chunks": [],
+            "chunk_count": 0,
+            "token_count": 0,
+            "vector_store_effective": "python",
+            "vector_store_fallback_reason": "empty_document_text",
+            "service_endpoint": None,
+            "service_latency_ms": 0,
+        }
+
+    fingerprint = sanitize_string(content_sha256 or "", max_length=64)
+    if not fingerprint:
+        fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    endpoint = f"{get_topic_ai_service_url().rstrip('/')}/rag/process"
+    payload = {
+        "document_text": text,
+        "content_sha256": fingerprint,
+        "chunk_size": max(300, min(int(chunk_size or 1200), 3000)),
+        "overlap": max(0, min(int(overlap or 220), int(max(300, min(int(chunk_size or 1200), 3000)) / 2))),
+        "vector_store_requested": sanitize_string(vector_store_requested or "python", max_length=32) or "python",
+    }
+
+    started = time.perf_counter()
+    timeout_seconds = get_topic_ai_ingestion_timeout_seconds()
+    req = urlrequest.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers=_build_service_headers(),
+    )
+
+    try:
+        with urlrequest.urlopen(req, timeout=timeout_seconds) as response:
+            status_code = int(getattr(response, "status", 200) or 200)
+            raw_body = response.read().decode("utf-8", errors="ignore")
+    except urlerror.HTTPError as exc:
+        raw_error = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
+        return {
+            "ok": False,
+            "status_code": int(getattr(exc, "code", 502) or 502),
+            "error": _extract_error_message(raw_error),
+            "chunks": [],
+            "chunk_count": 0,
+            "token_count": 0,
+            "vector_store_effective": "python",
+            "vector_store_fallback_reason": "http_error",
+            "service_endpoint": endpoint,
+            "service_latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+    except urlerror.URLError as exc:
+        return {
+            "ok": False,
+            "status_code": 503,
+            "error": f"AI ingestion service unavailable: {exc.reason}",
+            "chunks": [],
+            "chunk_count": 0,
+            "token_count": 0,
+            "vector_store_effective": "python",
+            "vector_store_fallback_reason": "network_error",
+            "service_endpoint": endpoint,
+            "service_latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status_code": 503,
+            "error": f"AI ingestion request failed: {exc}",
+            "chunks": [],
+            "chunk_count": 0,
+            "token_count": 0,
+            "vector_store_effective": "python",
+            "vector_store_fallback_reason": "request_error",
+            "service_endpoint": endpoint,
+            "service_latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+    try:
+        parsed = json.loads(raw_body or "{}")
+    except json.JSONDecodeError:
+        return {
+            "ok": False,
+            "status_code": 502,
+            "error": "AI ingestion response was not valid JSON.",
+            "chunks": [],
+            "chunk_count": 0,
+            "token_count": 0,
+            "vector_store_effective": "python",
+            "vector_store_fallback_reason": "invalid_json",
+            "service_endpoint": endpoint,
+            "service_latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+    if not isinstance(parsed, dict):
+        return {
+            "ok": False,
+            "status_code": 502,
+            "error": "AI ingestion response had invalid payload shape.",
+            "chunks": [],
+            "chunk_count": 0,
+            "token_count": 0,
+            "vector_store_effective": "python",
+            "vector_store_fallback_reason": "invalid_payload",
+            "service_endpoint": endpoint,
+            "service_latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+    if status_code >= 400:
+        detail = _extract_error_message(raw_body)
+        return {
+            "ok": False,
+            "status_code": status_code,
+            "error": detail,
+            "chunks": [],
+            "chunk_count": 0,
+            "token_count": 0,
+            "vector_store_effective": "python",
+            "vector_store_fallback_reason": "service_error",
+            "service_endpoint": endpoint,
+            "service_latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+    raw_chunks = parsed.get("chunks") if isinstance(parsed.get("chunks"), list) else []
+    chunks: List[Dict[str, Any]] = []
+    for index, row in enumerate(raw_chunks):
+        normalized = _normalize_ai_ingestion_chunk(
+            row,
+            default_fingerprint=fingerprint,
+            fallback_index=index,
+        )
+        if normalized:
+            chunks.append(normalized)
+
+    if not chunks:
+        return {
+            "ok": False,
+            "status_code": 502,
+            "error": "AI ingestion returned no valid chunks.",
+            "chunks": [],
+            "chunk_count": 0,
+            "token_count": 0,
+            "vector_store_effective": "python",
+            "vector_store_fallback_reason": "empty_chunks",
+            "service_endpoint": endpoint,
+            "service_latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+    try:
+        token_count = int(parsed.get("token_count") or 0)
+    except (TypeError, ValueError):
+        token_count = 0
+    if token_count <= 0:
+        token_count = sum(int(item.get("token_count") or 0) for item in chunks)
+
+    vector_store_effective = sanitize_string(parsed.get("vector_store_effective") or "python", max_length=32) or "python"
+    vector_store_fallback_reason = sanitize_string(parsed.get("vector_store_fallback_reason") or "", max_length=160) or None
+
+    return {
+        "ok": True,
+        "status_code": status_code,
+        "error": None,
+        "chunks": chunks,
+        "chunk_count": len(chunks),
+        "token_count": int(token_count),
+        "vector_store_effective": vector_store_effective,
+        "vector_store_fallback_reason": vector_store_fallback_reason,
+        "service_endpoint": endpoint,
+        "service_latency_ms": int((time.perf_counter() - started) * 1000),
+    }
 
 
 def _get_gemini_api_key() -> str:

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import os
 import re
 from contextlib import asynccontextmanager
@@ -36,6 +39,125 @@ _PRELOAD_STARTED = False
 _PRELOAD_ERROR: Optional[str] = None
 _TRAINING_JOBS: Dict[str, Dict[str, Any]] = {}
 _TRAINING_LOCK = threading.Lock()
+
+
+DEFAULT_RAG_CHUNK_SIZE = 1200
+DEFAULT_RAG_CHUNK_OVERLAP = 220
+DEFAULT_RAG_EMBEDDING_DIM = 256
+
+
+def _normalize_document_text(raw: str | None) -> str:
+    text = str(raw or "").replace("\r", "\n")
+    text = re.sub(r"[\t\f\v]+", " ", text)
+    text = re.sub(r"\u0000", "", text)
+    text = re.sub(r"[ ]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _approximate_token_count(text: str | None) -> int:
+    words = re.findall(r"\S+", str(text or ""))
+    if not words:
+        return 0
+    return max(1, int(round(len(words) * 1.2)))
+
+
+def _normalize_vector(values: List[float]) -> List[float]:
+    norm = math.sqrt(sum(v * v for v in values))
+    if norm <= 0:
+        return values
+    return [float(v / norm) for v in values]
+
+
+def _hash_embedding(text: str, dim: int = DEFAULT_RAG_EMBEDDING_DIM) -> List[float]:
+    vector = [0.0] * max(32, int(dim or DEFAULT_RAG_EMBEDDING_DIM))
+    tokens = re.findall(r"[a-z0-9]+", str(text or "").lower())
+
+    if not tokens:
+        seed = hashlib.sha256(str(text or "").encode("utf-8")).digest()
+        vector[seed[0] % len(vector)] = 1.0
+        return _normalize_vector(vector)
+
+    for token in tokens:
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        idx = int.from_bytes(digest[:4], "big") % len(vector)
+        sign = -1.0 if (digest[4] % 2) else 1.0
+        weight = 1.0 + (digest[5] / 255.0)
+        vector[idx] += sign * weight
+
+    return _normalize_vector(vector)
+
+
+def _build_deterministic_chunks(
+    text: str,
+    *,
+    document_fingerprint: str,
+    chunk_size: int,
+    overlap: int,
+) -> List[Dict[str, Any]]:
+    normalized = _normalize_document_text(text)
+    if not normalized:
+        return []
+
+    chunk_size = max(300, min(int(chunk_size or DEFAULT_RAG_CHUNK_SIZE), 3000))
+    overlap = max(0, min(int(overlap or DEFAULT_RAG_CHUNK_OVERLAP), int(chunk_size / 2)))
+
+    chunks: List[Dict[str, Any]] = []
+    start = 0
+    index = 0
+    total = len(normalized)
+    break_markers = [
+        ("\n\n", 0),
+        ("\n", 0),
+        (". ", 1),
+        ("? ", 1),
+        ("! ", 1),
+        ("; ", 1),
+        (": ", 1),
+        (", ", 1),
+        (" ", 0),
+    ]
+
+    while start < total:
+        tentative_end = min(total, start + chunk_size)
+        end = tentative_end
+
+        if tentative_end < total:
+            min_breakpoint = start + int((tentative_end - start) * 0.58)
+            for marker, offset in break_markers:
+                candidate = normalized.rfind(marker, min_breakpoint, tentative_end)
+                if candidate > start:
+                    end = candidate + offset
+                    break
+
+        if end <= start:
+            end = tentative_end
+
+        snippet = normalized[start:end].strip()
+        if snippet:
+            text_hash = hashlib.sha256(snippet.encode("utf-8")).hexdigest()
+            chunk_id = hashlib.sha256(
+                f"{document_fingerprint}:{index}:{text_hash}".encode("utf-8")
+            ).hexdigest()[:40]
+            chunks.append(
+                {
+                    "chunk_id": chunk_id,
+                    "chunk_index": index,
+                    "text": snippet,
+                    "text_hash": text_hash,
+                    "char_start": start,
+                    "char_end": end,
+                    "token_count": _approximate_token_count(snippet),
+                }
+            )
+            index += 1
+
+        if end >= total:
+            break
+
+        start = min(max(end - overlap, start + 1), total)
+
+    return chunks
 
 
 def _ensure_generator_loaded():
@@ -159,6 +281,15 @@ class StrictTrainingRequest(BaseModel):
     github_ref: str = Field(default="main", min_length=1)
     min_emotion_accuracy: float = Field(default=0.90, ge=0.50, le=0.999)
     process_count: int = Field(default=4, ge=1, le=16)
+
+
+class RagProcessRequest(BaseModel):
+    document_text: str = Field(..., min_length=1)
+    content_sha256: Optional[str] = None
+    chunk_size: int = Field(default=DEFAULT_RAG_CHUNK_SIZE, ge=300, le=3000)
+    overlap: int = Field(default=DEFAULT_RAG_CHUNK_OVERLAP, ge=0, le=1500)
+    vector_store_requested: str = Field(default="python")
+    embedding_dim: int = Field(default=DEFAULT_RAG_EMBEDDING_DIM, ge=32, le=4096)
 
 
 def _sanitize_prompt_text(raw: str | None, *, max_length: int = 24000) -> str:
@@ -472,6 +603,80 @@ def optimize_prompt_for_gemini(
 @app.post("/mcq/score")
 def score_mcqs(payload: ScoreMCQRequest) -> dict:
     return MCQValidator.score_answers(payload.mcqs, payload.user_answers)
+
+
+@app.post("/rag/process")
+def rag_process_document(
+    payload: RagProcessRequest,
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+) -> dict:
+    _enforce_service_auth(authorization)
+
+    normalized_text = _normalize_document_text(payload.document_text)
+    if not normalized_text:
+        raise HTTPException(status_code=400, detail="document_text is empty after normalization")
+
+    fingerprint = re.sub(r"[^a-f0-9]", "", str(payload.content_sha256 or "").lower())[:64]
+    if not fingerprint:
+        fingerprint = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
+
+    chunk_size = max(300, min(int(payload.chunk_size or DEFAULT_RAG_CHUNK_SIZE), 3000))
+    overlap = max(0, min(int(payload.overlap or DEFAULT_RAG_CHUNK_OVERLAP), int(chunk_size / 2)))
+    embedding_dim = max(32, min(int(payload.embedding_dim or DEFAULT_RAG_EMBEDDING_DIM), 4096))
+
+    raw_chunks = _build_deterministic_chunks(
+        normalized_text,
+        document_fingerprint=fingerprint,
+        chunk_size=chunk_size,
+        overlap=overlap,
+    )
+    if not raw_chunks:
+        raise HTTPException(status_code=400, detail="No chunks could be produced from document_text")
+
+    vector_store_requested = str(payload.vector_store_requested or "python").strip().lower() or "python"
+    vector_store_effective = "python"
+    vector_store_fallback_reason = None
+    if vector_store_requested != "python":
+        vector_store_fallback_reason = "ai_service_python_vector_only"
+
+    total_tokens = 0
+    chunks: List[Dict[str, Any]] = []
+    for chunk in raw_chunks:
+        text = str(chunk.get("text") or "")
+        token_count = int(chunk.get("token_count") or _approximate_token_count(text))
+        total_tokens += token_count
+
+        vector = _hash_embedding(text, dim=embedding_dim)
+        chunks.append(
+            {
+                "chunk_id": str(chunk.get("chunk_id") or ""),
+                "chunk_index": int(chunk.get("chunk_index") or 0),
+                "text": text,
+                "text_hash": str(chunk.get("text_hash") or hashlib.sha256(text.encode("utf-8")).hexdigest()),
+                "char_start": chunk.get("char_start"),
+                "char_end": chunk.get("char_end"),
+                "token_count": token_count,
+                "embedding_vector": vector,
+                "embedding_dim": len(vector),
+                "embedding_provider": "hash-local",
+                "embedding_model": "hash-v1",
+                "embedding_status": "embedded",
+                "metadata": {
+                    "source": "hf_rag_processor",
+                },
+            }
+        )
+
+    return {
+        "status": "ok",
+        "source": "hf_rag_processor",
+        "chunk_count": len(chunks),
+        "token_count": int(total_tokens),
+        "vector_store_requested": vector_store_requested,
+        "vector_store_effective": vector_store_effective,
+        "vector_store_fallback_reason": vector_store_fallback_reason,
+        "chunks": chunks,
+    }
 
 
 if __name__ == "__main__":
