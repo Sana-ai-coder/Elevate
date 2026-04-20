@@ -15,6 +15,11 @@ const teacherCache = {
 };
 
 let activeAssessmentMode = 'topic';
+let activeWorkspaceTarget = 'assessmentsWorkspace';
+let assessmentsRealtimeIntervalId = null;
+let assessmentsRealtimeInFlight = false;
+
+const ASSESSMENTS_REALTIME_REFRESH_MS = 12000;
 
 const OPTION_LETTERS = ['A', 'B', 'C', 'D'];
 
@@ -157,6 +162,24 @@ function clearBusy(button) {
   if (!button) return;
   button.disabled = false;
   button.innerHTML = button.dataset.defaultText || button.innerHTML;
+}
+
+function setBusyWithElapsed(button, busyText) {
+  if (!button) {
+    return () => {};
+  }
+
+  setBusy(button, `${busyText} (0s)`);
+  const startedAt = Date.now();
+  const timerId = window.setInterval(() => {
+    if (!button || !button.disabled) return;
+    const elapsed = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+    button.innerHTML = `<i class="fas fa-spinner fa-spin me-1"></i>${busyText} (${elapsed}s)`;
+  }, 1000);
+
+  return () => {
+    window.clearInterval(timerId);
+  };
 }
 
 function formatDate(value) {
@@ -481,6 +504,55 @@ function activateSection(targetId) {
   if (contentArea) {
     contentArea.scrollTo({ top: 0, behavior: 'smooth' });
   }
+
+  activeWorkspaceTarget = targetId;
+  syncAssessmentsRealtimeRefreshState();
+}
+
+function stopAssessmentsRealtimeRefresh() {
+  if (assessmentsRealtimeIntervalId) {
+    window.clearInterval(assessmentsRealtimeIntervalId);
+    assessmentsRealtimeIntervalId = null;
+  }
+}
+
+async function refreshAssessmentsRealtime(options = {}) {
+  const force = Boolean(options.force);
+  if (!force) {
+    if (activeWorkspaceTarget !== 'assessmentsWorkspace') return;
+    if (document.hidden) return;
+  }
+
+  if (assessmentsRealtimeInFlight) return;
+  assessmentsRealtimeInFlight = true;
+
+  try {
+    await Promise.allSettled([
+      loadOverview(),
+      loadTests(),
+      loadAssignments(),
+    ]);
+    syncAssignmentFormOptions();
+  } catch (error) {
+    console.warn('Assessments realtime refresh failed:', error);
+  } finally {
+    assessmentsRealtimeInFlight = false;
+  }
+}
+
+function startAssessmentsRealtimeRefresh() {
+  stopAssessmentsRealtimeRefresh();
+  assessmentsRealtimeIntervalId = window.setInterval(() => {
+    refreshAssessmentsRealtime().catch(() => {});
+  }, ASSESSMENTS_REALTIME_REFRESH_MS);
+}
+
+function syncAssessmentsRealtimeRefreshState() {
+  if (activeWorkspaceTarget === 'assessmentsWorkspace') {
+    startAssessmentsRealtimeRefresh();
+    return;
+  }
+  stopAssessmentsRealtimeRefresh();
 }
 
 async function refreshSectionData(targetId) {
@@ -1214,6 +1286,35 @@ async function loadTests() {
   }).join('');
 }
 
+function updateCachedTestPublishState(testId, publishState) {
+  const normalizedId = Number(testId);
+  const nextState = Boolean(publishState);
+  teacherCache.tests = (teacherCache.tests || []).map(row => {
+    if (Number(row.id) !== normalizedId) return row;
+    return {
+      ...row,
+      is_published: nextState,
+    };
+  });
+}
+
+function applyPublishStateToTestRow(button, publishState) {
+  if (!button) return;
+
+  const row = button.closest('tr');
+  const badge = row ? row.querySelector('.badge-soft') : null;
+  const isPublished = Boolean(publishState);
+
+  if (badge) {
+    badge.classList.toggle('badge-published', isPublished);
+    badge.classList.toggle('badge-draft', !isPublished);
+    badge.textContent = isPublished ? 'Published' : 'Draft';
+  }
+
+  button.dataset.value = isPublished ? '0' : '1';
+  button.textContent = isPublished ? 'Unpublish' : 'Publish';
+}
+
 async function loadStudents() {
   const body = document.getElementById('studentsTableBody');
   if (!body) return;
@@ -1633,14 +1734,37 @@ function bindTestActions() {
 
       if (action === 'toggle-publish') {
         const publish = btn.dataset.value === '1';
-        await api.teacher.updateTest(testId, { is_published: publish });
-        notifyTeacherSuccess('testUpdateSuccess');
-        
-        // Preserve panel visibility state
         const panel = document.getElementById('testDetailPanel');
-        await loadTests();
-        if (panel && !panel.classList.contains('hidden')) {
-          document.querySelectorAll(`button[data-action="view"][data-id="${panel.dataset.currentTestId}"]`).forEach(b => b.textContent = 'Hide');
+        const currentOpenTestId = panel && !panel.classList.contains('hidden')
+          ? Number(panel.dataset.currentTestId || 0)
+          : 0;
+
+        btn.disabled = true;
+        btn.textContent = publish ? 'Publishing...' : 'Unpublishing...';
+
+        await api.teacher.updateTest(testId, { is_published: publish });
+        updateCachedTestPublishState(testId, publish);
+        applyPublishStateToTestRow(btn, publish);
+        syncAssignmentFormOptions();
+        notifyTeacherSuccess('testUpdateSuccess');
+
+        loadTests()
+          .then(() => {
+            syncAssignmentFormOptions();
+            if (currentOpenTestId > 0) {
+              document.querySelectorAll(`button[data-action="view"][data-id="${currentOpenTestId}"]`).forEach(b => {
+                b.textContent = 'Hide';
+              });
+            }
+          })
+          .catch(error => {
+            console.warn('Failed to revalidate tests after publish toggle:', error);
+          });
+
+        refreshAssessmentsRealtime({ force: true }).catch(() => {});
+
+        if (btn.isConnected) {
+          btn.disabled = false;
         }
       }
 
@@ -1648,7 +1772,7 @@ function bindTestActions() {
         if (!window.confirm('Delete this test? This action cannot be undone.')) return;
         await api.teacher.deleteTest(testId);
         notifyTeacherSuccess('testDeleteSuccess');
-        
+
         // Hide panel if the deleted test was being viewed
         const panel = document.getElementById('testDetailPanel');
         if (panel && panel.dataset.currentTestId === String(testId)) {
@@ -1656,10 +1780,16 @@ function bindTestActions() {
           panel.classList.add('hidden');
           panel.dataset.currentTestId = '';
         }
-        
+
         await loadTests();
+        syncAssignmentFormOptions();
+        refreshAssessmentsRealtime({ force: true }).catch(() => {});
       }
     } catch (error) {
+      if (action === 'toggle-publish' && btn && btn.isConnected) {
+        btn.disabled = false;
+        btn.textContent = btn.dataset.value === '1' ? 'Publish' : 'Unpublish';
+      }
       console.error(error);
       notifyTeacherError('testUpdateFailed', error);
     }
@@ -1938,14 +2068,15 @@ async function submitTestPayload(payload) {
     console.info('Generation diagnostics:', diagnostics);
   }
 
-  await Promise.all([loadOverview(), loadTests(), loadRagObservability()]);
+  await Promise.all([loadOverview(), loadTests(), loadAssignments(), loadRagObservability()]);
   syncAssignmentFormOptions();
+  refreshAssessmentsRealtime({ force: true }).catch(() => {});
 }
 
 async function createTopicTest(event) {
   event.preventDefault();
   const button = document.getElementById('createTopicTestBtn');
-  setBusy(button, 'Creating');
+  const stopBusyTimer = setBusyWithElapsed(button, 'Creating');
   try {
     const payload = collectTopicBuilderPayload();
     if (!payload.title || !payload.subject) {
@@ -1962,6 +2093,7 @@ async function createTopicTest(event) {
     console.error(error);
     notifyTeacherError('testCreateFailed', error);
   } finally {
+    stopBusyTimer();
     clearBusy(button);
   }
 }
@@ -1969,7 +2101,7 @@ async function createTopicTest(event) {
 async function createDocumentTest(event) {
   event.preventDefault();
   const button = document.getElementById('createDocumentTestBtn');
-  setBusy(button, 'Creating');
+  const stopBusyTimer = setBusyWithElapsed(button, 'Creating');
   try {
     const payload = collectDocumentBuilderPayload();
     if (!payload.title || !payload.subject) {
@@ -1990,6 +2122,7 @@ async function createDocumentTest(event) {
     console.error(error);
     notifyTeacherError('testCreateFailed', error);
   } finally {
+    stopBusyTimer();
     clearBusy(button);
   }
 }
@@ -2104,6 +2237,16 @@ function bindEvents() {
       await Promise.all([loadAnalytics(), loadRagObservability()]);
     });
   }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    if (activeWorkspaceTarget !== 'assessmentsWorkspace') return;
+    refreshAssessmentsRealtime({ force: true }).catch(() => {});
+  });
+
+  window.addEventListener('beforeunload', () => {
+    stopAssessmentsRealtimeRefresh();
+  });
 
   const actionHandlers = [
     {

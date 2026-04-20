@@ -21,6 +21,9 @@ export const api = {
     }
 
     if (route.includes('/teacher/tests') && verb === 'POST') {
+      if (status === 408) {
+        return 'Test generation is taking longer than expected. Please wait a bit and refresh the Tests section.';
+      }
       return 'We could not create the test right now. Please try again.';
     }
 
@@ -41,6 +44,7 @@ export const api = {
     if (status === 401) return 'Your session has expired. Please sign in again.';
     if (status === 403) return 'You do not have permission to do that action.';
     if (status === 404) return 'The requested item could not be found.';
+    if (status === 408) return cleanedServerMessage || 'Request timed out. Please try again.';
     if (status === 409) return cleanedServerMessage || 'A conflicting record already exists. Please review your input and try again.';
     if (status === 429) return cleanedServerMessage || 'Too many requests right now. Please wait a moment and try again.';
     if ([500, 502, 503, 504].includes(Number(status))) {
@@ -151,8 +155,9 @@ export const api = {
       return data;
     } catch (error) {
       if (error && error.name === 'AbortError') {
-        const timeoutError = new Error('Request timed out. Please try again.');
-        timeoutError.userMessage = 'Request timed out. Please try again.';
+        const timeoutMessage = this.buildFriendlyApiError(endpoint, method, 408, '');
+        const timeoutError = new Error(timeoutMessage);
+        timeoutError.userMessage = timeoutMessage;
         timeoutError.serverMessage = '';
         timeoutError.status = 408;
         throw timeoutError;
@@ -386,9 +391,11 @@ export const api = {
     },
 
     async createTest(payload) {
+      const timeoutMs = Number(config.API_TEST_CREATE_TIMEOUT_MS || 180000);
       return await api.request('/teacher/tests', {
         method: 'POST',
         body: JSON.stringify(payload || {}),
+        timeoutMs,
       });
     },
 

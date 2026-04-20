@@ -44,12 +44,24 @@ _TRAINING_LOCK = threading.Lock()
 DEFAULT_RAG_CHUNK_SIZE = 1200
 DEFAULT_RAG_CHUNK_OVERLAP = 220
 DEFAULT_RAG_EMBEDDING_DIM = 256
+RAG_CHUNKING_STRATEGY = "section_sentence_window_v2"
+RAG_EMBEDDING_MODEL = "hash-v2"
+
+_EMBEDDING_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in",
+    "is", "it", "of", "on", "or", "that", "the", "to", "was", "were", "with",
+    "this", "these", "those", "into", "their", "there", "than", "then", "them",
+    "can", "may", "might", "should", "would", "will", "about", "after", "before",
+    "during", "within", "without", "your", "you", "our", "its",
+}
 
 
 def _normalize_document_text(raw: str | None) -> str:
-    text = str(raw or "").replace("\r", "\n")
-    text = re.sub(r"[\t\f\v]+", " ", text)
+    text = str(raw or "")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\ufeff", "")
     text = re.sub(r"\u0000", "", text)
+    text = re.sub(r"[\t\f\v]+", " ", text)
     text = re.sub(r"[ ]{2,}", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
@@ -69,23 +81,173 @@ def _normalize_vector(values: List[float]) -> List[float]:
     return [float(v / norm) for v in values]
 
 
+def _tokenize_for_embedding(text: str | None, *, max_tokens: int = 900) -> List[str]:
+    tokens = re.findall(r"[a-z0-9]+(?:[-_][a-z0-9]+)?", str(text or "").lower())
+    if not tokens:
+        return []
+    return tokens[: max(64, int(max_tokens or 900))]
+
+
+def _weighted_hash_update(vector: List[float], key: str, weight: float) -> None:
+    if not vector:
+        return
+    digest = hashlib.sha256(key.encode("utf-8")).digest()
+    idx = int.from_bytes(digest[:4], "big") % len(vector)
+    sign = -1.0 if (digest[4] % 2) else 1.0
+    bucket_gain = 1.0 + ((digest[5] / 255.0) * 0.15)
+    vector[idx] += sign * float(weight) * bucket_gain
+
+
 def _hash_embedding(text: str, dim: int = DEFAULT_RAG_EMBEDDING_DIM) -> List[float]:
     vector = [0.0] * max(32, int(dim or DEFAULT_RAG_EMBEDDING_DIM))
-    tokens = re.findall(r"[a-z0-9]+", str(text or "").lower())
+    tokens = _tokenize_for_embedding(text)
 
     if not tokens:
         seed = hashlib.sha256(str(text or "").encode("utf-8")).digest()
         vector[seed[0] % len(vector)] = 1.0
         return _normalize_vector(vector)
 
+    token_counts: Dict[str, int] = {}
     for token in tokens:
-        digest = hashlib.sha256(token.encode("utf-8")).digest()
-        idx = int.from_bytes(digest[:4], "big") % len(vector)
-        sign = -1.0 if (digest[4] % 2) else 1.0
-        weight = 1.0 + (digest[5] / 255.0)
-        vector[idx] += sign * weight
+        token_counts[token] = token_counts.get(token, 0) + 1
+
+    token_total = len(tokens)
+    prefix_cutoff = max(1, int(token_total * 0.22))
+    for index, token in enumerate(tokens):
+        tf = token_counts.get(token, 1)
+        token_len = min(18, len(token))
+        stopword_penalty = 0.35 if token in _EMBEDDING_STOPWORDS else 1.0
+        positional_gain = 1.18 if index < prefix_cutoff else 1.0
+        weight = (0.7 + (token_len / 10.0)) * (1.0 + math.log1p(tf)) * stopword_penalty * positional_gain
+        _weighted_hash_update(vector, f"u:{token}", weight)
+
+        if index + 1 < token_total:
+            bigram = f"{token}|{tokens[index + 1]}"
+            _weighted_hash_update(vector, f"b:{bigram}", 0.68 * stopword_penalty)
+
+    gram_budget = 1600
+    for token, tf in token_counts.items():
+        if gram_budget <= 0:
+            break
+        if token in _EMBEDDING_STOPWORDS or len(token) < 5:
+            continue
+
+        padded = f"^{token}$"
+        local_budget = 0
+        for gram_size in (3, 4):
+            if len(padded) < gram_size:
+                continue
+            for offset in range(0, len(padded) - gram_size + 1):
+                gram = padded[offset: offset + gram_size]
+                gram_weight = 0.25 * (1.0 + math.log1p(tf))
+                _weighted_hash_update(vector, f"c:{gram}", gram_weight)
+                local_budget += 1
+                gram_budget -= 1
+                if local_budget >= 10 or gram_budget <= 0:
+                    break
+            if local_budget >= 10 or gram_budget <= 0:
+                break
 
     return _normalize_vector(vector)
+
+
+def _looks_like_heading(line: str) -> bool:
+    candidate = re.sub(r"\s+", " ", str(line or "")).strip()
+    if not candidate:
+        return False
+    if len(candidate) < 3 or len(candidate) > 150:
+        return False
+    if candidate.endswith((".", "?", "!", ";")):
+        return False
+    if candidate.startswith(("-", "*", "•")):
+        return False
+
+    words = candidate.split()
+    if len(words) > 20:
+        return False
+
+    letters = [char for char in candidate if char.isalpha()]
+    if len(letters) < 3:
+        return False
+
+    if re.match(r"^(chapter|section|part|unit)\b", candidate, flags=re.IGNORECASE):
+        return True
+    if re.match(r"^\d+(?:\.\d+){0,4}[\)\].:-]?\s+\S+", candidate):
+        return True
+
+    uppercase_ratio = sum(1 for char in letters if char.isupper()) / max(1, len(letters))
+    return candidate.istitle() or uppercase_ratio >= 0.72 or candidate.endswith(":")
+
+
+def _split_text_spans(text: str, *, max_chars: int) -> List[tuple[int, int]]:
+    content = str(text or "")
+    if not content:
+        return []
+
+    limit = max(180, int(max_chars or 240))
+    spans: List[tuple[int, int]] = []
+    break_markers = [
+        ("\n\n", 0),
+        ("\n", 0),
+        (". ", 1),
+        ("? ", 1),
+        ("! ", 1),
+        ("; ", 1),
+        (": ", 1),
+        (", ", 1),
+        (" ", 0),
+    ]
+
+    start = 0
+    total = len(content)
+    while start < total:
+        tentative_end = min(total, start + limit)
+        end = tentative_end
+
+        if tentative_end < total:
+            min_breakpoint = start + int((tentative_end - start) * 0.55)
+            for marker, offset in break_markers:
+                candidate = content.rfind(marker, min_breakpoint, tentative_end)
+                if candidate > start:
+                    end = candidate + offset
+                    break
+
+        if end <= start:
+            end = tentative_end
+
+        while start < end and content[start].isspace():
+            start += 1
+        while end > start and content[end - 1].isspace():
+            end -= 1
+
+        if end > start:
+            spans.append((start, end))
+
+        if end >= total:
+            break
+
+        start = end
+
+    return spans
+
+
+def _iter_paragraph_blocks(normalized: str) -> List[Dict[str, Any]]:
+    blocks: List[Dict[str, Any]] = []
+    for match in re.finditer(r"\S(?:[\s\S]*?\S)?(?=\n\s*\n|$)", normalized):
+        raw_text = match.group(0)
+        if not raw_text:
+            continue
+        text = raw_text.strip()
+        if not text:
+            continue
+        blocks.append(
+            {
+                "text": text,
+                "char_start": int(match.start()),
+                "char_end": int(match.end()),
+            }
+        )
+    return blocks
 
 
 def _build_deterministic_chunks(
@@ -102,60 +264,167 @@ def _build_deterministic_chunks(
     chunk_size = max(300, min(int(chunk_size or DEFAULT_RAG_CHUNK_SIZE), 3000))
     overlap = max(0, min(int(overlap or DEFAULT_RAG_CHUNK_OVERLAP), int(chunk_size / 2)))
 
+    paragraph_blocks = _iter_paragraph_blocks(normalized)
+    if not paragraph_blocks:
+        return []
+
+    units: List[Dict[str, Any]] = []
+    section_title = "Document"
+    section_index = 0
+    paragraph_index = 0
+    max_unit_chars = max(220, min(int(chunk_size * 0.72), 900))
+
+    for block in paragraph_blocks:
+        paragraph_text = str(block.get("text") or "").strip()
+        if not paragraph_text:
+            continue
+
+        if _looks_like_heading(paragraph_text):
+            section_index += 1
+            section_title = paragraph_text[:160]
+            continue
+
+        spans = _split_text_spans(paragraph_text, max_chars=max_unit_chars)
+        if not spans:
+            spans = [(0, len(paragraph_text))]
+
+        paragraph_start = int(block.get("char_start") or 0)
+        for unit_idx, (local_start, local_end) in enumerate(spans):
+            unit_text = paragraph_text[local_start:local_end].strip()
+            if not unit_text:
+                continue
+            units.append(
+                {
+                    "text": unit_text,
+                    "char_start": paragraph_start + local_start,
+                    "char_end": paragraph_start + local_end,
+                    "section_index": section_index,
+                    "section_title": section_title,
+                    "paragraph_index": paragraph_index,
+                    "unit_index": unit_idx,
+                }
+            )
+
+        paragraph_index += 1
+
+    if not units:
+        # If only heading-like text exists, ingest the whole document as one chunk.
+        text_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        chunk_id = hashlib.sha256(
+            f"{document_fingerprint}:0:{text_hash}".encode("utf-8")
+        ).hexdigest()[:40]
+        return [
+            {
+                "chunk_id": chunk_id,
+                "chunk_index": 0,
+                "text": normalized,
+                "text_hash": text_hash,
+                "char_start": 0,
+                "char_end": len(normalized),
+                "token_count": _approximate_token_count(normalized),
+                "metadata": {
+                    "chunking_strategy": RAG_CHUNKING_STRATEGY,
+                    "section_index": 0,
+                    "section_title": "Document",
+                    "paragraph_start_index": 0,
+                    "paragraph_end_index": 0,
+                    "paragraph_count": 1,
+                    "relative_start": 0.0,
+                    "relative_end": 1.0,
+                    "unit_count": 1,
+                },
+            }
+        ]
+
     chunks: List[Dict[str, Any]] = []
-    start = 0
+    total_chars = len(normalized)
+    cursor = 0
     index = 0
-    total = len(normalized)
-    break_markers = [
-        ("\n\n", 0),
-        ("\n", 0),
-        (". ", 1),
-        ("? ", 1),
-        ("! ", 1),
-        ("; ", 1),
-        (": ", 1),
-        (", ", 1),
-        (" ", 0),
-    ]
 
-    while start < total:
-        tentative_end = min(total, start + chunk_size)
-        end = tentative_end
+    while cursor < len(units):
+        start_cursor = cursor
+        chunk_units: List[Dict[str, Any]] = []
+        chunk_chars = 0
 
-        if tentative_end < total:
-            min_breakpoint = start + int((tentative_end - start) * 0.58)
-            for marker, offset in break_markers:
-                candidate = normalized.rfind(marker, min_breakpoint, tentative_end)
-                if candidate > start:
-                    end = candidate + offset
-                    break
+        while cursor < len(units):
+            unit = units[cursor]
+            unit_text = str(unit.get("text") or "")
+            if not unit_text:
+                cursor += 1
+                continue
 
-        if end <= start:
-            end = tentative_end
+            separator = 2 if chunk_units else 0
+            projected = chunk_chars + separator + len(unit_text)
+            if chunk_units and projected > chunk_size:
+                break
 
-        snippet = normalized[start:end].strip()
+            chunk_units.append(unit)
+            chunk_chars = projected
+            cursor += 1
+
+            if chunk_chars >= int(chunk_size * 0.88):
+                break
+
+        if not chunk_units:
+            cursor = min(len(units), cursor + 1)
+            continue
+
+        snippet = "\n\n".join(str(unit.get("text") or "").strip() for unit in chunk_units).strip()
         if snippet:
+            char_start = int(chunk_units[0].get("char_start") or 0)
+            char_end = int(chunk_units[-1].get("char_end") or char_start)
             text_hash = hashlib.sha256(snippet.encode("utf-8")).hexdigest()
             chunk_id = hashlib.sha256(
                 f"{document_fingerprint}:{index}:{text_hash}".encode("utf-8")
             ).hexdigest()[:40]
+
+            section_titles: List[str] = []
+            for unit in chunk_units:
+                title = str(unit.get("section_title") or "").strip()
+                if title and title not in section_titles:
+                    section_titles.append(title)
+
+            paragraph_ids = {
+                int(unit.get("paragraph_index") or 0)
+                for unit in chunk_units
+            }
+            metadata = {
+                "chunking_strategy": RAG_CHUNKING_STRATEGY,
+                "section_index": int(chunk_units[0].get("section_index") or 0),
+                "section_title": section_titles[0] if section_titles else "Document",
+                "section_titles": section_titles[:4],
+                "paragraph_start_index": int(chunk_units[0].get("paragraph_index") or 0),
+                "paragraph_end_index": int(chunk_units[-1].get("paragraph_index") or 0),
+                "paragraph_count": len(paragraph_ids),
+                "relative_start": round(char_start / max(1, total_chars), 4),
+                "relative_end": round(char_end / max(1, total_chars), 4),
+                "unit_count": len(chunk_units),
+            }
+
             chunks.append(
                 {
                     "chunk_id": chunk_id,
                     "chunk_index": index,
                     "text": snippet,
                     "text_hash": text_hash,
-                    "char_start": start,
-                    "char_end": end,
+                    "char_start": char_start,
+                    "char_end": char_end,
                     "token_count": _approximate_token_count(snippet),
+                    "metadata": metadata,
                 }
             )
             index += 1
 
-        if end >= total:
+        if cursor >= len(units):
             break
 
-        start = min(max(end - overlap, start + 1), total)
+        if overlap > 0:
+            overlap_chars = 0
+            rewind = cursor
+            while rewind > start_cursor and overlap_chars < overlap:
+                rewind -= 1
+                overlap_chars += len(str(units[rewind].get("text") or "")) + 2
+            cursor = max(start_cursor + 1, rewind)
 
     return chunks
 
@@ -646,7 +915,19 @@ def rag_process_document(
         token_count = int(chunk.get("token_count") or _approximate_token_count(text))
         total_tokens += token_count
 
-        vector = _hash_embedding(text, dim=embedding_dim)
+        raw_metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+        section_title = str(raw_metadata.get("section_title") or "").strip()
+        embedding_input = text
+        if section_title and section_title.lower() not in text.lower():
+            embedding_input = f"{section_title}\n{text}"
+
+        vector = _hash_embedding(embedding_input, dim=embedding_dim)
+        chunk_metadata = {
+            **raw_metadata,
+            "source": "hf_rag_processor",
+            "chunking_strategy": raw_metadata.get("chunking_strategy") or RAG_CHUNKING_STRATEGY,
+        }
+
         chunks.append(
             {
                 "chunk_id": str(chunk.get("chunk_id") or ""),
@@ -659,17 +940,17 @@ def rag_process_document(
                 "embedding_vector": vector,
                 "embedding_dim": len(vector),
                 "embedding_provider": "hash-local",
-                "embedding_model": "hash-v1",
+                "embedding_model": RAG_EMBEDDING_MODEL,
                 "embedding_status": "embedded",
-                "metadata": {
-                    "source": "hf_rag_processor",
-                },
+                "metadata": chunk_metadata,
             }
         )
 
     return {
         "status": "ok",
         "source": "hf_rag_processor",
+        "chunking_strategy": RAG_CHUNKING_STRATEGY,
+        "embedding_model": RAG_EMBEDDING_MODEL,
         "chunk_count": len(chunks),
         "token_count": int(total_tokens),
         "vector_store_requested": vector_store_requested,
