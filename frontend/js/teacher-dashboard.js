@@ -102,22 +102,11 @@ function getSession() {
 }
 
 function normalizeSchoolSlug(slug) {
-  const normalized = String(slug || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9\s_-]/g, '')
-    .replace(/[\s_]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '');
-  return normalized || null;
+  return null;
 }
 
 function getCurrentPathSlug() {
-  const parts = String(window.location.pathname || '').split('/').filter(Boolean);
-  if (parts.length < 1) return null;
-  const first = parts[0] || '';
-  if (!first || first.includes('.') || first.toLowerCase() === 'api') return null;
-  return normalizeSchoolSlug(first);
+  return null;
 }
 
 function roleHomePath(role, schoolSlug = null) {
@@ -127,9 +116,7 @@ function roleHomePath(role, schoolSlug = null) {
     : normalizedRole === 'admin'
       ? 'admin.html'
       : 'dashboard.html';
-  const slug = normalizeSchoolSlug(schoolSlug) || getCurrentPathSlug();
-  if (!slug) return page;
-  return `/${slug}/${page}`;
+  return page;
 }
 
 function ensureTeacherSession() {

@@ -309,17 +309,8 @@ def create_app(config_name: str | None = None) -> Flask:
 
     def _slug_hint_response(slug: str):
         response = redirect('/index.html', code=302)
-        normalized = ''.join(ch for ch in str(slug or '').strip().lower() if ch.isalnum() or ch in ('-', '_', ' '))
-        normalized = '-'.join(part for part in normalized.replace('_', ' ').split() if part)
-        if normalized:
-            response.set_cookie(
-                SCHOOL_SLUG_HINT_COOKIE,
-                normalized,
-                max_age=60 * 60,
-                secure=False,
-                httponly=False,
-                samesite='Lax',
-            )
+        # Keep auth entry canonical and do not persist slug hints.
+        response.delete_cookie(SCHOOL_SLUG_HINT_COOKIE)
         return response
 
     @app.get('/')
@@ -362,9 +353,15 @@ def create_app(config_name: str | None = None) -> Flask:
         if str(slug).lower() == 'api' or str(filename).startswith('api/'):
             return not_found(None)
 
+        normalized_filename = str(filename).strip('/')
+
         if str(filename).strip('/').lower() == 'index.html':
             # Canonicalize auth page to non-slug URL.
             return _slug_hint_response(str(slug).strip('/'))
+
+        if normalized_filename.lower().endswith('.html'):
+            # Keep frontend routes canonical without slug prefixes.
+            return redirect(f'/{normalized_filename}', code=302)
 
         # Avoid collisions with real static asset folders (e.g. /css/styles.css, /js/main.js)
         # that would otherwise be misread as /<slug>/<file> routes.

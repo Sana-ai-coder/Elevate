@@ -1,10 +1,8 @@
 from flask import Blueprint, current_app, jsonify, request, g
 from datetime import datetime, timedelta, timezone
-import re
 import secrets
-from sqlalchemy import func
 
-from ..models import School, User, db
+from ..models import User, db
 from ..security import create_access_token, hash_password, verify_password, require_auth
 from ..validation import (
     validate_email, validate_password, validate_name, validate_grade,
@@ -20,35 +18,12 @@ def _utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _normalize_school_slug(raw_slug: str) -> str | None:
-    slug = sanitize_string(raw_slug or "", max_length=128).lower()
-    slug = re.sub(r"[^a-z0-9\s_-]", "", slug)
-    slug = re.sub(r"[\s_]+", "-", slug).strip("-")
-    return slug or None
-
-
-def _find_school_by_name_or_slug(*, school_name: str, school_slug: str | None) -> School | None:
-    if school_slug:
-        by_slug = School.query.filter(func.lower(School.slug) == school_slug.lower()).first()
-        if by_slug:
-            return by_slug
-
-    return School.query.filter(func.lower(School.name) == school_name.lower()).first()
-
-
-def _auth_user_payload(user: User, route_slug_hint: str | None = None) -> dict:
+def _auth_user_payload(user: User) -> dict:
     school = user.school if getattr(user, "school_id", None) else None
 
-    school_slug = None
     school_name = None
     if school:
         school_name = school.name
-        school_slug = _normalize_school_slug(school.slug or school.name)
-        if not school_slug and getattr(school, "id", None):
-            school_slug = f"school-{school.id}"
-
-    if not school_slug:
-        school_slug = _normalize_school_slug(route_slug_hint or "")
 
     return {
         "id": user.id,
@@ -58,7 +33,7 @@ def _auth_user_payload(user: User, route_slug_hint: str | None = None) -> dict:
         "role": user.role,
         "is_verified": user.is_verified,
         "school_id": user.school_id,
-        "school_slug": school_slug,
+        "school_slug": None,
         "school_name": school_name,
     }
 
@@ -78,18 +53,8 @@ def signup():
     if role not in ("student", "teacher", "admin"):
         return jsonify({"error": "Invalid role. Must be 'student', 'teacher', or 'admin'"}), 400
 
-    school_name = sanitize_string(data.get("school_name", ""), max_length=255)
-    school_slug = _normalize_school_slug(data.get("school_slug", ""))
-    route_slug_hint = _normalize_school_slug(
-        school_slug or data.get("school_slug") or request.cookies.get(SCHOOL_SLUG_HINT_COOKIE) or ""
-    )
-
     if role == "admin":
         grade = None
-        if not school_name:
-            return jsonify({"error": "School name is required for admin sign-up"}), 400
-        if not school_slug:
-            return jsonify({"error": "School slug is required for admin sign-up"}), 400
 
     if not validate_name(name):
         return jsonify({"error": "Invalid name format. Must be 2-100 characters with letters only"}), 400
@@ -103,34 +68,20 @@ def signup():
     if User.query.filter_by(email=email).first():
         return jsonify({"error": "Email already registered"}), 409
     try:
-        linked_school = None
-        if role == "admin":
-            linked_school = _find_school_by_name_or_slug(school_name=school_name, school_slug=school_slug)
-            if linked_school and linked_school.slug and linked_school.slug.lower() != school_slug.lower():
-                return jsonify({"error": "School slug conflicts with an existing school record"}), 409
-
-            if linked_school and not linked_school.slug:
-                linked_school.slug = school_slug
-
-            if linked_school is None:
-                linked_school = School(name=school_name, slug=school_slug)
-                db.session.add(linked_school)
-                db.session.flush()
-
         user = User(
             name=name,
             email=email,
             password_hash=hash_password(password),
             grade=grade,
             role=role,
-            school_id=linked_school.id if linked_school else None,
+            school_id=None,
             is_verified=False,
         )
         db.session.add(user)
         db.session.commit()
         current_app.logger.info(f"New user registered: {email} as {role}")
         token = create_access_token(user)
-        return jsonify({"token": token, "user": _auth_user_payload(user, route_slug_hint=route_slug_hint)}), 201
+        return jsonify({"token": token, "user": _auth_user_payload(user)}), 201
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(f"Signup error: {str(e)}")
@@ -154,12 +105,8 @@ def login():
         return jsonify({"error": "Invalid email or password"}), 401
     current_app.logger.info(f"User logged in: {email}")
 
-    route_slug_hint = _normalize_school_slug(
-        data.get("school_slug") or request.cookies.get(SCHOOL_SLUG_HINT_COOKIE) or ""
-    )
-
     token = create_access_token(user)
-    return jsonify({"token": token, "user": _auth_user_payload(user, route_slug_hint=route_slug_hint)})
+    return jsonify({"token": token, "user": _auth_user_payload(user)})
 
 
 @auth_bp.get("/me")
@@ -167,8 +114,7 @@ def login():
 def me():
     """Get current user information from JWT token."""
     user = g.current_user
-    route_slug_hint = _normalize_school_slug(request.cookies.get(SCHOOL_SLUG_HINT_COOKIE) or "")
-    payload = _auth_user_payload(user, route_slug_hint=route_slug_hint)
+    payload = _auth_user_payload(user)
     payload["created_at"] = user.created_at.isoformat() if user.created_at else None
     return jsonify({"user": payload}), 200
 

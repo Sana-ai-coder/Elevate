@@ -26,7 +26,6 @@ from ..models import (
     Classroom,
     ClassroomStudent,
     TestAssignment,
-    School,
     db,
 )
 from ..security import require_auth, role_required
@@ -70,6 +69,7 @@ teacher_bp = Blueprint("teacher", __name__)
 VALID_DIFFICULTIES = {"easy", "medium", "hard"}
 VALID_GRADES = {"elementary", "middle", "high", "college"}
 INTERVENTION_STATUSES = {"planned", "in_progress", "monitoring", "completed", "cancelled"}
+UNASSIGNED_TEACHER_SCHOOL_ERROR = "Teacher is not assigned to a school yet. Ask an admin to assign school access."
 
 
 def _utcnow():
@@ -601,9 +601,13 @@ def _teacher_student_filter(teacher, grade=None):
     # Only apply grade filtering when explicitly requested by caller.
     # Default behavior should expose all students in the teacher's school scope.
     effective_grade = sanitize_string(grade, max_length=32) if grade else None
+    teacher_school_id = _ensure_teacher_school(teacher)
+    if not teacher_school_id:
+        return User.query.filter(User.id == -1), effective_grade
+
     query = User.query.filter(
         User.role == "student",
-        User.school_id == teacher.school_id,
+        User.school_id == teacher_school_id,
     )
     if effective_grade:
         query = query.filter(User.grade == effective_grade)
@@ -611,7 +615,7 @@ def _teacher_student_filter(teacher, grade=None):
 
 
 def _ensure_teacher_school(teacher):
-    """Guarantee teacher has a school_id for classroom-scoped flows."""
+    """Return assigned teacher school_id without creating or attaching schools."""
     bound_teacher = User.query.filter_by(id=teacher.id).first()
     if not bound_teacher:
         return None
@@ -621,20 +625,7 @@ def _ensure_teacher_school(teacher):
             teacher.school_id = bound_teacher.school_id
         return bound_teacher.school_id
 
-    slug = f"teacher-{teacher.id}-school"
-    school = School.query.filter_by(slug=slug).first()
-    if not school:
-        school = School(
-            name=f"Teacher {teacher.id} Workspace",
-            slug=slug,
-        )
-        db.session.add(school)
-        db.session.flush()
-
-    bound_teacher.school_id = school.id
-    teacher.school_id = school.id
-    db.session.flush()
-    return school.id
+    return None
 
 
 def _normalize_grade_for_generation(value, fallback="high"):
@@ -742,7 +733,7 @@ def _build_generated_intervention_test(
 ):
     school_id = _ensure_teacher_school(teacher)
     if not school_id:
-        raise ValueError("Unable to resolve teacher school context")
+        raise ValueError(UNASSIGNED_TEACHER_SCHOOL_ERROR)
 
     resolved_grade = _normalize_grade_for_generation(grade, teacher.grade or "high")
     resolved_subject = sanitize_string(subject or "science", max_length=64)
@@ -1478,7 +1469,7 @@ def upload_teacher_document():
 
     school_id = _ensure_teacher_school(teacher)
     if not school_id:
-        return jsonify({"error": "Unable to resolve teacher school context"}), 500
+        return jsonify({"error": UNASSIGNED_TEACHER_SCHOOL_ERROR}), 403
 
     temp_storage_path = _teacher_document_storage_path(teacher.id, original_filename)
     storage_resolution = resolve_document_storage_backend(request.form.get("document_storage"))
@@ -2068,7 +2059,7 @@ def create_test():
 
     school_id = _ensure_teacher_school(teacher)
     if not school_id:
-        return jsonify({"error": "Unable to resolve teacher school context"}), 500
+        return jsonify({"error": UNASSIGNED_TEACHER_SCHOOL_ERROR}), 403
 
     if generation_mode == "rag":
         processed_docs_query = TeacherDocument.query.filter(
@@ -2492,7 +2483,7 @@ def create_classroom():
 
     school_id = _ensure_teacher_school(teacher)
     if not school_id:
-        return jsonify({"error": "Unable to resolve teacher school context"}), 500
+        return jsonify({"error": UNASSIGNED_TEACHER_SCHOOL_ERROR}), 403
 
     classroom = Classroom(
         name=name,
@@ -2506,23 +2497,15 @@ def create_classroom():
     try:
         db.session.flush()
 
-        # Professional default workflow support:
-        # when enabled, enroll all same-grade students in teacher school,
-        # and claim unassigned same-grade students into teacher school for onboarding.
+        # Enroll only students already assigned to the teacher's school.
         if auto_enroll_students and grade:
             candidates = User.query.filter(
                 User.role == "student",
                 User.grade == grade,
-                or_(
-                    User.school_id == school_id,
-                    User.school_id.is_(None),
-                ),
+                User.school_id == school_id,
             ).all()
 
             for student in candidates:
-                if student.school_id is None:
-                    student.school_id = school_id
-
                 membership = ClassroomStudent.query.filter_by(classroom_id=classroom.id, student_id=student.id).first()
                 if membership:
                     if not membership.is_active:
@@ -2560,22 +2543,16 @@ def enroll_classroom_by_grade(classroom_id):
 
     school_id = _ensure_teacher_school(teacher)
     if not school_id:
-        return jsonify({"error": "Unable to resolve teacher school context"}), 500
+        return jsonify({"error": UNASSIGNED_TEACHER_SCHOOL_ERROR}), 403
 
     enrolled_count = 0
     candidates = User.query.filter(
         User.role == "student",
         User.grade == classroom.grade,
-        or_(
-            User.school_id == school_id,
-            User.school_id.is_(None),
-        ),
+        User.school_id == school_id,
     ).all()
 
     for student in candidates:
-        if student.school_id is None:
-            student.school_id = school_id
-
         membership = ClassroomStudent.query.filter_by(classroom_id=classroom.id, student_id=student.id).first()
         if membership:
             if not membership.is_active:
@@ -2609,12 +2586,16 @@ def add_student_to_classroom(classroom_id):
     if error_response:
         return error_response
 
+    school_id = _ensure_teacher_school(teacher)
+    if not school_id:
+        return jsonify({"error": UNASSIGNED_TEACHER_SCHOOL_ERROR}), 403
+
     data = request.get_json(silent=True) or {}
     student_id = data.get("student_id")
     if not student_id:
         return jsonify({"error": "student_id is required"}), 400
 
-    student = User.query.filter_by(id=student_id, role="student", school_id=teacher.school_id).first()
+    student = User.query.filter_by(id=student_id, role="student", school_id=school_id).first()
     if not student:
         return jsonify({"error": "Student not found in your school"}), 404
 
@@ -2723,6 +2704,10 @@ def create_assignment():
     if not test:
         return jsonify({"error": "Test not found"}), 404
 
+    school_id = _ensure_teacher_school(teacher)
+    if not school_id:
+        return jsonify({"error": UNASSIGNED_TEACHER_SCHOOL_ERROR}), 403
+
     if not test.is_published:
         return jsonify({"error": "Publish the test before assigning"}), 400
 
@@ -2749,7 +2734,7 @@ def create_assignment():
         created.append(assignment)
 
     if student_id:
-        student = User.query.filter_by(id=student_id, role='student', school_id=teacher.school_id).first()
+        student = User.query.filter_by(id=student_id, role='student', school_id=school_id).first()
         if not student:
             return jsonify({"error": "Student not found in your school"}), 404
 
@@ -3279,6 +3264,10 @@ def create_intervention():
     teacher = g.current_user
     data = request.get_json(silent=True) or {}
 
+    teacher_school_id = _ensure_teacher_school(teacher)
+    if not teacher_school_id:
+        return jsonify({"error": UNASSIGNED_TEACHER_SCHOOL_ERROR}), 403
+
     title = sanitize_string(data.get("title") or "", max_length=255)
     if not title:
         return jsonify({"error": "title is required"}), 400
@@ -3305,7 +3294,7 @@ def create_intervention():
 
     allowed_student_ids = {
         int(row.id)
-        for row in User.query.filter_by(role="student", school_id=teacher.school_id).all()
+        for row in User.query.filter_by(role="student", school_id=teacher_school_id).all()
     }
     student_ids = []
     if isinstance(data.get("student_ids"), list):
@@ -3363,6 +3352,10 @@ def update_intervention(intervention_id):
     if not intervention:
         return jsonify({"error": "Intervention not found"}), 404
 
+    teacher_school_id = _ensure_teacher_school(teacher)
+    if not teacher_school_id:
+        return jsonify({"error": UNASSIGNED_TEACHER_SCHOOL_ERROR}), 403
+
     data = request.get_json(silent=True) or {}
 
     if "title" in data:
@@ -3395,7 +3388,7 @@ def update_intervention(intervention_id):
     if "student_ids" in data and isinstance(data.get("student_ids"), list):
         allowed_student_ids = {
             int(row.id)
-            for row in User.query.filter_by(role="student", school_id=teacher.school_id).all()
+            for row in User.query.filter_by(role="student", school_id=teacher_school_id).all()
         }
         filtered_ids = []
         for raw_id in data.get("student_ids"):

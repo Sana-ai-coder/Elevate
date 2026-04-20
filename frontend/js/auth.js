@@ -30,12 +30,8 @@ function readCookie(name) {
 }
 
 function rememberSchoolSlugHint(slug) {
-  const normalized = normalizeSchoolSlug(slug);
-  if (!normalized) return null;
-
-  sessionStorage.setItem(SCHOOL_SLUG_HINT_KEY, normalized);
-  document.cookie = `${SCHOOL_SLUG_HINT_COOKIE}=${encodeURIComponent(normalized)}; path=/; max-age=3600; samesite=lax`;
-  return normalized;
+  // Slug hints are intentionally disabled in favor of admin-managed school assignment.
+  return null;
 }
 
 function clearSchoolSlugHint() {
@@ -45,15 +41,7 @@ function clearSchoolSlugHint() {
 }
 
 function getSchoolSlugHint() {
-  const fromSession = normalizeSchoolSlug(sessionStorage.getItem(SCHOOL_SLUG_HINT_KEY));
-  if (fromSession) return fromSession;
-
-  const fromCookie = normalizeSchoolSlug(readCookie(SCHOOL_SLUG_HINT_COOKIE));
-  if (fromCookie) {
-    rememberSchoolSlugHint(fromCookie);
-    return fromCookie;
-  }
-
+  // School slug routing is disabled for auth requests.
   return null;
 }
 
@@ -123,7 +111,7 @@ export const auth = {
         return { success: false, error: 'Please enter both email and password' };
       }
 
-      const result = await api.auth.login(email, password, getSchoolSlugHint());
+      const result = await api.auth.login(email, password, null);
       console.log('Login result:', { hasUser: !!result.user, hasToken: !!result.token, rememberMe });
       this.saveSession(result.user, result.token, rememberMe);
       return { success: true };
@@ -161,10 +149,6 @@ export const auth = {
 
       if (payload.role === 'admin' && !payload.school_name) {
         return { success: false, error: 'School name is required for admin account setup' };
-      }
-
-      if (payload.role === 'admin' && !payload.school_slug) {
-        return { success: false, error: 'School slug is required for admin account setup' };
       }
 
       // Basic client-side validation

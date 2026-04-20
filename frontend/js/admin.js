@@ -24,12 +24,7 @@ function roleHomePage(role) {
       ? 'admin.html'
       : 'dashboard.html';
 
-  const session = loadAuthSession();
-  const pathParts = String(window.location.pathname || '').split('/').filter(Boolean);
-  const pathSlug = pathParts.length > 0 && !String(pathParts[0]).includes('.') ? String(pathParts[0]).trim().toLowerCase() : '';
-  const slug = String(session?.user?.school_slug || pathSlug || '').trim().toLowerCase();
-  if (!slug) return page;
-  return `/${slug}/${page}`;
+  return page;
 }
 
 function enforceAdminSessionGuard() {

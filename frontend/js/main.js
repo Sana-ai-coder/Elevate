@@ -52,31 +52,17 @@ function readCookie(name) {
 }
 
 function rememberSchoolSlugHint(slug) {
-  const normalized = normalizeSchoolSlug(slug);
-  if (!normalized) return null;
-  sessionStorage.setItem(SCHOOL_SLUG_HINT_KEY, normalized);
-  return normalized;
+  // Slug hinting is intentionally disabled.
+  return null;
 }
 
 function getStoredSchoolSlugHint() {
-  const fromSession = normalizeSchoolSlug(sessionStorage.getItem(SCHOOL_SLUG_HINT_KEY));
-  if (fromSession) return fromSession;
-
-  const fromCookie = normalizeSchoolSlug(readCookie(SCHOOL_SLUG_HINT_COOKIE));
-  if (fromCookie) {
-    rememberSchoolSlugHint(fromCookie);
-    return fromCookie;
-  }
-
+  // Slug hinting is intentionally disabled.
   return null;
 }
 
 function getCurrentPathSlug() {
-  const parts = String(window.location.pathname || '').split('/').filter(Boolean);
-  if (parts.length < 1) return null;
-  const first = parts[0] || '';
-  if (!first || first.includes('.') || first.toLowerCase() === 'api') return null;
-  return normalizeSchoolSlug(first);
+  return null;
 }
 
 function getRoleHomePage(role, schoolSlug = null) {
@@ -87,18 +73,12 @@ function getRoleHomePage(role, schoolSlug = null) {
       ? 'admin.html'
       : 'dashboard.html';
 
-  const scopedSlug = normalizeSchoolSlug(schoolSlug) || getStoredSchoolSlugHint() || getCurrentPathSlug();
-  if (!scopedSlug) return page;
-  rememberSchoolSlugHint(scopedSlug);
-  return `/${scopedSlug}/${page}`;
+  return page;
 }
 
 function getScopedPagePath(pageFile) {
   const normalizedFile = String(pageFile || '').replace(/^\/+/, '');
-  const slug = getCurrentPathSlug() || getStoredSchoolSlugHint();
-  if (!slug) return `/${normalizedFile}`;
-  rememberSchoolSlugHint(slug);
-  return `/${slug}/${normalizedFile}`;
+  return `/${normalizedFile}`;
 }
 
 async function withTimeout(promise, timeoutMs, timeoutLabel = 'Operation timed out') {
@@ -508,9 +488,11 @@ function initAuthPage() {
     }
 
     if (signupSchoolSlugInput) {
-      signupSchoolSlugInput.disabled = !isAdmin;
-      signupSchoolSlugInput.required = isAdmin;
-      if (!isAdmin) signupSchoolSlugInput.value = '';
+      signupSchoolSlugInput.disabled = true;
+      signupSchoolSlugInput.required = false;
+      signupSchoolSlugInput.value = '';
+      const slugFieldWrap = signupSchoolSlugInput.closest('.mb-3');
+      if (slugFieldWrap) slugFieldWrap.style.display = 'none';
     }
 
     if (signupRoleHint) {
@@ -653,7 +635,6 @@ function initAuthPage() {
       const role = getSelectedRole('signupRoleSelector');
       const grade = role === 'admin' ? null : (document.getElementById('signupGrade').value || null);
       const schoolName = role === 'admin' ? (document.getElementById('signupSchoolName')?.value?.trim() || '') : '';
-      const schoolSlug = role === 'admin' ? (document.getElementById('signupSchoolSlug')?.value?.trim() || '') : '';
 
       if (role !== 'admin' && !grade) {
         showAuthAlert('signupAlert', 'Please select a grade level to continue.', 'warning');
@@ -662,11 +643,6 @@ function initAuthPage() {
 
       if (role === 'admin' && !schoolName) {
         showAuthAlert('signupAlert', 'Please enter a school name for the admin workspace.', 'warning');
-        return;
-      }
-
-      if (role === 'admin' && !schoolSlug) {
-        showAuthAlert('signupAlert', 'Please enter a school slug for URL routing.', 'warning');
         return;
       }
 
@@ -686,7 +662,6 @@ function initAuthPage() {
       if (grade) signupPayload.grade = grade;
       if (role === 'admin') {
         signupPayload.school_name = schoolName;
-        signupPayload.school_slug = schoolSlug;
       }
       
       const result = await auth.signup(signupPayload);
@@ -695,7 +670,7 @@ function initAuthPage() {
         showAuthAlert('signupAlert', utils.getMessage('auth.signup_success'), 'success');
         const session = auth.loadSession();
         const savedRole = normalizeUserRole((session && session.user ? session.user.role : null) || role);
-        const dest = getRoleHomePage(savedRole, session?.user?.school_slug || schoolSlug);
+        const dest = getRoleHomePage(savedRole, session?.user?.school_slug);
         setTimeout(() => utils.navigateTo(dest, true), 1200);
       } else {
         console.error('Signup error:', result.error);
