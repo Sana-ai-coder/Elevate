@@ -33,15 +33,6 @@
         <i class="fas fa-users nav-icon"></i>
         <span>Users</span>
       </a>
-      <a href="#" class="nav-item" data-panel="schools" id="nav-schools">
-        <i class="fas fa-school nav-icon"></i>
-        <span>Schools</span>
-      </a>
-      <a href="#" class="nav-item" data-panel="teacher-requests" id="nav-teacher-requests">
-        <i class="fas fa-user-plus nav-icon"></i>
-        <span>Teacher Requests</span>
-        <span class="nav-badge" id="pendingRequestsBadge" style="display:none">0</span>
-      </a>
       <a href="#" class="nav-item" data-panel="test-results" id="nav-test-results">
         <i class="fas fa-file-alt nav-icon"></i>
         <span>Test Results</span>
@@ -211,89 +202,65 @@
     </section>
 
     <!-- ============ PANEL: USERS ============ -->
-    <section class="admin-panel" id="panel-users">
+    <section id="panel-users" class="admin-panel hidden">
       <div class="panel-header">
-        <h2 class="panel-title">User Management</h2>
+        <h2>User Management</h2>
       </div>
 
-      <div class="filter-bar card">
-        <div class="filter-row">
-          <input class="filter-input" id="userSearch" placeholder="Search name or email…" />
-          <select class="filter-select" id="userRoleFilter">
+      <div class="card mb-4">
+        <div class="card-header">
+          <h3>My Admin Profile</h3>
+        </div>
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Email</th>
+              <th>Role</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="adminProfileBody">
+            </tbody>
+        </table>
+      </div>
+
+      <div class="panel-toolbar card">
+        <div class="toolbar-left">
+          <div class="search-box">
+            <i class="fas fa-search"></i>
+            <input type="text" id="userSearch" placeholder="Search by name or email..." />
+          </div>
+        </div>
+        <div class="toolbar-right">
+          <select id="userRoleFilter" class="filter-select">
             <option value="">All Roles</option>
-            <option value="student">Student</option>
-            <option value="teacher">Teacher</option>
-            <option value="admin">Admin</option>
+            <option value="teacher">Teachers</option>
+            <option value="student">Students</option>
           </select>
-          <select class="filter-select" id="userStatusFilter">
-            <option value="">All Status</option>
-            <option value="active">Active</option>
-            <option value="disabled">Disabled</option>
-          </select>
-          <select class="filter-select" id="userSchoolFilter">
-            <option value="">All Schools</option>
-          </select>
-          <button class="btn btn-primary" id="usersSearchBtn">
-            <i class="fas fa-search"></i> Search
-          </button>
         </div>
       </div>
 
       <div class="card table-card">
+        <div class="card-header">
+          <h3>Teachers & Students</h3>
+        </div>
         <table class="admin-table" id="usersTable">
           <thead>
             <tr>
-              <th>ID</th>
-              <th>Name</th>
-              <th>Email</th>
+              <th>User</th>
               <th>Role</th>
+              <th>Grade</th>
               <th>School</th>
               <th>Status</th>
-              <th>Joined</th>
-              <th>Actions</th>
+              <th class="text-right">Actions</th>
             </tr>
           </thead>
           <tbody id="usersTableBody">
-            <tr><td colspan="8" class="table-empty">Loading users...</td></tr>
+            <tr><td colspan="6" class="table-empty"><div class="spinner"></div> Loading users...</td></tr>
           </tbody>
         </table>
         <div class="pagination-bar" id="usersPagination"></div>
-      </div>
-
-      <!-- User edit modal -->
-      <div class="modal-overlay hidden" id="userModal">
-        <div class="modal-box">
-          <div class="modal-header">
-            <h3 id="userModalTitle">Edit User</h3>
-            <button class="modal-close" id="userModalClose"><i class="fas fa-times"></i></button>
-          </div>
-          <div class="modal-body">
-            <div class="form-group">
-              <label>Role</label>
-              <select id="editUserRole" class="filter-select w-full">
-                <option value="student">Student</option>
-                <option value="teacher">Teacher</option>
-                <option value="admin">Admin</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label>School</label>
-              <select id="editUserSchool" class="filter-select w-full">
-                <option value="">— No School —</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label>Disable Reason (if disabling)</label>
-              <input id="editUserDisableReason" class="filter-input w-full" placeholder="Reason…" />
-            </div>
-          </div>
-          <div class="modal-footer">
-            <button class="btn btn-secondary" id="userModalCancel">Cancel</button>
-            <button class="btn btn-danger" id="userModalToggleDisable">Disable</button>
-            <button class="btn btn-primary" id="userModalSave">Save Changes</button>
-          </div>
-          <div class="modal-feedback" id="userModalFeedback"></div>
-        </div>
       </div>
     </section>
 

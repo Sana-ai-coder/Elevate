@@ -223,48 +223,85 @@ let allSchools = [];
 
 async function loadUsers(page = 1) {
   usersPage = page;
-  const search = document.getElementById('userSearch').value.trim();
-  const role = document.getElementById('userRoleFilter').value;
-  const status = document.getElementById('userStatusFilter').value;
-  const school_id = document.getElementById('userSchoolFilter').value;
+  const search = document.getElementById('userSearch')?.value.trim() || '';
+  const role = document.getElementById('userRoleFilter')?.value || '';
   const tbody = document.getElementById('usersTableBody');
-  tbody.innerHTML = `<tr><td colspan="8" class="table-empty"><div class="spinner"></div></td></tr>`;
+  const adminBody = document.getElementById('adminProfileBody');
+  const currentUser = loadSession().user;
+
+  if (tbody) tbody.innerHTML = `<tr><td colspan="6" class="table-empty"><div class="spinner"></div></td></tr>`;
+
+  // 1. Render Admin Profile Top Section
+  if (adminBody && currentUser) {
+      adminBody.innerHTML = `
+          <tr>
+              <td>
+                  <div class="user-cell" style="display:flex;align-items:center;gap:12px;">
+                      <div class="user-avatar" style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg, #6366f1, #8b5cf6);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:bold;">${(currentUser.name || 'A').charAt(0).toUpperCase()}</div>
+                      <div class="user-details" style="display:flex;flex-direction:column;">
+                          <span class="user-name" style="font-weight:600;">${esc(currentUser.name)}</span>
+                      </div>
+                  </div>
+              </td>
+              <td style="color:#94a3b8">${esc(currentUser.email)}</td>
+              <td><span class="badge badge-purple">Admin</span></td>
+              <td><span class="badge badge-success">Active</span></td>
+          </tr>
+      `;
+  }
 
   try {
-    const data = await api.admin.listUsers({ page, per_page: usersPerPage, search, role, status, school_id });
+    // Fetch users (ignoring the old status/school filters from the UI since we removed them)
+    const data = await api.admin.listUsers({ page, per_page: usersPerPage, search, role });
     const items = data.items || [];
+
     if (!items.length) {
-      tbody.innerHTML = `<tr><td colspan="8" class="table-empty">No users found.</td></tr>`;
+      if (tbody) tbody.innerHTML = `<tr><td colspan="6" class="table-empty">No users found.</td></tr>`;
     } else {
-      tbody.innerHTML = items.map(u => {
-        const roleBadge = u.role === 'admin' ? 'badge-purple' : u.role === 'teacher' ? 'badge-teal' : 'badge-blue';
-        const statusBadge = u.is_disabled ? '<span class="badge badge-red">Disabled</span>' : '<span class="badge badge-green">Active</span>';
-        const school = allSchools.find(s => s.id === u.school_id);
-        return `<tr>
-          <td>${u.id}</td>
-          <td><strong>${esc(u.name)}</strong></td>
-          <td style="color:#94a3b8">${esc(u.email)}</td>
-          <td><span class="badge ${roleBadge}">${u.role}</span></td>
-          <td>${school ? esc(school.name) : u.school_id ? `ID:${u.school_id}` : '—'}</td>
-          <td>${statusBadge}</td>
-          <td style="color:#6b7280;font-size:0.78rem">${u.created_at ? new Date(u.created_at).toLocaleDateString() : '—'}</td>
-          <td>
-            <button class="action-btn action-btn-primary edit-user-btn" data-id="${u.id}">Edit</button>
-            ${u.is_disabled
-              ? `<button class="action-btn action-btn-success enable-user-btn" data-id="${u.id}">Enable</button>`
-              : `<button class="action-btn action-btn-danger disable-user-btn" data-id="${u.id}">Disable</button>`}
-          </td>
-        </tr>`;
-      }).join('');
-      // Bind events
-      tbody.querySelectorAll('.edit-user-btn').forEach(btn => btn.addEventListener('click', () => openUserEditModal(parseInt(btn.dataset.id), items)));
-      tbody.querySelectorAll('.disable-user-btn').forEach(btn => btn.addEventListener('click', () => quickDisableUser(parseInt(btn.dataset.id))));
-      tbody.querySelectorAll('.enable-user-btn').forEach(btn => btn.addEventListener('click', () => quickEnableUser(parseInt(btn.dataset.id))));
+      // 2. Filter out admins from the main list
+      const editableUsers = items.filter(u => u.role !== 'admin');
+
+      if (!editableUsers.length && tbody) {
+           tbody.innerHTML = `<tr><td colspan="6" class="table-empty">No teachers or students found.</td></tr>`;
+      } else if (tbody) {
+          tbody.innerHTML = editableUsers.map(u => {
+            const roleBadge = u.role === 'teacher' ? 'badge-teal' : 'badge-blue';
+            const statusBadge = u.is_disabled ? '<span class="badge badge-red">Disabled</span>' : '<span class="badge badge-green">Active</span>';
+            const school = allSchools.find(s => s.id === u.school_id);
+
+            return `<tr>
+              <td>
+                <div class="user-cell" style="display:flex;align-items:center;gap:12px;">
+                    <div class="user-avatar" style="width:32px;height:32px;border-radius:50%;background:#3b82f6;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:bold;">${(u.name || '?').charAt(0).toUpperCase()}</div>
+                    <div class="user-details" style="display:flex;flex-direction:column;">
+                        <span class="user-name" style="font-weight:600;color:#e2e8f0">${esc(u.name)}</span>
+                        <span class="user-email" style="font-size:0.75rem;color:#94a3b8;">${esc(u.email)}</span>
+                    </div>
+                </div>
+              </td>
+              <td><span class="badge ${roleBadge}">${u.role}</span></td>
+              <td>${esc(u.grade || '—')}</td>
+              <td>${school ? esc(school.name) : '<span style="color:#6b7280">Unassigned</span>'}</td>
+              <td>${statusBadge}</td>
+              <td class="text-right" style="white-space:nowrap;">
+                <button class="action-btn action-btn-primary edit-user-btn" data-id="${u.id}">Edit</button>
+                ${u.is_disabled
+                  ? `<button class="action-btn action-btn-success enable-user-btn" data-id="${u.id}">Enable</button>`
+                  : `<button class="action-btn action-btn-danger disable-user-btn" data-id="${u.id}">Disable</button>`}
+              </td>
+            </tr>`;
+          }).join('');
+
+          // Bind events
+          tbody.querySelectorAll('.edit-user-btn').forEach(btn => btn.addEventListener('click', () => openUserEditModal(parseInt(btn.dataset.id), editableUsers)));
+          tbody.querySelectorAll('.disable-user-btn').forEach(btn => btn.addEventListener('click', () => quickDisableUser(parseInt(btn.dataset.id))));
+          tbody.querySelectorAll('.enable-user-btn').forEach(btn => btn.addEventListener('click', () => quickEnableUser(parseInt(btn.dataset.id))));
+      }
     }
     const totalPages = Math.ceil((data.total || 0) / usersPerPage);
     renderPagination(document.getElementById('usersPagination'), page, totalPages, loadUsers);
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="8" class="table-empty">Error: ${esc(err.message)}</td></tr>`;
+    if (tbody) tbody.innerHTML = `<tr><td colspan="6" class="table-empty">Error: ${esc(err.message)}</td></tr>`;
   }
 }
 
@@ -612,19 +649,24 @@ const resPerPage = 12;
 
 async function loadTestResults(page = 1) {
   resPage = page;
-  const minScoreValue = parseFloat(document.getElementById('resultsMinScore').value);
-  const maxScoreValue = parseFloat(document.getElementById('resultsMaxScore').value);
+  const minScoreValue = parseFloat(document.getElementById('resultsMinScore')?.value);
+  const maxScoreValue = parseFloat(document.getElementById('resultsMaxScore')?.value);
+  
+  // Get the current admin's school ID
+  const currentUser = loadSession().user;
+
   const params = {
     page, per_page: resPerPage,
-    subject: document.getElementById('resultsSubjectFilter').value.trim(),
-    email: document.getElementById('resultsEmailFilter').value.trim(),
-    status: document.getElementById('resultsStatusFilter').value,
-    school_id: document.getElementById('resultsSchoolFilter').value,
-    start: document.getElementById('resultsDateFrom').value,
-    end: document.getElementById('resultsDateTo').value,
+    subject: document.getElementById('resultsSubjectFilter')?.value.trim() || '',
+    email: document.getElementById('resultsEmailFilter')?.value.trim() || '',
+    status: document.getElementById('resultsStatusFilter')?.value || '',
+    school_id: currentUser.school_id, // <--- LOCKED TO ADMIN'S SCHOOL
+    start: document.getElementById('resultsDateFrom')?.value || '',
+    end: document.getElementById('resultsDateTo')?.value || '',
     min_score: Number.isFinite(minScoreValue) ? minScoreValue : 0,
     max_score: Number.isFinite(maxScoreValue) ? maxScoreValue : 100,
   };
+  
   const tbody = document.getElementById('resultsTableBody');
   tbody.innerHTML = `<tr><td colspan="9" class="table-empty"><div class="spinner"></div></td></tr>`;
   try {
@@ -1257,8 +1299,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Setup all panels
   setupUsersPanel();
-  setupSchoolsPanel();
-  setupTeacherRequestsPanel();
+  // setupSchoolsPanel();
+  // setupTeacherRequestsPanel();
   setupTestResultsPanel();
   setupTrainingPanel();
   setupModelRegistryPanel();
@@ -1273,5 +1315,5 @@ document.addEventListener('DOMContentLoaded', () => {
   activatePanel('dashboard', true);
   loadSchools(); // Also populates allSchools for user filters
   // Keep pending teacher requests badge up to date.
-  loadTeacherRequests(1);
+  // loadTeacherRequests(1);
 });
