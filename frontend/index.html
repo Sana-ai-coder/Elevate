@@ -137,10 +137,15 @@
                             </select>
                         </div>
 
-                        <div id="signupAdminFields" style="display: none;">
+                        <div id="signupAdminFields" style="display:none">
                             <div class="form-group">
                                 <label for="signupSchoolName">School Name</label>
                                 <input type="text" class="form-control" id="signupSchoolName" placeholder="Example Public School">
+                            </div>
+                            <div class="form-group">
+                                <label for="signupSchoolSlug">School Slug <span style="color:#888;font-size:0.85em;">used in URLs</span></label>
+                                <input type="text" class="form-control" id="signupSchoolSlug" placeholder="e.g. example-public-school">
+                                <small class="form-text text-muted">Lowercase letters, numbers and hyphens only. Auto-filled from name.</small>
                             </div>
                         </div>
 
@@ -159,6 +164,33 @@
             </div>
         </div>
     </div>
+
+    <script>
+  // Auto-generate slug from school name for admin signup
+  document.addEventListener('DOMContentLoaded', function () {
+    const nameInput = document.getElementById('signupSchoolName');
+    const slugInput = document.getElementById('signupSchoolSlug');
+    if (nameInput && slugInput) {
+      nameInput.addEventListener('input', function () {
+        // Only auto-fill if the user hasn't manually edited the slug
+        if (!slugInput.dataset.manualEdit) {
+          slugInput.value = nameInput.value
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '');
+        }
+      });
+      slugInput.addEventListener('input', function () {
+        // Mark as manually edited so auto-fill stops overriding
+        slugInput.dataset.manualEdit = '1';
+        // Enforce valid chars in real-time
+        slugInput.value = slugInput.value
+          .toLowerCase()
+          .replace(/[^a-z0-9-]/g, '');
+      });
+    }
+  });
+</script>
 
     <script type="module" src="js/main.js"></script>
 </body>

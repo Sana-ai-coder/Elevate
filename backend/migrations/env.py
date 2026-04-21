@@ -44,18 +44,13 @@ _configure_runtime_database_url()
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# add your model's MetaData object here
-# for 'autogenerate' support
-# target_metadata = db.metadata
-from backend.app import create_app
-app = create_app(os.getenv("FLASK_ENV") or "development")
-with app.app_context():
-    target_metadata = db.metadata
-
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
-# my_important_option = config.get_main_option("my_important_option")
-# ... etc.
+# ── Get model metadata WITHOUT calling create_app ────────────────────────
+# We only need the SQLAlchemy metadata for Alembic autogenerate support.
+# Calling create_app() during migrations triggers SchemaGuard functions
+# that try to CREATE TABLE before Alembic has run, causing confusing errors
+# on fresh databases. The metadata is already populated by importing
+# backend.models above.
+target_metadata = db.metadata
 
 
 def run_migrations_offline() -> None:

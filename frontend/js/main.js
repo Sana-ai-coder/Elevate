@@ -52,17 +52,35 @@ function readCookie(name) {
 }
 
 function rememberSchoolSlugHint(slug) {
-  // Slug hinting is intentionally disabled.
-  return null;
+  const normalized = normalizeSchoolSlug(slug);
+  if (!normalized) {
+    sessionStorage.removeItem(SCHOOL_SLUG_HINT_KEY);
+    localStorage.removeItem(SCHOOL_SLUG_HINT_KEY);
+    document.cookie = `${SCHOOL_SLUG_HINT_COOKIE}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; samesite=lax`;
+    return null;
+  }
+
+  sessionStorage.setItem(SCHOOL_SLUG_HINT_KEY, normalized);
+  localStorage.setItem(SCHOOL_SLUG_HINT_KEY, normalized);
+  document.cookie = `${SCHOOL_SLUG_HINT_COOKIE}=${encodeURIComponent(normalized)}; path=/; max-age=${60 * 60 * 24 * 30}; samesite=lax`;
+  return normalized;
 }
 
 function getStoredSchoolSlugHint() {
-  // Slug hinting is intentionally disabled.
-  return null;
+  return (
+    normalizeSchoolSlug(sessionStorage.getItem(SCHOOL_SLUG_HINT_KEY))
+    || normalizeSchoolSlug(localStorage.getItem(SCHOOL_SLUG_HINT_KEY))
+    || normalizeSchoolSlug(readCookie(SCHOOL_SLUG_HINT_COOKIE))
+  );
 }
 
 function getCurrentPathSlug() {
-  return null;
+  const segments = String(window.location.pathname || '').split('/').filter(Boolean);
+  if (segments.length !== 1) return null;
+  const onlySegment = segments[0] || '';
+  if (!onlySegment || onlySegment.includes('.')) return null;
+  if (onlySegment.toLowerCase() === 'api') return null;
+  return normalizeSchoolSlug(onlySegment);
 }
 
 function getRoleHomePage(role, schoolSlug = null) {
@@ -488,11 +506,11 @@ function initAuthPage() {
     }
 
     if (signupSchoolSlugInput) {
-      signupSchoolSlugInput.disabled = true;
-      signupSchoolSlugInput.required = false;
-      signupSchoolSlugInput.value = '';
+      signupSchoolSlugInput.disabled = !isAdmin;
+      signupSchoolSlugInput.required = isAdmin;
+      if (!isAdmin) signupSchoolSlugInput.value = '';
       const slugFieldWrap = signupSchoolSlugInput.closest('.mb-3');
-      if (slugFieldWrap) slugFieldWrap.style.display = 'none';
+      if (slugFieldWrap) slugFieldWrap.style.display = isAdmin ? '' : 'none';
     }
 
     if (signupRoleHint) {
@@ -635,6 +653,7 @@ function initAuthPage() {
       const role = getSelectedRole('signupRoleSelector');
       const grade = role === 'admin' ? null : (document.getElementById('signupGrade').value || null);
       const schoolName = role === 'admin' ? (document.getElementById('signupSchoolName')?.value?.trim() || '') : '';
+      const schoolSlug = role === 'admin' ? normalizeSchoolSlug(document.getElementById('signupSchoolSlug')?.value) : null;
 
       if (role !== 'admin' && !grade) {
         showAuthAlert('signupAlert', 'Please select a grade level to continue.', 'warning');
@@ -643,6 +662,11 @@ function initAuthPage() {
 
       if (role === 'admin' && !schoolName) {
         showAuthAlert('signupAlert', 'Please enter a school name for the admin workspace.', 'warning');
+        return;
+      }
+
+      if (role === 'admin' && !schoolSlug) {
+        showAuthAlert('signupAlert', 'Please enter a valid school slug for the admin workspace.', 'warning');
         return;
       }
 
@@ -662,6 +686,7 @@ function initAuthPage() {
       if (grade) signupPayload.grade = grade;
       if (role === 'admin') {
         signupPayload.school_name = schoolName;
+        signupPayload.school_slug = schoolSlug;
       }
       
       const result = await auth.signup(signupPayload);

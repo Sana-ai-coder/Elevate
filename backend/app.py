@@ -11,6 +11,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from sqlalchemy import inspect, text
 import os
+import re
 import sys
 from dotenv import load_dotenv
 
@@ -25,6 +26,7 @@ from .models import (
     SubjectPerformance, AnswerLog, Test, TestQuestion, TestResult,
     TeacherIntervention, TeacherDocument, TeacherDocumentChunk,
     TeacherRequest, SyllabusTopic, UserSetting, RagRetrievalEvent,
+    AuditLog, ModelVersion, TrainingJob, MCQPipelineEvent,  # ← NEW
 )
 from .routes.auth      import auth_bp
 from .routes.questions import questions_bp
@@ -120,11 +122,15 @@ def _log_emotion_deploy_status(app: Flask) -> None:
 
 
 def _ensure_assignment_integrity_columns(app: Flask) -> None:
-    """Backfill integrity columns if schema migration was skipped in an existing DB."""
+    # """Backfill integrity columns if schema migration was skipped in an existing DB.
+
+    # Silently no-ops on fresh databases where core tables don't exist yet.
+    # """
     try:
         inspector = inspect(db.engine)
         table_names = set(inspector.get_table_names())
-        if "test_assignments" not in table_names:
+        # Guard: only run when the core schema is already established
+        if "users" not in table_names or "test_assignments" not in table_names:
             return
 
         existing_columns = {
@@ -159,17 +165,23 @@ def _ensure_assignment_integrity_columns(app: Flask) -> None:
         )
     except Exception as exc:
         db.session.rollback()
-        app.logger.exception(
-            "[SchemaGuard] Failed to apply assignment integrity compatibility patch: %s",
-            exc,
+        app.logger.warning(
+            "[SchemaGuard] Could not apply assignment integrity patch (non-fatal): %s", exc
         )
 
 
 def _ensure_teacher_interventions_table(app: Flask) -> None:
-    """Create teacher_interventions table if it doesn't exist yet."""
+    """Create teacher_interventions table if it doesn't exist yet.
+
+    Silently no-ops on fresh databases where core tables don't exist yet.
+    """
     try:
         inspector = inspect(db.engine)
-        if "teacher_interventions" in set(inspector.get_table_names()):
+        existing = set(inspector.get_table_names())
+        # Guard: only run as a safety net when the base schema already exists
+        if "users" not in existing:
+            return
+        if "teacher_interventions" in existing:
             return
 
         app.logger.warning(
@@ -178,17 +190,24 @@ def _ensure_teacher_interventions_table(app: Flask) -> None:
         TeacherIntervention.__table__.create(bind=db.engine, checkfirst=True)
         app.logger.info("[SchemaGuard] Created teacher_interventions table")
     except Exception as exc:
-        app.logger.exception(
-            "[SchemaGuard] Failed to create teacher_interventions table: %s",
-            exc,
+        db.session.rollback()
+        app.logger.warning(
+            "[SchemaGuard] Could not create teacher_interventions table (non-fatal): %s", exc
         )
 
 
 def _ensure_teacher_rag_tables(app: Flask) -> None:
-    """Create teacher RAG document tables if they don't exist yet."""
+    """Create teacher RAG document tables if they don't exist yet.
+
+    Silently no-ops on fresh databases where core tables don't exist yet.
+    """
     try:
         inspector = inspect(db.engine)
         existing = set(inspector.get_table_names())
+        # Guard: only run as a safety net when the base schema already exists
+        if "users" not in existing:
+            return
+
         created = []
 
         if "teacher_documents" not in existing:
@@ -211,10 +230,10 @@ def _ensure_teacher_rag_tables(app: Flask) -> None:
             }
             if "embedding_vector_pg" not in columns:
                 app.logger.warning(
-                    "[SchemaGuard] Missing teacher_document_chunks.embedding_vector_pg column detected. Applying compatibility patch."
+                    "[SchemaGuard] Missing teacher_document_chunks.embedding_vector_pg column. Patching."
                 )
                 db.session.execute(
-                    text("ALTER TABLE teacher_document_chunks ADD COLUMN embedding_vector_pg TEXT")
+                    text("ALTER TABLE teacher_document_chunks ADD COLUMN IF NOT EXISTS embedding_vector_pg TEXT")
                 )
                 db.session.commit()
 
@@ -225,15 +244,47 @@ def _ensure_teacher_rag_tables(app: Flask) -> None:
             )
     except Exception as exc:
         db.session.rollback()
-        app.logger.exception(
-            "[SchemaGuard] Failed to create RAG compatibility tables: %s",
-            exc,
+        app.logger.warning(
+            "[SchemaGuard] Could not create RAG tables (non-fatal): %s", exc
         )
+        
+def _ensure_admin_tables(app: Flask) -> None:
+    """Create new admin platform tables if they don't exist (Supabase-safe)."""
+    from sqlalchemy import inspect as sa_inspect
+    try:
+        inspector = sa_inspect(db.engine)
+        existing = set(inspector.get_table_names())
+        created = []
+
+        target_tables = {
+            "audit_logs": AuditLog,
+            "model_versions": ModelVersion,
+            "training_jobs": TrainingJob,
+            "mcq_pipeline_events": MCQPipelineEvent,
+        }
+        for table_name, model_cls in target_tables.items():
+            if table_name not in existing:
+                model_cls.__table__.create(bind=db.engine, checkfirst=True)
+                created.append(table_name)
+
+        if created:
+            app.logger.info("[SchemaGuard] Created admin tables: %s", ", ".join(created))
+    except Exception as exc:
+        app.logger.exception("[SchemaGuard] Failed to create admin tables: %s", exc)
 
 
 def create_app(config_name: str | None = None) -> Flask:
     app = Flask(__name__)
     SCHOOL_SLUG_HINT_COOKIE = 'elevate_school_slug_hint'
+
+    def _normalize_school_slug(value: str | None) -> str | None:
+        normalized = str(value or '').strip().lower()
+        if not normalized:
+            return None
+        normalized = re.sub(r'[^a-z0-9\s_-]+', '', normalized)
+        normalized = re.sub(r'[\s_]+', '-', normalized)
+        normalized = re.sub(r'-+', '-', normalized).strip('-')
+        return normalized or None
 
     environment_name = str(
         config_name or os.environ.get("FLASK_ENV", "development")
@@ -271,6 +322,7 @@ def create_app(config_name: str | None = None) -> Flask:
         _ensure_assignment_integrity_columns(app)
         _ensure_teacher_interventions_table(app)
         _ensure_teacher_rag_tables(app)
+        _ensure_admin_tables(app)
 
     # with app.app_context():
     #     db.create_all()
@@ -308,9 +360,18 @@ def create_app(config_name: str | None = None) -> Flask:
         return None
 
     def _slug_hint_response(slug: str):
+        normalized_slug = _normalize_school_slug(slug)
         response = redirect('/index.html', code=302)
-        # Keep auth entry canonical and do not persist slug hints.
-        response.delete_cookie(SCHOOL_SLUG_HINT_COOKIE)
+        if normalized_slug:
+            response.set_cookie(
+                SCHOOL_SLUG_HINT_COOKIE,
+                normalized_slug,
+                max_age=60 * 60 * 24 * 30,
+                path='/',
+                samesite='Lax',
+            )
+        else:
+            response.delete_cookie(SCHOOL_SLUG_HINT_COOKIE)
         return response
 
     @app.get('/')
@@ -358,10 +419,6 @@ def create_app(config_name: str | None = None) -> Flask:
         if str(filename).strip('/').lower() == 'index.html':
             # Canonicalize auth page to non-slug URL.
             return _slug_hint_response(str(slug).strip('/'))
-
-        if normalized_filename.lower().endswith('.html'):
-            # Keep frontend routes canonical without slug prefixes.
-            return redirect(f'/{normalized_filename}', code=302)
 
         # Avoid collisions with real static asset folders (e.g. /css/styles.css, /js/main.js)
         # that would otherwise be misread as /<slug>/<file> routes.

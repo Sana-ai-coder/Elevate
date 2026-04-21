@@ -583,6 +583,247 @@ export const api = {
     }
   },
 
+  // Admin endpoints
+  admin: {
+    async fetchText(endpoint, method = 'GET') {
+      const token = api.getToken();
+      const url = `${config.API_BASE_URL}${endpoint}${endpoint.includes('?') ? '&' : '?'}_ts=${Date.now()}`;
+      const response = await fetch(url, {
+        method,
+        headers: {
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+        cache: 'no-store',
+      });
+
+      if (!response.ok) {
+        const payload = await response.text().catch(() => '');
+        const userMessage = api.buildFriendlyApiError(endpoint, method, response.status, payload);
+        const requestError = new Error(userMessage);
+        requestError.status = response.status;
+        requestError.serverMessage = payload;
+        requestError.userMessage = userMessage;
+        throw requestError;
+      }
+
+      return await response.text();
+    },
+
+    async getStats() {
+      return await api.request('/admin/stats', { method: 'GET' });
+    },
+
+    async listUsers(params = {}) {
+      const query = new URLSearchParams();
+      if (params.page) query.append('page', String(params.page));
+      if (params.per_page) query.append('per_page', String(params.per_page));
+      if (params.search) query.append('search', String(params.search));
+      if (params.role) query.append('role', String(params.role));
+      if (params.status) query.append('status', String(params.status));
+      if (params.school_id !== undefined && params.school_id !== null && String(params.school_id) !== '') {
+        query.append('school_id', String(params.school_id));
+      }
+      const qs = query.toString();
+      return await api.request(`/admin/users${qs ? `?${qs}` : ''}`, { method: 'GET' });
+    },
+
+    async updateUser(userId, payload = {}) {
+      return await api.request(`/admin/users/${userId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload || {}),
+      });
+    },
+
+    async disableUser(userId, reason = 'Admin action') {
+      return await api.request(`/admin/users/${userId}/disable`, {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      });
+    },
+
+    async enableUser(userId) {
+      return await api.request(`/admin/users/${userId}/enable`, {
+        method: 'POST',
+      });
+    },
+
+    async getSchoolsHierarchy() {
+      return await api.request('/admin/schools/hierarchy', { method: 'GET' });
+    },
+
+    async getSchoolHierarchyDetail(schoolId) {
+      return await api.request(`/admin/schools/${schoolId}/hierarchy`, { method: 'GET' });
+    },
+
+    async createSchool(payload = {}) {
+      return await api.request('/admin/schools', {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
+      });
+    },
+
+    async deleteSchool(schoolId) {
+      return await api.request(`/admin/schools/${schoolId}`, {
+        method: 'DELETE',
+      });
+    },
+
+    async listTeacherRequests(params = {}) {
+      const query = new URLSearchParams();
+      if (params.page) query.append('page', String(params.page));
+      if (params.per_page) query.append('per_page', String(params.per_page));
+      if (params.status) query.append('status', params.status);
+      const qs = query.toString();
+      return await api.request(`/admin/teacher-requests${qs ? `?${qs}` : ''}`, { method: 'GET' });
+    },
+
+    async approveTeacherRequest(requestId) {
+      return await api.request(`/admin/teacher-requests/${requestId}/approve`, { method: 'POST' });
+    },
+
+    async rejectTeacherRequest(requestId) {
+      return await api.request(`/admin/teacher-requests/${requestId}/reject`, { method: 'POST' });
+    },
+
+    async listTestResults(params = {}) {
+      const query = new URLSearchParams();
+      if (params.page) query.append('page', String(params.page));
+      if (params.per_page) query.append('per_page', String(params.per_page));
+      if (params.subject) query.append('subject', params.subject);
+      if (params.email) query.append('email', params.email);
+      if (params.start) query.append('start', params.start);
+      if (params.end) query.append('end', params.end);
+      if (params.status) query.append('status', params.status);
+      if (params.school_id !== undefined && params.school_id !== null && String(params.school_id) !== '') {
+        query.append('school_id', String(params.school_id));
+      }
+      if (Number.isFinite(Number(params.min_score))) query.append('min_score', String(params.min_score));
+      if (Number.isFinite(Number(params.max_score))) query.append('max_score', String(params.max_score));
+      const qs = query.toString();
+      return await api.request(`/admin/test-results${qs ? `?${qs}` : ''}`, { method: 'GET' });
+    },
+
+    async getTestResultHistory(userId) {
+      return await api.request(`/admin/test-results/${userId}/history`, { method: 'GET' });
+    },
+
+    async getTestResultDetail(testResultId) {
+      return await api.request(`/admin/test-results/${testResultId}`, { method: 'GET' });
+    },
+
+    async exportTestResultsCsv(params = {}) {
+      const query = new URLSearchParams();
+      query.append('format', 'csv');
+      if (params.subject) query.append('subject', params.subject);
+      if (params.email) query.append('email', params.email);
+      if (params.start) query.append('start', params.start);
+      if (params.end) query.append('end', params.end);
+      if (params.status) query.append('status', params.status);
+      if (params.school_id !== undefined && params.school_id !== null && String(params.school_id) !== '') {
+        query.append('school_id', String(params.school_id));
+      }
+      if (Number.isFinite(Number(params.min_score))) query.append('min_score', String(params.min_score));
+      if (Number.isFinite(Number(params.max_score))) query.append('max_score', String(params.max_score));
+      const endpoint = `/admin/test-results?${query.toString()}`;
+      return await this.fetchText(endpoint, 'GET');
+    },
+
+    async triggerTraining() {
+      return await api.request('/admin/ml/train-strict', {
+        method: 'POST',
+      });
+    },
+
+    async getTrainingStatus(jobId) {
+      return await api.request(`/admin/ml/train-strict/${jobId}`, {
+        method: 'GET',
+      });
+    },
+
+    async listTrainingJobs(params = {}) {
+      const query = new URLSearchParams();
+      if (params.page) query.append('page', String(params.page));
+      if (params.per_page) query.append('per_page', String(params.per_page));
+      if (params.status) query.append('status', String(params.status));
+      if (params.sync !== undefined) query.append('sync', params.sync ? '1' : '0');
+      const qs = query.toString();
+      return await api.request(`/admin/ml/jobs${qs ? `?${qs}` : ''}`, { method: 'GET' });
+    },
+
+    async getTrainingJob(jobDbId, params = {}) {
+      const query = new URLSearchParams();
+      if (params.sync !== undefined) query.append('sync', params.sync ? '1' : '0');
+      const qs = query.toString();
+      return await api.request(`/admin/ml/jobs/${jobDbId}${qs ? `?${qs}` : ''}`, { method: 'GET' });
+    },
+
+    async listModelVersions(params = {}) {
+      const query = new URLSearchParams();
+      if (params.page) query.append('page', String(params.page));
+      if (params.per_page) query.append('per_page', String(params.per_page));
+      if (params.model_name) query.append('model_name', String(params.model_name));
+      const qs = query.toString();
+      return await api.request(`/admin/ml/versions${qs ? `?${qs}` : ''}`, { method: 'GET' });
+    },
+
+    async getModelRegistrySummary(params = {}) {
+      const query = new URLSearchParams();
+      if (params.model_name) query.append('model_name', String(params.model_name));
+      const qs = query.toString();
+      return await api.request(`/admin/ml/versions/registry-summary${qs ? `?${qs}` : ''}`, { method: 'GET' });
+    },
+
+    async createModelVersion(payload = {}) {
+      return await api.request('/admin/ml/versions', {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
+      });
+    },
+
+    async promoteModelVersion(versionId) {
+      return await api.request(`/admin/ml/versions/${versionId}/promote`, {
+        method: 'POST',
+      });
+    },
+
+    async setRollbackTarget(versionId) {
+      return await api.request(`/admin/ml/versions/${versionId}/set-rollback-target`, {
+        method: 'POST',
+      });
+    },
+
+    async getMcqObservability(params = {}) {
+      const query = new URLSearchParams();
+      if (params.days) query.append('days', String(params.days));
+      if (params.subject) query.append('subject', String(params.subject));
+      if (params.school_id !== undefined && params.school_id !== null && String(params.school_id) !== '') {
+        query.append('school_id', String(params.school_id));
+      }
+      if (params.bucket) query.append('bucket', String(params.bucket));
+      const qs = query.toString();
+      return await api.request(`/admin/mcq/observability${qs ? `?${qs}` : ''}`, { method: 'GET' });
+    },
+
+    async listAuditLogs(params = {}) {
+      const query = new URLSearchParams();
+      if (params.page) query.append('page', String(params.page));
+      if (params.per_page) query.append('per_page', String(params.per_page));
+      if (params.action) query.append('action', String(params.action));
+      if (params.target_type) query.append('target_type', String(params.target_type));
+      if (params.actor_id !== undefined && params.actor_id !== null && String(params.actor_id) !== '') {
+        query.append('actor_id', String(params.actor_id));
+      }
+      if (params.date_from) query.append('date_from', String(params.date_from));
+      if (params.date_to) query.append('date_to', String(params.date_to));
+      const qs = query.toString();
+      return await api.request(`/admin/audit-logs${qs ? `?${qs}` : ''}`, { method: 'GET' });
+    },
+
+    async exportAuditLogs() {
+      return await this.fetchText('/admin/audit-logs/export', 'GET');
+    },
+  },
+
   student: {
     async getAssignedTests() {
       return await api.request('/student/assigned-tests', { method: 'GET' });

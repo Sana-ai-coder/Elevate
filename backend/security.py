@@ -123,6 +123,9 @@ def require_auth(f):
         except Exception:
             # If refresh fails (detached instance), ignore and continue with available user object
             pass
+
+        if getattr(user, "is_disabled", False):
+            return jsonify({"error": "Account disabled"}), 403
         
         # Store user in Flask's g object for access in route
         g.current_user = user
@@ -177,6 +180,8 @@ def role_required(*roles):
             user = getattr(g, "current_user", None)
             if not user or user.role not in roles:
                 return jsonify({"error": "forbidden"}), 403
+            if getattr(user, "is_disabled", False):
+                return jsonify({"error": "Account disabled"}), 403
             return f(*args, **kwargs)
         return wrapped
     return wrapper

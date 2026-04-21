@@ -1,6 +1,7 @@
 """One-command startup bootstrap for Elevate.
 
 This script is intentionally idempotent:
+- Runs Alembic migrations before any DB access (auto-applies new columns).
 - Seeds users only when missing.
 - Ensures question bank size is healthy.
 - Supports optional strict rebuild mode via env var.
@@ -16,6 +17,58 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON_EXE = ROOT / ".venv" / "Scripts" / "python.exe"
 _APP_CACHE = None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _load_dotenv() -> None:
+    """Load .env into os.environ so DATABASE_URL is available for migrations."""
+    env_file = ROOT / ".env"
+    if not env_file.exists():
+        return
+    try:
+        with open(env_file, encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except Exception as exc:
+        print(f"[BOOTSTRAP] Warning: could not load .env: {exc}")
+
+
+def _run_migrations() -> None:
+    """Apply all pending Alembic migrations against the configured database.
+
+    Uses run_migrations.py which calls Alembic Python API directly — no
+    Flask CLI needed. Is idempotent when schema is already at head.
+    Must run BEFORE any SQLAlchemy model query so columns exist in Postgres.
+    """
+    _load_dotenv()
+
+    migration_script = ROOT / "run_migrations.py"
+    if not migration_script.exists():
+        print("[BOOTSTRAP] Warning: run_migrations.py not found — skipping auto-migration.")
+        return
+
+    print("[BOOTSTRAP] Running database migrations (alembic upgrade head)...")
+    result = subprocess.run(
+        [str(PYTHON_EXE), str(migration_script)],
+        cwd=ROOT,
+        env=os.environ.copy(),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Database migration failed. "
+            "Check your DATABASE_URL in .env and that the PostgreSQL server is reachable."
+        )
+    print("[BOOTSTRAP] Migrations applied successfully.")
 
 
 def _run(command: list[str], description: str) -> None:
@@ -190,7 +243,6 @@ def _ensure_questions(question_count: int) -> None:
         return
 
     # Non-destructive top-up path for normal startup.
-    # 63 is current count of (subject, grade, topic) groups in syllabus manifest.
     missing = max(0, min_questions - question_count)
     groups = 63
     per_topic = max(8, min(50, (missing + groups - 1) // groups))
@@ -296,7 +348,6 @@ def _run_strict_pipeline_if_enabled() -> bool:
     if not strict_mode:
         return False
 
-    # Optional delegation to HF Space; otherwise run strict pipeline locally.
     use_remote_hf = _is_truthy_env("ELEVATE_STRICT_REMOTE_HF", "0")
     if use_remote_hf:
         _run_remote_hf_strict_pipeline()
@@ -374,12 +425,21 @@ def _ensure_at_risk_model() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 def main() -> int:
     if not PYTHON_EXE.exists():
         print("[BOOTSTRAP] Virtual environment python not found.")
         return 1
 
     try:
+        # ── Step 1: Always migrate DB schema FIRST ────────────────────────────
+        # Idempotent — Alembic no-ops when schema is already at head.
+        # MUST run before any ORM query so all columns (is_disabled, etc.) exist.
+        _run_migrations()
+
         _assert_gemini_key_if_required()
         _ensure_dependencies()
         users_before, questions_before = _read_counts()

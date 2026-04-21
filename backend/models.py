@@ -1,4 +1,4 @@
-﻿from datetime import datetime, timezone
+from datetime import datetime, timezone
 
 from flask_sqlalchemy import SQLAlchemy
 
@@ -20,6 +20,10 @@ class User(db.Model):
     role = db.Column(db.String(32), default="student", nullable=False, index=True)  # 'student'|'teacher'|'admin'
     school_id = db.Column(db.Integer, db.ForeignKey("schools.id", ondelete="SET NULL"), nullable=True, index=True)
     is_verified = db.Column(db.Boolean, default=False, nullable=False)
+    is_disabled = db.Column(db.Boolean, default=False, nullable=False, index=True)
+    disabled_at = db.Column(db.DateTime, nullable=True)
+    disabled_reason = db.Column(db.String(255), nullable=True)
+    disabled_by = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     reset_token = db.Column(db.String(255), nullable=True)
     reset_token_expires = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=utcnow, nullable=False)
@@ -52,6 +56,10 @@ class User(db.Model):
             'role': self.role,
             'school_id': self.school_id,
             'is_verified': self.is_verified,
+            'is_disabled': self.is_disabled,
+            'disabled_at': self.disabled_at.isoformat() if self.disabled_at else None,
+            'disabled_reason': self.disabled_reason,
+            'disabled_by': self.disabled_by,
             'assigned_subjects': self.assigned_subjects,
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
@@ -692,4 +700,328 @@ class UserSetting(db.Model):
             "user_id": self.user_id,
             "settings": self.settings_json or {},
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+# # ---------------------------------------------------------------------------
+# # Phase 4 — Training Job Monitor
+# # ---------------------------------------------------------------------------
+# class TrainingJob(db.Model):
+#     __tablename__ = "training_jobs"
+
+#     id = db.Column(db.Integer, primary_key=True)
+#     job_id = db.Column(db.String(128), nullable=False, unique=True, index=True)
+#     status = db.Column(db.String(32), nullable=False, default="pending", index=True)  # pending|running|succeeded|failed|unknown
+#     triggered_by = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+#     source = db.Column(db.String(64), nullable=True)  # hf_strict, manual, etc.
+#     started_at = db.Column(db.DateTime, nullable=True, index=True)
+#     finished_at = db.Column(db.DateTime, nullable=True)
+#     duration_ms = db.Column(db.BigInteger, nullable=True)
+#     error_summary = db.Column(db.Text, nullable=True)
+#     metrics_json = db.Column(db.JSON, nullable=True)
+#     artifact_manifest_json = db.Column(db.JSON, nullable=True)
+#     stdout_tail = db.Column(db.Text, nullable=True)
+#     stderr_tail = db.Column(db.Text, nullable=True)
+#     created_at = db.Column(db.DateTime, default=utcnow, nullable=False, index=True)
+#     updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+#     triggered_by_user = db.relationship("User", foreign_keys=[triggered_by])
+
+#     def as_dict(self):
+#         return {
+#             "id": self.id,
+#             "job_id": self.job_id,
+#             "status": self.status,
+#             "triggered_by": self.triggered_by,
+#             "triggered_by_name": self.triggered_by_user.name if self.triggered_by_user else None,
+#             "source": self.source,
+#             "started_at": self.started_at.isoformat() if self.started_at else None,
+#             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+#             "duration_ms": self.duration_ms,
+#             "error_summary": self.error_summary,
+#             "metrics": self.metrics_json or {},
+#             "artifact_manifest": self.artifact_manifest_json or {},
+#             "stdout_tail": self.stdout_tail,
+#             "stderr_tail": self.stderr_tail,
+#             "created_at": self.created_at.isoformat() if self.created_at else None,
+#             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+#         }
+
+
+# # ---------------------------------------------------------------------------
+# # Phase 5 — Model Version Registry
+# # ---------------------------------------------------------------------------
+# class ModelVersion(db.Model):
+#     __tablename__ = "model_versions"
+
+#     id = db.Column(db.Integer, primary_key=True)
+#     model_name = db.Column(db.String(128), nullable=False, index=True)
+#     version_tag = db.Column(db.String(64), nullable=False, index=True)
+#     created_at = db.Column(db.DateTime, default=utcnow, nullable=False, index=True)
+#     promoted_at = db.Column(db.DateTime, nullable=True)
+#     is_production = db.Column(db.Boolean, default=False, nullable=False, index=True)
+#     is_rollback_candidate = db.Column(db.Boolean, default=False, nullable=False, index=True)
+#     parent_version = db.Column(db.String(64), nullable=True)
+#     artifact_uri = db.Column(db.String(512), nullable=True)
+#     metrics_json = db.Column(db.JSON, nullable=True)
+#     training_job_id = db.Column(db.String(128), nullable=True, index=True)
+#     notes = db.Column(db.Text, nullable=True)
+
+#     __table_args__ = (
+#         db.UniqueConstraint("model_name", "version_tag", name="uix_model_version_tag"),
+#     )
+
+#     def as_dict(self):
+#         return {
+#             "id": self.id,
+#             "model_name": self.model_name,
+#             "version_tag": self.version_tag,
+#             "created_at": self.created_at.isoformat() if self.created_at else None,
+#             "promoted_at": self.promoted_at.isoformat() if self.promoted_at else None,
+#             "is_production": self.is_production,
+#             "is_rollback_candidate": self.is_rollback_candidate,
+#             "parent_version": self.parent_version,
+#             "artifact_uri": self.artifact_uri,
+#             "metrics": self.metrics_json or {},
+#             "training_job_id": self.training_job_id,
+#             "notes": self.notes,
+#         }
+
+
+# # ---------------------------------------------------------------------------
+# # Phase 6 — MCQ Generation Observability
+# # ---------------------------------------------------------------------------
+# class McqGenerationEvent(db.Model):
+#     __tablename__ = "mcq_generation_events"
+
+#     id = db.Column(db.Integer, primary_key=True)
+#     user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+#     school_id = db.Column(db.Integer, db.ForeignKey("schools.id", ondelete="SET NULL"), nullable=True, index=True)
+#     test_id = db.Column(db.Integer, db.ForeignKey("tests.id", ondelete="SET NULL"), nullable=True, index=True)
+#     request_source = db.Column(db.String(64), nullable=True, index=True)  # teacher_panel, api, batch
+#     generation_mode = db.Column(db.String(32), nullable=True, index=True)  # rag, direct_ai, fallback_db
+#     success = db.Column(db.Boolean, nullable=False, default=True, index=True)
+#     fallback_used = db.Column(db.Boolean, nullable=False, default=False, index=True)
+#     latency_ms = db.Column(db.Float, nullable=True)
+#     reason_code = db.Column(db.String(64), nullable=True, index=True)  # ok, model_timeout, no_context, etc.
+#     questions_requested = db.Column(db.Integer, nullable=True)
+#     questions_generated = db.Column(db.Integer, nullable=True)
+#     subject = db.Column(db.String(64), nullable=True, index=True)
+#     grade = db.Column(db.String(32), nullable=True, index=True)
+#     metadata_json = db.Column(db.JSON, nullable=True)
+#     created_at = db.Column(db.DateTime, default=utcnow, nullable=False, index=True)
+
+#     user = db.relationship("User", foreign_keys=[user_id])
+#     school = db.relationship("School", foreign_keys=[school_id])
+
+#     def as_dict(self):
+#         return {
+#             "id": self.id,
+#             "user_id": self.user_id,
+#             "school_id": self.school_id,
+#             "test_id": self.test_id,
+#             "request_source": self.request_source,
+#             "generation_mode": self.generation_mode,
+#             "success": self.success,
+#             "fallback_used": self.fallback_used,
+#             "latency_ms": self.latency_ms,
+#             "reason_code": self.reason_code,
+#             "questions_requested": self.questions_requested,
+#             "questions_generated": self.questions_generated,
+#             "subject": self.subject,
+#             "grade": self.grade,
+#             "metadata": self.metadata_json or {},
+#             "created_at": self.created_at.isoformat() if self.created_at else None,
+#         }
+
+
+# # ---------------------------------------------------------------------------
+# # Phase 7 — Admin Audit Log
+# # ---------------------------------------------------------------------------
+# class AdminAuditLog(db.Model):
+#     __tablename__ = "admin_audit_logs"
+
+#     id = db.Column(db.Integer, primary_key=True)
+#     action = db.Column(db.String(128), nullable=False, index=True)  # user.role_change, user.disable, etc.
+#     actor_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+#     target_type = db.Column(db.String(64), nullable=True, index=True)  # user, school, training_job, model_version
+#     target_id = db.Column(db.String(64), nullable=True, index=True)
+#     before_json = db.Column(db.JSON, nullable=True)
+#     after_json = db.Column(db.JSON, nullable=True)
+#     ip = db.Column(db.String(64), nullable=True)
+#     user_agent = db.Column(db.Text, nullable=True)
+#     request_id = db.Column(db.String(128), nullable=True)
+#     notes = db.Column(db.Text, nullable=True)
+#     created_at = db.Column(db.DateTime, default=utcnow, nullable=False, index=True)
+
+#     actor = db.relationship("User", foreign_keys=[actor_id])
+
+#     def as_dict(self):
+#         return {
+#             "id": self.id,
+#             "action": self.action,
+#             "actor_id": self.actor_id,
+#             "actor_name": self.actor.name if self.actor else None,
+#             "target_type": self.target_type,
+#             "target_id": self.target_id,
+#             "before": self.before_json,
+#             "after": self.after_json,
+#             "ip": self.ip,
+#             "user_agent": self.user_agent,
+#             "request_id": self.request_id,
+#             "notes": self.notes,
+#             "created_at": self.created_at.isoformat() if self.created_at else None,
+#         }
+
+# ============================================================
+# ADMIN PLATFORM NEW MODELS
+# ============================================================
+
+class AuditLog(db.Model):
+    """Immutable audit trail for all critical admin actions."""
+    __tablename__ = "audit_logs"
+
+    id = db.Column(db.Integer, primary_key=True)
+    admin_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    admin_email = db.Column(db.String(255), nullable=True)          # snapshot at time of action
+    action = db.Column(db.String(128), nullable=False, index=True)  # e.g. "user.role_changed"
+    target_type = db.Column(db.String(64), nullable=True)           # "user" | "school" | "model" etc.
+    target_id = db.Column(db.Integer, nullable=True, index=True)
+    target_label = db.Column(db.String(255), nullable=True)         # human-readable (email, school name…)
+    before_value = db.Column(db.JSON, nullable=True)                # state before change
+    after_value = db.Column(db.JSON, nullable=True)                 # state after change
+    ip_address = db.Column(db.String(64), nullable=True)
+    user_agent = db.Column(db.String(512), nullable=True)
+    created_at = db.Column(db.DateTime, default=utcnow, nullable=False, index=True)
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "admin_id": self.admin_id,
+            "admin_email": self.admin_email,
+            "action": self.action,
+            "target_type": self.target_type,
+            "target_id": self.target_id,
+            "target_label": self.target_label,
+            "before_value": self.before_value,
+            "after_value": self.after_value,
+            "ip_address": self.ip_address,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class ModelVersion(db.Model):
+    """Registry of ML model versions (emotion CNN, at-risk classifier, etc.)."""
+    __tablename__ = "model_versions"
+
+    id = db.Column(db.Integer, primary_key=True)
+    model_type = db.Column(db.String(64), nullable=False, index=True)   # "emotion" | "at_risk"
+    version_tag = db.Column(db.String(64), nullable=False)              # e.g. "v1.3.0" or a commit sha
+    status = db.Column(db.String(32), default="archived", nullable=False, index=True)
+    # status: "training" | "staging" | "production" | "archived" | "rollback_candidate"
+    accuracy = db.Column(db.Float, nullable=True)
+    f1_score = db.Column(db.Float, nullable=True)
+    loss = db.Column(db.Float, nullable=True)
+    extra_metrics = db.Column(db.JSON, nullable=True)   # any additional metrics dict
+    artifact_path = db.Column(db.String(512), nullable=True)
+    notes = db.Column(db.Text, nullable=True)
+    promoted_by = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    promoted_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=utcnow, nullable=False, index=True)
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "model_type": self.model_type,
+            "version_tag": self.version_tag,
+            "status": self.status,
+            "accuracy": self.accuracy,
+            "f1_score": self.f1_score,
+            "loss": self.loss,
+            "extra_metrics": self.extra_metrics,
+            "artifact_path": self.artifact_path,
+            "notes": self.notes,
+            "promoted_by": self.promoted_by,
+            "promoted_at": self.promoted_at.isoformat() if self.promoted_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class TrainingJob(db.Model):
+    """Log for ML training job runs (strict pipeline or manual triggers)."""
+    __tablename__ = "training_jobs"
+
+    id = db.Column(db.Integer, primary_key=True)
+    job_id = db.Column(db.String(128), nullable=True, index=True)    # HF job id or local run id
+    model_type = db.Column(db.String(64), nullable=False, index=True)
+    triggered_by = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    trigger_source = db.Column(db.String(64), default="admin_ui")   # "admin_ui" | "ci" | "scheduled"
+    status = db.Column(db.String(32), default="queued", nullable=False, index=True)
+    # status: "queued" | "running" | "completed" | "failed" | "cancelled"
+    started_at = db.Column(db.DateTime, nullable=True)
+    finished_at = db.Column(db.DateTime, nullable=True)
+    duration_seconds = db.Column(db.Integer, nullable=True)
+    logs = db.Column(db.Text, nullable=True)                         # captured stdout/stderr or HF log
+    metrics = db.Column(db.JSON, nullable=True)                      # final metrics dict
+    artifact_urls = db.Column(db.JSON, nullable=True)                # list of artifact URLs/paths
+    error_message = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=utcnow, nullable=False, index=True)
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "job_id": self.job_id,
+            "model_type": self.model_type,
+            "triggered_by": self.triggered_by,
+            "trigger_source": self.trigger_source,
+            "status": self.status,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "duration_seconds": self.duration_seconds,
+            "logs": self.logs,
+            "metrics": self.metrics,
+            "artifact_urls": self.artifact_urls,
+            "error_message": self.error_message,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class MCQPipelineEvent(db.Model):
+    """Per-request observability for the MCQ generation pipeline."""
+    __tablename__ = "mcq_pipeline_events"
+
+    id = db.Column(db.Integer, primary_key=True)
+    triggered_by = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    subject = db.Column(db.String(64), nullable=True, index=True)
+    grade = db.Column(db.String(32), nullable=True)
+    difficulty = db.Column(db.String(16), nullable=True)
+    topic = db.Column(db.String(128), nullable=True)
+    requested_count = db.Column(db.Integer, nullable=True)
+    generated_count = db.Column(db.Integer, default=0)
+    failed_count = db.Column(db.Integer, default=0)
+    fallback_used = db.Column(db.Boolean, default=False, nullable=False)
+    # outcome: "success" | "partial" | "failed" | "fallback"
+    outcome = db.Column(db.String(32), default="success", nullable=False, index=True)
+    llm_provider = db.Column(db.String(64), nullable=True)           # "gemini" | "openai_compat"
+    latency_ms = db.Column(db.Integer, nullable=True)
+    error_message = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=utcnow, nullable=False, index=True)
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "triggered_by": self.triggered_by,
+            "subject": self.subject,
+            "grade": self.grade,
+            "difficulty": self.difficulty,
+            "topic": self.topic,
+            "requested_count": self.requested_count,
+            "generated_count": self.generated_count,
+            "failed_count": self.failed_count,
+            "fallback_used": self.fallback_used,
+            "outcome": self.outcome,
+            "llm_provider": self.llm_provider,
+            "latency_ms": self.latency_ms,
+            "error_message": self.error_message,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }

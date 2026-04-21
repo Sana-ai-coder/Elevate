@@ -72,6 +72,10 @@ ai/topic_ai_service.log
 *.db-journal
 instance/
 backend/instance/
+*.sql 
+elevate_backup.sql
+elevate_data_only.sql
+elevate_ordered.sql
 
 # AI runtime artifacts
 ai/models_cache/

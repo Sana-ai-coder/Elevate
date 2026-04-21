@@ -1,607 +1,1277 @@
-const ADMIN_SESSION_KEY = 'elevate_user_session';
-const SCHOOL_SLUG_HINT_KEY = 'elevate_school_slug_hint';
-const SCHOOL_SLUG_HINT_COOKIE = 'elevate_school_slug_hint';
+/**
+ * Elevate Admin Control Center — admin.js
+ * Phases 4-9: Training Monitor, Model Registry, MCQ Observability,
+ * Audit Trail, User Management, School Hierarchy, UX Parity
+ */
+import { api } from './api.js';
 
-function loadAuthSession() {
+// =====================================================
+// Auth & Session
+// =====================================================
+const SESSION_KEY = 'elevate_user_session';
+
+function loadSession() {
   try {
-    const fromLocal = localStorage.getItem(ADMIN_SESSION_KEY);
-    const fromSession = sessionStorage.getItem(ADMIN_SESSION_KEY);
-    const raw = fromLocal || fromSession;
+    const raw = localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY);
     return raw ? JSON.parse(raw) : null;
-  } catch (error) {
-    console.warn('Failed to parse auth session for admin page:', error);
-    localStorage.removeItem(ADMIN_SESSION_KEY);
-    sessionStorage.removeItem(ADMIN_SESSION_KEY);
-    return null;
-  }
+  } catch (_) { return null; }
 }
 
-function roleHomePage(role) {
-  const normalized = String(role || 'student').trim().toLowerCase();
-  const page = normalized === 'teacher'
-    ? 'teacher-dashboard.html'
-    : normalized === 'admin'
-      ? 'admin.html'
-      : 'dashboard.html';
-
-  return page;
+function clearSession() {
+  localStorage.removeItem(SESSION_KEY);
+  sessionStorage.removeItem(SESSION_KEY);
 }
 
-function enforceAdminSessionGuard() {
-  const session = loadAuthSession();
-  if (!session || !session.user || !session.token) {
-      window.location.replace('/index.html');
-    return null;
-  }
-
-  const role = String(session.user.role || 'student').trim().toLowerCase();
+function enforceAdmin() {
+  const sess = loadSession();
+  if (!sess?.user || !sess?.token) { window.location.replace('/index.html'); return null; }
+  const role = String(sess.user.role || '').toLowerCase();
   if (role !== 'admin') {
-    window.location.replace(roleHomePage(role));
+    const pages = { teacher: 'teacher-dashboard.html', student: 'dashboard.html' };
+    window.location.replace(pages[role] || '/index.html');
     return null;
   }
-
-  return session;
+  return sess;
 }
 
-function clearAuthSession() {
-  localStorage.removeItem(ADMIN_SESSION_KEY);
-  sessionStorage.removeItem(ADMIN_SESSION_KEY);
-  localStorage.removeItem(SCHOOL_SLUG_HINT_KEY);
-  sessionStorage.removeItem(SCHOOL_SLUG_HINT_KEY);
-  document.cookie = `${SCHOOL_SLUG_HINT_COOKIE}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; samesite=lax`;
+// =====================================================
+// Toast Notifications
+// =====================================================
+let toastContainer = null;
+function showToast(msg, type = 'info') {
+  if (!toastContainer) {
+    toastContainer = document.createElement('div');
+    toastContainer.className = 'toast-container';
+    document.body.appendChild(toastContainer);
+  }
+  const icons = { success: 'check-circle', error: 'exclamation-circle', warning: 'exclamation-triangle', info: 'info-circle' };
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.innerHTML = `<i class="fas fa-${icons[type] || 'info-circle'}"></i><span>${msg}</span>`;
+  toastContainer.appendChild(toast);
+  setTimeout(() => toast.remove(), 4000);
 }
 
-function getInitial(name) {
-  const trimmed = String(name || '').trim();
-  return trimmed ? trimmed.charAt(0).toUpperCase() : 'A';
+// =====================================================
+// Confirm Modal
+// =====================================================
+function showConfirm(title, msg) {
+  return new Promise(resolve => {
+    const overlay = document.getElementById('confirmModal');
+    document.getElementById('confirmModalTitle').textContent = title;
+    document.getElementById('confirmModalMessage').textContent = msg;
+    overlay.classList.remove('hidden');
+
+    const yes = document.getElementById('confirmModalYes');
+    const no = document.getElementById('confirmModalNo');
+
+    function cleanup(result) {
+      overlay.classList.add('hidden');
+      yes.removeEventListener('click', onYes);
+      no.removeEventListener('click', onNo);
+      resolve(result);
+    }
+    function onYes() { cleanup(true); }
+    function onNo() { cleanup(false); }
+    yes.addEventListener('click', onYes);
+    no.addEventListener('click', onNo);
+  });
 }
 
-function setupAdminNavbar(session) {
-  const user = session?.user || {};
-  const info = document.getElementById('adminUserInfo');
-  const nameEl = document.getElementById('adminUserName');
-  const avatar = document.getElementById('adminUserAvatar');
-  const profileMenu = document.getElementById('adminProfileMenu');
-  const toggle = document.getElementById('adminProfileMenuToggle');
-  const logoutBtn = document.getElementById('adminLogoutBtn');
+// =====================================================
+// Pagination helper
+// =====================================================
+function renderPagination(container, currentPage, totalPages, onPage) {
+  container.innerHTML = '';
+  if (totalPages <= 1) return;
 
-  if (nameEl) nameEl.textContent = user.name || 'Admin';
-  if (avatar) avatar.textContent = getInitial(user.name || 'Admin');
-  if (info) info.classList.add('hydrated');
+  const prev = document.createElement('button');
+  prev.className = 'page-btn';
+  prev.innerHTML = '<i class="fas fa-chevron-left"></i>';
+  prev.disabled = currentPage <= 1;
+  prev.addEventListener('click', () => onPage(currentPage - 1));
+  container.appendChild(prev);
 
-  if (toggle && profileMenu) {
-    toggle.addEventListener('click', (evt) => {
-      evt.preventDefault();
-      evt.stopPropagation();
-      const isOpen = profileMenu.classList.toggle('open');
-      toggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  const info = document.createElement('span');
+  info.className = 'page-info';
+  info.textContent = `${currentPage} / ${totalPages}`;
+  container.appendChild(info);
+
+  const next = document.createElement('button');
+  next.className = 'page-btn';
+  next.innerHTML = '<i class="fas fa-chevron-right"></i>';
+  next.disabled = currentPage >= totalPages;
+  next.addEventListener('click', () => onPage(currentPage + 1));
+  container.appendChild(next);
+}
+
+// =====================================================
+// Panel Navigation
+// =====================================================
+function loadPanelData(panelKey, force = false) {
+  switch (panelKey) {
+    case 'dashboard':
+      return loadDashboardStats();
+    case 'users':
+      return loadUsers(force ? 1 : usersPage || 1);
+    case 'schools':
+      return loadSchools();
+    case 'teacher-requests':
+      return loadTeacherRequests(force ? 1 : reqPage || 1);
+    case 'test-results':
+      return loadTestResults(force ? 1 : resPage || 1);
+    case 'training':
+      return loadTrainingJobs(force ? 1 : jobsPage || 1);
+    case 'model-registry':
+      return Promise.all([
+        loadModelVersions(force ? 1 : versionsPage || 1),
+        loadModelRegistrySummary(),
+      ]);
+    case 'mcq-obs':
+      return loadMcqObservability();
+    case 'audit':
+      return loadAuditLogs(force ? 1 : auditPage || 1);
+    default:
+      return Promise.resolve();
+  }
+}
+
+function activatePanel(panelId, forceLoad = false) {
+  document.querySelectorAll('.admin-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+
+  const panel = document.getElementById(`panel-${panelId}`);
+  const nav = document.getElementById(`nav-${panelId}`);
+  panel?.classList.add('active');
+  nav?.classList.add('active');
+
+  const label = nav?.querySelector('span')?.textContent;
+  if (label) {
+    document.getElementById('topbarTitle').textContent = label;
+  }
+
+  document.getElementById('adminSidebar').classList.remove('open');
+  loadPanelData(panelId, forceLoad).catch(err => {
+    showToast(`Failed to load panel data: ${err.message}`, 'error');
+  });
+}
+
+function setupPanelNav() {
+  const navItems = document.querySelectorAll('.nav-item[data-panel]');
+  navItems.forEach(item => {
+    item.addEventListener('click', e => {
+      e.preventDefault();
+      const panelId = item.dataset.panel;
+      activatePanel(panelId);
     });
+  });
+}
 
-    document.addEventListener('click', (evt) => {
-      if (!profileMenu.classList.contains('open')) return;
-      if (profileMenu.contains(evt.target)) return;
-      profileMenu.classList.remove('open');
-      toggle.setAttribute('aria-expanded', 'false');
-    });
-  }
+// Quick action buttons on dashboard
+function setupQuickActions() {
+  document.getElementById('qaTeacherRequests')?.addEventListener('click', () => activatePanel('teacher-requests'));
+  document.getElementById('qaTestResults')?.addEventListener('click', () => activatePanel('test-results'));
+  document.getElementById('qaTriggerTraining')?.addEventListener('click', () => activatePanel('training'));
+  document.getElementById('qaAuditLogs')?.addEventListener('click', () => activatePanel('audit'));
+}
 
-  if (logoutBtn) {
-    logoutBtn.addEventListener('click', () => {
-      clearAuthSession();
-      window.location.replace('/index.html');
-    });
+// =====================================================
+// Server health
+// =====================================================
+async function checkServer() {
+  const dot = document.getElementById('statusDot');
+  const text = document.getElementById('serverStatusText');
+  const pre = document.getElementById('serverInfoPre');
+  try {
+    const res = await fetch('/health');
+    const data = await res.json().catch(() => ({}));
+    dot.className = 'status-dot online';
+    text.textContent = data.status || 'Online';
+    if (pre) pre.textContent = JSON.stringify(data, null, 2);
+  } catch {
+    dot.className = 'status-dot offline';
+    text.textContent = 'Offline';
+    if (pre) pre.textContent = 'Backend unreachable.';
   }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  const session = enforceAdminSessionGuard();
-  if (!session) return;
-  setupAdminNavbar(session);
-
-  function getGradeDisplayName(grade) {
-    const gradeNames = {
-      elementary: 'Elementary (K-5)',
-      middle: 'Middle School (6-8)',
-      high: 'High School (9-12)',
-      college: 'College'
-    };
-    return gradeNames[grade] || grade || 'N/A';
+// =====================================================
+// Dashboard Stats
+// =====================================================
+async function loadDashboardStats() {
+  try {
+    const data = await api.admin.getStats();
+    document.getElementById('statUsersVal').textContent = data.users ?? '—';
+    document.getElementById('statQuestionsVal').textContent = data.questions ?? '—';
+    document.getElementById('statEmotionsVal').textContent = data.emotion_logs ?? '—';
+    document.getElementById('statTrainingVal').textContent = data.training_jobs_running ?? 0;
+    document.getElementById('statModelsVal').textContent = data.production_models ?? 0;
+    document.getElementById('statMcqTodayVal').textContent = data.mcq_events_today ?? 0;
+  } catch (err) {
+    showToast('Failed to load stats: ' + err.message, 'error');
   }
+}
 
-  // If the page is served from a different port (e.g. Live Server on 5500),
-  // point API calls at the backend dev server running on port 5000.
-  const API_BASE = (location.port && location.port !== '5000') ? `http://${location.hostname}:5000` : '';
-  function apiFetch(path, opts) { return fetch(API_BASE + path, opts); }
-  // Admin stats
-  const getStatsBtn = document.getElementById('getStats');
-  const statsOut = document.getElementById('statsOutput');
-  const adminTokenInput = document.getElementById('adminToken');
-  const adminTokenRequestsInput = document.getElementById('adminTokenRequests');
-  adminTokenInput.value = adminTokenInput.placeholder || 'dev-admin-token';
-  if (adminTokenRequestsInput) {
-    adminTokenRequestsInput.value = adminTokenInput.value;
-    adminTokenInput.addEventListener('input', () => { adminTokenRequestsInput.value = adminTokenInput.value; });
-    adminTokenRequestsInput.addEventListener('input', () => { adminTokenInput.value = adminTokenRequestsInput.value; });
-  }
-  function getAdminToken(){
-    return (adminTokenRequestsInput && adminTokenRequestsInput.value.trim()) || (adminTokenInput && adminTokenInput.value.trim()) || '';
-  }
+// =====================================================
+// Users Panel
+// =====================================================
+let usersPage = 1;
+const usersPerPage = 15;
+let editingUserId = null;
+let editingUserIsDisabled = false;
+let allSchools = [];
 
-  getStatsBtn.addEventListener('click', async () => {
-    const token = adminTokenInput.value.trim();
-    statsOut.textContent = 'Loading...';
+async function loadUsers(page = 1) {
+  usersPage = page;
+  const search = document.getElementById('userSearch').value.trim();
+  const role = document.getElementById('userRoleFilter').value;
+  const status = document.getElementById('userStatusFilter').value;
+  const school_id = document.getElementById('userSchoolFilter').value;
+  const tbody = document.getElementById('usersTableBody');
+  tbody.innerHTML = `<tr><td colspan="8" class="table-empty"><div class="spinner"></div></td></tr>`;
+
+  try {
+    const data = await api.admin.listUsers({ page, per_page: usersPerPage, search, role, status, school_id });
+    const items = data.items || [];
+    if (!items.length) {
+      tbody.innerHTML = `<tr><td colspan="8" class="table-empty">No users found.</td></tr>`;
+    } else {
+      tbody.innerHTML = items.map(u => {
+        const roleBadge = u.role === 'admin' ? 'badge-purple' : u.role === 'teacher' ? 'badge-teal' : 'badge-blue';
+        const statusBadge = u.is_disabled ? '<span class="badge badge-red">Disabled</span>' : '<span class="badge badge-green">Active</span>';
+        const school = allSchools.find(s => s.id === u.school_id);
+        return `<tr>
+          <td>${u.id}</td>
+          <td><strong>${esc(u.name)}</strong></td>
+          <td style="color:#94a3b8">${esc(u.email)}</td>
+          <td><span class="badge ${roleBadge}">${u.role}</span></td>
+          <td>${school ? esc(school.name) : u.school_id ? `ID:${u.school_id}` : '—'}</td>
+          <td>${statusBadge}</td>
+          <td style="color:#6b7280;font-size:0.78rem">${u.created_at ? new Date(u.created_at).toLocaleDateString() : '—'}</td>
+          <td>
+            <button class="action-btn action-btn-primary edit-user-btn" data-id="${u.id}">Edit</button>
+            ${u.is_disabled
+              ? `<button class="action-btn action-btn-success enable-user-btn" data-id="${u.id}">Enable</button>`
+              : `<button class="action-btn action-btn-danger disable-user-btn" data-id="${u.id}">Disable</button>`}
+          </td>
+        </tr>`;
+      }).join('');
+      // Bind events
+      tbody.querySelectorAll('.edit-user-btn').forEach(btn => btn.addEventListener('click', () => openUserEditModal(parseInt(btn.dataset.id), items)));
+      tbody.querySelectorAll('.disable-user-btn').forEach(btn => btn.addEventListener('click', () => quickDisableUser(parseInt(btn.dataset.id))));
+      tbody.querySelectorAll('.enable-user-btn').forEach(btn => btn.addEventListener('click', () => quickEnableUser(parseInt(btn.dataset.id))));
+    }
+    const totalPages = Math.ceil((data.total || 0) / usersPerPage);
+    renderPagination(document.getElementById('usersPagination'), page, totalPages, loadUsers);
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="8" class="table-empty">Error: ${esc(err.message)}</td></tr>`;
+  }
+}
+
+function openUserEditModal(userId, items) {
+  const u = items.find(x => x.id === userId);
+  if (!u) return;
+  editingUserId = userId;
+  editingUserIsDisabled = u.is_disabled;
+  document.getElementById('editUserRole').value = u.role;
+
+  // Populate school select
+  const schoolSel = document.getElementById('editUserSchool');
+  schoolSel.innerHTML = '<option value="">— No School —</option>' +
+    allSchools.map(s => `<option value="${s.id}" ${u.school_id === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
+
+  const toggleBtn = document.getElementById('userModalToggleDisable');
+  toggleBtn.textContent = u.is_disabled ? 'Enable User' : 'Disable User';
+  toggleBtn.className = u.is_disabled ? 'btn btn-success' : 'btn btn-danger';
+
+  document.getElementById('userModalTitle').textContent = `Edit User: ${u.name}`;
+  document.getElementById('userModalFeedback').textContent = '';
+  document.getElementById('userModal').classList.remove('hidden');
+}
+
+async function quickDisableUser(userId) {
+  if (!await showConfirm('Disable User', 'Are you sure you want to disable this user?')) return;
+  try {
+    await api.admin.disableUser(userId, 'Admin action');
+    showToast('User disabled', 'success');
+    loadUsers(usersPage);
+  } catch (err) { showToast(err.message, 'error'); }
+}
+
+async function quickEnableUser(userId) {
+  try {
+    await api.admin.enableUser(userId);
+    showToast('User enabled', 'success');
+    loadUsers(usersPage);
+  } catch (err) { showToast(err.message, 'error'); }
+}
+
+function setupUsersPanel() {
+  document.getElementById('usersSearchBtn').addEventListener('click', () => loadUsers(1));
+  document.getElementById('userSearch').addEventListener('keydown', e => { if (e.key === 'Enter') loadUsers(1); });
+
+  document.getElementById('userModalClose').addEventListener('click', () => document.getElementById('userModal').classList.add('hidden'));
+  document.getElementById('userModalCancel').addEventListener('click', () => document.getElementById('userModal').classList.add('hidden'));
+
+  document.getElementById('userModalSave').addEventListener('click', async () => {
+    if (!editingUserId) return;
+    const role = document.getElementById('editUserRole').value;
+    const school_id = document.getElementById('editUserSchool').value || null;
+    const feedback = document.getElementById('userModalFeedback');
+    feedback.textContent = 'Saving...';
     try {
-      const res = await apiFetch('/api/admin/stats', {
-        headers: { 'X-Admin-Token': token }
+      await api.admin.updateUser(editingUserId, {
+        role,
+        school_id: school_id ? parseInt(school_id) : null,
       });
-      if (!res.ok) {
-        const text = await res.text();
-        statsOut.textContent = `Error ${res.status}: ${text}`;
-        return;
-      }
-      const data = await res.json();
-      statsOut.textContent = JSON.stringify(data, null, 2);
+      feedback.style.color = '#34d399';
+      feedback.textContent = 'Saved!';
+      showToast('User updated', 'success');
+      document.getElementById('userModal').classList.add('hidden');
+      loadUsers(usersPage);
     } catch (err) {
-      statsOut.textContent = 'Fetch error: ' + String(err);
+      feedback.style.color = '#f87171';
+      feedback.textContent = err.message;
     }
   });
 
-  // Signup creates a user account (direct) and stores JWT on success
-  const signupBtn = document.getElementById('signupBtn');
-  const signupOut = document.getElementById('signupOutput');
-  signupBtn.addEventListener('click', async () => {
-    const name = document.getElementById('signupName').value.trim();
-    const email = document.getElementById('signupEmail').value.trim();
-    const password = document.getElementById('signupPassword').value;
-    const grade = document.getElementById('signupGrade').value;
-
-    signupOut.textContent = 'Creating account...';
+  document.getElementById('userModalToggleDisable').addEventListener('click', async () => {
+    if (!editingUserId) return;
+    const reason = document.getElementById('editUserDisableReason').value.trim();
+    const feedback = document.getElementById('userModalFeedback');
     try {
-      const res = await apiFetch('/api/auth/signup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, email, password, grade })
-      });
-      let data;
-      try { data = await res.json(); } catch(e) { data = null }
-      if (!res.ok) {
-        signupOut.textContent = `Signup failed (${res.status}): ${data ? JSON.stringify(data) : 'no details'}`;
-        return;
+      if (editingUserIsDisabled) {
+        await api.admin.enableUser(editingUserId);
+        showToast('User enabled', 'success');
+      } else {
+        await api.admin.disableUser(editingUserId, reason || 'Admin action');
+        showToast('User disabled', 'warning');
       }
-      // On success: store JWT and update UI
-      if (data && data.token) {
-        localStorage.setItem('jwt', data.token);
-        document.getElementById('authOutput').textContent = `Logged in as ${data.user ? data.user.email : email}`;
-      }
-      signupOut.textContent = `Account created and logged in as ${email}`;
+      document.getElementById('userModal').classList.add('hidden');
+      loadUsers(usersPage);
     } catch (err) {
-      const msg = String(err) === 'TypeError: Failed to fetch'
-        ? 'Network error: cannot reach backend. Is the backend running? Try `cd backend && python app.py` and serve frontend via `cd frontend && python -m http.server 8000`.'
-        : 'Error: ' + String(err);
-      signupOut.textContent = msg;
+      feedback.style.color = '#f87171';
+      feedback.textContent = err.message;
     }
   });
+}
 
-  // Admin: list, approve, reject teacher requests
-  const refreshRequestsBtn = document.getElementById('refreshRequests');
-  const clearRequestsBtn = document.getElementById('clearRequests');
-  const requestsList = document.getElementById('requestsList');
+// =====================================================
+// Schools Panel
+// =====================================================
+let schoolsPage = 1;
+let showingHierarchy = false;
 
-  function renderRequests(items){
-    if (!items || items.length === 0){
-      requestsList.innerHTML = '<div>No pending requests</div>';
-      return;
-    }
-    const html = items.map(r => `
-      <div class="request-item card" data-id="${r.id}" style="display:flex;justify-content:space-between;align-items:center;padding:8px;margin-bottom:8px">
-        <div>
-          <strong>${r.name}</strong> <span style="color:#6b7280">${r.email}</span>
-          <div style="font-size:12px;color:#6b7280">Grade: ${getGradeDisplayName(r.grade)} · ${new Date(r.created_at).toLocaleString()}</div>
+async function loadSchoolsHierarchy() {
+  const container = document.getElementById('hierarchyTreeContainer');
+  container.innerHTML = '<div class="table-empty"><div class="spinner"></div></div>';
+  try {
+    const data = await api.admin.getSchoolsHierarchy();
+    const items = data.items || [];
+    if (!items.length) { container.innerHTML = '<div class="table-empty">No schools found.</div>'; return; }
+    container.innerHTML = items.map(school => `
+      <div class="hierarchy-school">
+        <div class="hierarchy-school-header" data-school-id="${school.id}">
+          <div class="hierarchy-school-name">
+            <i class="fas fa-school" style="color:#818cf8;font-size:14px"></i>
+            ${esc(school.name)}
+          </div>
+          <div class="hierarchy-school-meta">
+            <span><i class="fas fa-chalkboard-teacher" style="color:#6b7280"></i> ${school.teacher_count} teachers</span>
+            <span><i class="fas fa-user-graduate" style="color:#6b7280"></i> ${school.student_count} students</span>
+            <i class="fas fa-chevron-down" style="color:#6b7280;margin-left:8px;transition:transform 0.2s"></i>
+          </div>
         </div>
-        <div style="display:flex;gap:8px">
-          <button class="approveBtn">Approve</button>
-          <button class="rejectBtn secondary">Reject</button>
-        </div>
-      </div>
-    `).join('');
-    requestsList.innerHTML = html;
-
-    // Attach handlers
-    document.querySelectorAll('.approveBtn').forEach(btn => btn.addEventListener('click', async (e) => {
-      const id = e.target.closest('.request-item').dataset.id;
-      const token = getAdminToken();
-      try {
-        const res = await apiFetch(`/api/admin/teacher-requests/${id}/approve`, { method: 'POST', headers: { 'X-Admin-Token': token } });
-        if (!res.ok) {
-          const t = await res.text().catch(()=>null);
-          alert(`Failed to approve: ${res.status} ${t || ''}`);
-          return;
-        }
-        alert('Approved');
-        refreshRequestsBtn.click();
-      } catch (err) { alert('Error: '+String(err)); }
-    }));
-
-    document.querySelectorAll('.rejectBtn').forEach(btn => btn.addEventListener('click', async (e) => {
-      const id = e.target.closest('.request-item').dataset.id;
-      const token = getAdminToken();
-      try {
-        const res = await apiFetch(`/api/admin/teacher-requests/${id}/reject`, { method: 'POST', headers: { 'X-Admin-Token': token } });
-        if (!res.ok) {
-          const t = await res.text().catch(()=>null);
-          alert(`Failed to reject: ${res.status} ${t || ''}`);
-          return;
-        }
-        alert('Rejected');
-        refreshRequestsBtn.click();
-      } catch (err) { alert('Error: '+String(err)); }
-    }));
-  }
-
-  // Pagination state (requests)
-  let currentPage = 1;
-  const perPage = 5;
-
-  async function loadRequests(page = 1){
-    const token = getAdminToken();
-    requestsList.textContent = 'Loading...';
-    try {
-      const res = await apiFetch(`/api/admin/teacher-requests?page=${page}&per_page=${perPage}`, { headers: { 'X-Admin-Token': token } });
-      if (!res.ok) {
-        const t = await res.text().catch(()=>null);
-        requestsList.textContent = `Failed to load (${res.status}): ${t || ''}`;
-        return;
-      }
-      const data = await res.json();
-      renderRequests(data.items || []);
-      document.getElementById('requestsPage').textContent = `Page: ${data.page} / ${Math.ceil((data.total||0)/data.per_page) || 1}`;
-      currentPage = data.page || 1;
-    } catch (err) {
-      requestsList.textContent = 'Error: ' + String(err);
-    }
-  }
-
-  refreshRequestsBtn.addEventListener('click', async () => { await loadRequests(1); });
-
-  document.getElementById('prevPage').addEventListener('click', async () => { if (currentPage > 1) await loadRequests(currentPage-1); });
-  document.getElementById('nextPage').addEventListener('click', async () => { await loadRequests(currentPage+1); });
-
-  clearRequestsBtn.addEventListener('click', () => { requestsList.innerHTML = 'No requests loaded'; });
-
-  // --- Test results UI ---
-  const refreshResultsBtn = document.getElementById('refreshResults');
-  const clearResultsBtn = document.getElementById('clearResults');
-  const resultsList = document.getElementById('resultsList');
-  const resultsPageLabel = document.getElementById('resultsPage');
-  let resultsPage = 1;
-  const resultsPerPage = 8;
-
-  function renderResults(items){
-    if (!items || items.length === 0){
-      resultsList.innerHTML = '<div>No results found</div>';
-      return;
-    }
-    const rows = items.map(r => `
-      <div class="result-row card" data-user-id="${r.user?.id || ''}" style="display:flex;justify-content:space-between;align-items:center;padding:8px;margin-bottom:8px">
-        <div>
-          <strong>${r.user?.name || 'Unknown'}</strong> <span style="color:#6b7280">${r.user?.email || ''}</span>
-          <div style="font-size:12px;color:#6b7280">${r.subject} · ${r.total_questions} q · ${r.score_pct}%${r.avg_time_per_question ? ` · avg ${r.avg_time_per_question}s` : ''} · ${new Date(r.started_at).toLocaleString()}</div>
-        </div>
-        <div style="display:flex;gap:8px">
-          <button class="detailsBtn">History</button>
+        <div class="hierarchy-teachers" id="hteach-${school.id}" data-loaded="0">
+          <div style="color:#6b7280;padding:8px 0;font-size:0.8rem">Click to load teacher and student hierarchy.</div>
         </div>
       </div>
     `).join('');
-    resultsList.innerHTML = rows;
 
-    document.querySelectorAll('.detailsBtn').forEach(btn => btn.addEventListener('click', async (e) => {
-      const userId = e.target.closest('.result-row').dataset.userId;
-      await showUserHistory(userId);
-    }));
-  }
+    // Toggle expand/collapse
+    container.querySelectorAll('.hierarchy-school-header').forEach(header => {
+      header.addEventListener('click', async () => {
+        const id = header.dataset.schoolId;
+        const teachers = document.getElementById(`hteach-${id}`);
+        const chevron = header.querySelector('.fa-chevron-down');
+        teachers.classList.toggle('expanded');
+        if (chevron) chevron.style.transform = teachers.classList.contains('expanded') ? 'rotate(180deg)' : '';
 
-  async function loadResults(page = 1){
-    const token = getAdminToken();
-    const subject = document.getElementById('filterSubject').value.trim();
-    const email = document.getElementById('filterEmail').value.trim();
-    const start = document.getElementById('filterStart').value;
-    const end = document.getElementById('filterEnd').value;
-    resultsList.textContent = 'Loading...';
-    try {
-      const res = await apiFetch(`/api/admin/test-results?page=${page}&per_page=${resultsPerPage}${subject?`&subject=${encodeURIComponent(subject)}`:''}${email?`&email=${encodeURIComponent(email)}`:''}${start?`&start=${encodeURIComponent(start)}`:''}${end?`&end=${encodeURIComponent(end)}`:''}`, { headers: { 'X-Admin-Token': token } });
-      if (!res.ok){
-        const t = await res.text().catch(()=>null);
-        resultsList.textContent = `Failed to load (${res.status}): ${t || ''}`;
-        return;
-      }
-      const data = await res.json();
-      renderResults(data.items || []);
-      resultsPageLabel.textContent = `Page: ${data.page} / ${Math.ceil((data.total||0)/data.per_page) || 1}`;
-      resultsPage = data.page || 1;
-    } catch (err){
-      resultsList.textContent = 'Error: ' + String(err);
-    }
-  }
-
-  refreshResultsBtn.addEventListener('click', async () => { await loadResults(1); });
-
-  const exportBtn = document.getElementById('exportCsv');
-  if (exportBtn) {
-    exportBtn.title = 'Includes column avg_time_per_question (seconds)';
-    exportBtn.addEventListener('click', async () => {
-      const token = getAdminToken();
-      const subject = document.getElementById('filterSubject').value.trim();
-      const email = document.getElementById('filterEmail').value.trim();
-      const start = document.getElementById('filterStart').value;
-      const end = document.getElementById('filterEnd').value;
-      try {
-        const url = `/api/admin/test-results?format=csv${subject?`&subject=${encodeURIComponent(subject)}`:''}${email?`&email=${encodeURIComponent(email)}`:''}${start?`&start=${encodeURIComponent(start)}`:''}${end?`&end=${encodeURIComponent(end)}`:''}`;
-        const res = await apiFetch(url, { headers: { 'X-Admin-Token': token } });
-        if (!res.ok) {
-          const t = await res.text().catch(()=>null);
-          alert(`Export failed: ${res.status} ${t || ''}`);
+        if (!teachers.classList.contains('expanded') || teachers.dataset.loaded === '1') {
           return;
         }
-        const csv = await res.text();
-        const blob = new Blob([csv], { type: 'text/csv' });
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        link.download = `test_results_${new Date().toISOString().slice(0,10)}.csv`;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-      } catch (err) {
-        alert('Export error: '+String(err));
-      }
+
+        teachers.innerHTML = '<div class="table-empty"><div class="spinner"></div></div>';
+        try {
+          const detail = await api.admin.getSchoolHierarchyDetail(id);
+          const teacherItems = detail.teachers || [];
+          if (!teacherItems.length) {
+            teachers.innerHTML = '<div style="color:#4b5563;padding:8px 0;font-size:0.8rem">No teachers assigned</div>';
+            teachers.dataset.loaded = '1';
+            return;
+          }
+
+          teachers.innerHTML = teacherItems.map(t => {
+            const classroomRows = (t.classrooms || []).map(cls => {
+              const studentRows = (cls.students || []).map(st => `<span class="hierarchy-student-pill">${esc(st.name || st.email || 'Student')}</span>`).join('');
+              return `
+                <div class="hierarchy-classroom-row">
+                  <div class="hierarchy-classroom-head">
+                    <span class="hierarchy-classroom-name">${esc(cls.name || 'Classroom')}</span>
+                    <span class="hierarchy-classroom-meta">${(cls.students || []).length} students</span>
+                  </div>
+                  <div class="hierarchy-student-list">${studentRows || '<span class="hierarchy-empty">No students enrolled</span>'}</div>
+                </div>
+              `;
+            }).join('');
+
+            return `
+              <div class="hierarchy-teacher">
+                <i class="fas fa-chalkboard-teacher" style="color:#6366f1;font-size:12px"></i>
+                <div style="flex:1">
+                  <div style="font-weight:600;font-size:0.85rem;color:#c7d2fe">${esc(t.name)}</div>
+                  <div style="font-size:0.74rem;color:#6b7280;margin-bottom:8px">${esc(t.email)}</div>
+                  <div class="hierarchy-classroom-list">${classroomRows || '<span class="hierarchy-empty">No classrooms</span>'}</div>
+                </div>
+              </div>
+            `;
+          }).join('');
+          teachers.dataset.loaded = '1';
+        } catch (detailErr) {
+          teachers.innerHTML = `<div class="table-empty">Error: ${esc(detailErr.message)}</div>`;
+        }
+      });
     });
+  } catch (err) {
+    container.innerHTML = `<div class="table-empty">Error: ${esc(err.message)}</div>`;
   }
-  document.getElementById('resultsPrev').addEventListener('click', async () => { if (resultsPage > 1) await loadResults(resultsPage-1); });
-  document.getElementById('resultsNext').addEventListener('click', async () => { await loadResults(resultsPage+1); });
-  clearResultsBtn.addEventListener('click', () => { resultsList.innerHTML = 'No results loaded'; });
+}
 
-  // Modal helpers
-  const resultsModal = document.getElementById('resultsModal');
-  const resultsModalTitle = document.getElementById('resultsModalTitle');
-  const resultsModalBody = document.getElementById('resultsModalBody');
-  document.getElementById('resultsClose').addEventListener('click', () => { resultsModal.classList.add('hidden'); resultsModal.setAttribute('aria-hidden','true'); });
+async function loadSchools() {
+  const tbody = document.getElementById('schoolsTableBody');
+  tbody.innerHTML = `<tr><td colspan="7" class="table-empty"><div class="spinner"></div></td></tr>`;
+  try {
+    const data = await api.admin.getSchoolsHierarchy();
+    allSchools = data.items || [];
+    if (!allSchools.length) {
+      tbody.innerHTML = `<tr><td colspan="7" class="table-empty">No schools found.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = allSchools.map(s => `<tr>
+      <td>${s.id}</td>
+      <td><strong>${esc(s.name)}</strong></td>
+      <td style="color:#6b7280">${esc(s.slug || '—')}</td>
+      <td>${s.teacher_count ?? 0}</td>
+      <td>${s.student_count ?? 0}</td>
+      <td style="color:#6b7280;font-size:0.78rem">${s.created_at ? new Date(s.created_at).toLocaleDateString() : '—'}</td>
+      <td>
+        <button class="action-btn action-btn-danger delete-school-btn" data-id="${s.id}">Delete</button>
+      </td>
+    </tr>`).join('');
 
-  function drawSparkline(scores){
-    if (!scores || scores.length === 0) return '<div>No history</div>';
-    const w = 300, h = 80, padding = 6;
-    const max = Math.max(...scores), min = Math.min(...scores);
-    const pts = scores.map((s,i)=>{
-      const x = padding + (i/(scores.length-1 || 1))*(w-2*padding);
-      const y = h - padding - ((s - min) / ((max-min)||1))*(h-2*padding);
-      return `${x},${y}`;
-    }).join(' ');
-    return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">
-      <polyline points="${pts}" fill="none" stroke="#2563eb" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
-      ${scores.map((s,i)=>{const x=padding+(i/(scores.length-1||1))*(w-2*padding);const y=h-padding-((s-min)/((max-min)||1))*(h-2*padding);return `<circle cx="${x}" cy="${y}" r="3" fill="#fff" stroke="#2563eb" />`;}).join('')}
-    </svg>`;
+    tbody.querySelectorAll('.delete-school-btn').forEach(btn => btn.addEventListener('click', async () => {
+      const id = parseInt(btn.dataset.id);
+      if (!await showConfirm('Delete School', 'This will remove the school. Users will lose their school association.')) return;
+      try {
+        await api.admin.deleteSchool(id);
+        showToast('School deleted', 'warning');
+        loadSchools();
+      } catch (err) { showToast(err.message, 'error'); }
+    }));
+
+    // Update user school filter dropdown
+    const schoolSel = document.getElementById('userSchoolFilter');
+    schoolSel.innerHTML = '<option value="">All Schools</option>' +
+      allSchools.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+
+    const resultsSchoolSel = document.getElementById('resultsSchoolFilter');
+    if (resultsSchoolSel) {
+      resultsSchoolSel.innerHTML = '<option value="">All Schools</option>' +
+        allSchools.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+    }
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="7" class="table-empty">Error: ${esc(err.message)}</td></tr>`;
   }
+}
 
-  // Chart.js instances
-  let scoresChart = null;
-  let perTestChart = null;
+function setupSchoolsPanel() {
+  document.getElementById('toggleSchoolViewBtn').addEventListener('click', () => {
+    showingHierarchy = !showingHierarchy;
+    document.getElementById('schoolListView').classList.toggle('hidden', showingHierarchy);
+    document.getElementById('schoolHierarchyView').classList.toggle('hidden', !showingHierarchy);
+    document.getElementById('toggleSchoolViewBtn').innerHTML = showingHierarchy
+      ? '<i class="fas fa-table"></i> List View'
+      : '<i class="fas fa-sitemap"></i> Hierarchy View';
+    if (showingHierarchy) loadSchoolsHierarchy();
+  });
 
-  async function showUserHistory(userId){
-    resultsModal.classList.remove('hidden');
-    resultsModal.setAttribute('aria-hidden','false');
-    resultsModalBody.textContent = 'Loading...';
-    try{
-      const token = getAdminToken();
-      const res = await apiFetch(`/api/admin/test-results/${userId}/history`, { headers: { 'X-Admin-Token': token } });
-      if(!res.ok){
-        const t = await res.text().catch(()=>null);
-        resultsModalBody.textContent = `Failed to load (${res.status}): ${t || ''}`;
-        return;
-      }
-      const data = await res.json();
-      const items = data.items || [];
+  document.getElementById('addSchoolBtn').addEventListener('click', () => {
+    document.getElementById('addSchoolModal').classList.remove('hidden');
+    document.getElementById('addSchoolFeedback').textContent = '';
+  });
 
-      // Scores over time (reverse to chronological)
-      const chronological = items.slice().reverse();
-      const labels = chronological.map(i => i.started_at ? new Date(i.started_at).toLocaleDateString() : '');
-      const scores = chronological.map(i => i.score_pct);
+  document.getElementById('addSchoolModalClose').addEventListener('click', () => document.getElementById('addSchoolModal').classList.add('hidden'));
+  document.getElementById('addSchoolCancel').addEventListener('click', () => document.getElementById('addSchoolModal').classList.add('hidden'));
 
-      resultsModalTitle.textContent = items[0] ? `${items[0].subject} history for ${items.length} tests` : 'Student history';
+  document.getElementById('addSchoolSave').addEventListener('click', async () => {
+    const name = document.getElementById('newSchoolName').value.trim();
+    const slug = document.getElementById('newSchoolSlug').value.trim();
+    const fb = document.getElementById('addSchoolFeedback');
+    if (!name || !slug) { fb.textContent = 'Name and slug required.'; return; }
+    try {
+      fb.textContent = 'Creating...';
+      await api.admin.createSchool({ name, slug });
+      fb.textContent = '';
+      showToast('School created!', 'success');
+      document.getElementById('addSchoolModal').classList.add('hidden');
+      document.getElementById('newSchoolName').value = '';
+      document.getElementById('newSchoolSlug').value = '';
+      loadSchools();
+    } catch (err) { fb.textContent = err.message; }
+  });
 
-      // Render scores line chart
-      const scoresCtx = document.getElementById('scoresChart').getContext('2d');
-      if (scoresChart) scoresChart.destroy();
-      scoresChart = new Chart(scoresCtx, {
+  // Auto-slug from name
+  document.getElementById('newSchoolName').addEventListener('input', e => {
+    const slug = e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    document.getElementById('newSchoolSlug').value = slug;
+  });
+}
+
+// =====================================================
+// Teacher Requests Panel
+// =====================================================
+let reqPage = 1;
+const reqPerPage = 10;
+
+async function loadTeacherRequests(page = 1) {
+  reqPage = page;
+  const status = document.getElementById('requestStatusFilter').value;
+  const tbody = document.getElementById('requestsTableBody');
+  tbody.innerHTML = `<tr><td colspan="7" class="table-empty"><div class="spinner"></div></td></tr>`;
+  try {
+    const data = await api.admin.listTeacherRequests({ page, per_page: reqPerPage, status });
+    const items = data.items || [];
+    if (!items.length) {
+      tbody.innerHTML = `<tr><td colspan="7" class="table-empty">No requests found.</td></tr>`;
+    } else {
+      tbody.innerHTML = items.map(r => {
+        const statusBadge = r.status === 'pending' ? 'badge-orange' : r.status === 'approved' ? 'badge-green' : 'badge-red';
+        return `<tr>
+          <td>${r.id}</td>
+          <td><strong>${esc(r.name)}</strong></td>
+          <td style="color:#94a3b8">${esc(r.email)}</td>
+          <td>${r.grade || '—'}</td>
+          <td style="color:#6b7280;font-size:0.78rem">${r.created_at ? new Date(r.created_at).toLocaleString() : '—'}</td>
+          <td><span class="badge ${statusBadge}">${r.status}</span></td>
+          <td>
+            ${r.status === 'pending' ? `
+              <button class="action-btn action-btn-success approve-req-btn" data-id="${r.id}">Approve</button>
+              <button class="action-btn action-btn-danger reject-req-btn" data-id="${r.id}">Reject</button>
+            ` : '—'}
+          </td>
+        </tr>`;
+      }).join('');
+      tbody.querySelectorAll('.approve-req-btn').forEach(btn => btn.addEventListener('click', async () => {
+        if (!await showConfirm('Approve Request', 'Approve this teacher request?')) return;
+        try { await api.admin.approveTeacherRequest(btn.dataset.id); showToast('Approved!', 'success'); loadTeacherRequests(reqPage); }
+        catch (err) { showToast(err.message, 'error'); }
+      }));
+      tbody.querySelectorAll('.reject-req-btn').forEach(btn => btn.addEventListener('click', async () => {
+        if (!await showConfirm('Reject Request', 'Reject this teacher request?')) return;
+        try { await api.admin.rejectTeacherRequest(btn.dataset.id); showToast('Rejected', 'warning'); loadTeacherRequests(reqPage); }
+        catch (err) { showToast(err.message, 'error'); }
+      }));
+    }
+    const totalPages = Math.ceil((data.total || 0) / reqPerPage);
+    renderPagination(document.getElementById('requestsPagination'), page, totalPages, loadTeacherRequests);
+
+    // Update badge
+    const badge = document.getElementById('pendingRequestsBadge');
+    if (status === 'pending' && data.total > 0) {
+      badge.textContent = data.total;
+      badge.style.display = 'inline';
+    } else {
+      badge.textContent = '0';
+      badge.style.display = 'none';
+    }
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="7" class="table-empty">Error: ${esc(err.message)}</td></tr>`;
+  }
+}
+
+function setupTeacherRequestsPanel() {
+  document.getElementById('refreshRequestsBtn').addEventListener('click', () => loadTeacherRequests(1));
+  document.getElementById('requestStatusFilter').addEventListener('change', () => loadTeacherRequests(1));
+}
+
+// =====================================================
+// Test Results Panel
+// =====================================================
+let resPage = 1;
+const resPerPage = 12;
+
+async function loadTestResults(page = 1) {
+  resPage = page;
+  const minScoreValue = parseFloat(document.getElementById('resultsMinScore').value);
+  const maxScoreValue = parseFloat(document.getElementById('resultsMaxScore').value);
+  const params = {
+    page, per_page: resPerPage,
+    subject: document.getElementById('resultsSubjectFilter').value.trim(),
+    email: document.getElementById('resultsEmailFilter').value.trim(),
+    status: document.getElementById('resultsStatusFilter').value,
+    school_id: document.getElementById('resultsSchoolFilter').value,
+    start: document.getElementById('resultsDateFrom').value,
+    end: document.getElementById('resultsDateTo').value,
+    min_score: Number.isFinite(minScoreValue) ? minScoreValue : 0,
+    max_score: Number.isFinite(maxScoreValue) ? maxScoreValue : 100,
+  };
+  const tbody = document.getElementById('resultsTableBody');
+  tbody.innerHTML = `<tr><td colspan="9" class="table-empty"><div class="spinner"></div></td></tr>`;
+  try {
+    const data = await api.admin.listTestResults(params);
+    const items = data.items || [];
+    if (!items.length) {
+      tbody.innerHTML = `<tr><td colspan="9" class="table-empty">No results found.</td></tr>`;
+    } else {
+      tbody.innerHTML = items.map(r => {
+        const pct = r.score_pct ?? 0;
+        const scoreColor = pct >= 80 ? '#34d399' : pct >= 60 ? '#fbbf24' : '#f87171';
+        const statusBadge = r.status === 'completed' ? 'badge-green' : r.status === 'in_progress' ? 'badge-blue' : 'badge-gray';
+        return `<tr>
+          <td>${r.id}</td>
+          <td>
+            <div style="font-weight:600">${esc(r.user?.name || 'Unknown')}</div>
+            <div style="font-size:0.74rem;color:#6b7280">${esc(r.user?.email || '')}</div>
+          </td>
+          <td>${esc(r.subject)}</td>
+          <td>
+            <span style="color:${scoreColor};font-weight:700">${pct}%</span>
+            <div class="score-bar"><div class="score-bar-fill" style="width:${pct}%;background:${scoreColor}"></div></div>
+          </td>
+          <td>${r.correct_answers}/${r.total_questions}</td>
+          <td>${r.avg_time_per_question ? r.avg_time_per_question.toFixed(1) + 's' : '—'}</td>
+          <td><span class="badge ${statusBadge}">${r.status}</span></td>
+          <td style="color:#6b7280;font-size:0.78rem">${r.started_at ? new Date(r.started_at).toLocaleDateString() : '—'}</td>
+          <td>
+            <button class="action-btn action-btn-primary view-result-btn" data-id="${r.id}">View</button>
+            <button class="action-btn action-btn-primary view-history-detail-btn" data-user-id="${r.user?.id}">History</button>
+          </td>
+        </tr>`;
+      }).join('');
+      tbody.querySelectorAll('.view-result-btn').forEach(btn => btn.addEventListener('click', () => showTestDetail(parseInt(btn.dataset.id))));
+      tbody.querySelectorAll('.view-history-detail-btn').forEach(btn => btn.addEventListener('click', () => showUserHistory(parseInt(btn.dataset.userId))));
+    }
+    const totalPages = Math.ceil((data.total || 0) / resPerPage);
+    renderPagination(document.getElementById('resultsPagination'), page, totalPages, loadTestResults);
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="9" class="table-empty">Error: ${esc(err.message)}</td></tr>`;
+  }
+}
+
+let detailChartInstance = null;
+
+async function showTestDetail(testResultId) {
+  const modal = document.getElementById('testDetailModal');
+  const body = document.getElementById('testDetailModalBody');
+  document.getElementById('testDetailModalTitle').textContent = `Test Result #${testResultId}`;
+  modal.classList.remove('hidden');
+  body.innerHTML = '<div class="spinner"></div>';
+  try {
+    const data = await api.admin.getTestResultDetail(testResultId);
+    const t = data.test;
+    const answers = data.answers || [];
+    const labels = answers.map((_, i) => `Q${i+1}`);
+    const values = answers.map(a => a.is_correct ? 100 : 0);
+
+    body.innerHTML = `
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">
+        <div><strong style="color:#94a3b8">Student:</strong> ${esc(t.user_name || '')} &lt;${esc(t.user_email || '')}&gt;</div>
+        <div><strong style="color:#94a3b8">Subject:</strong> ${esc(t.subject)}</div>
+        <div><strong style="color:#94a3b8">Score:</strong> <span style="color:${t.score_pct >= 80 ? '#34d399' : '#fbbf24'};font-weight:700">${t.score_pct}%</span></div>
+        <div><strong style="color:#94a3b8">Answers:</strong> ${t.correct_answers}/${t.total_questions}</div>
+        <div><strong style="color:#94a3b8">Avg Time:</strong> ${t.avg_time_per_question ? t.avg_time_per_question.toFixed(1) + 's' : '—'}</div>
+        <div><strong style="color:#94a3b8">Status:</strong> ${t.status}</div>
+      </div>
+      <div style="background:rgba(0,0,0,0.2);border-radius:8px;padding:12px;margin-bottom:16px">
+        <canvas id="detailBarChart" height="120"></canvas>
+      </div>
+      <div style="max-height:300px;overflow-y:auto">
+        ${answers.map((a, i) => `
+          <div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04);display:flex;align-items:center;gap:12px">
+            <span style="color:#6b7280;width:30px;flex-shrink:0">Q${i+1}</span>
+            <div style="flex:1;font-size:0.82rem">${esc(a.question_text || '—')}</div>
+            <span style="color:${a.is_correct ? '#34d399' : '#f87171'};font-size:0.8rem;font-weight:600;flex-shrink:0">
+              ${a.is_correct ? '✓ Correct' : '✗ Wrong'}
+            </span>
+            <span style="color:#6b7280;font-size:0.75rem;flex-shrink:0">${a.time_spent}s</span>
+          </div>
+        `).join('')}
+      </div>
+    `;
+
+    setTimeout(() => {
+      const ctx = document.getElementById('detailBarChart')?.getContext('2d');
+      if (!ctx) return;
+      if (detailChartInstance) { detailChartInstance.destroy(); detailChartInstance = null; }
+      detailChartInstance = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            data: values,
+            backgroundColor: values.map(v => v === 100 ? 'rgba(16,185,129,0.7)' : 'rgba(239,68,68,0.7)'),
+            borderRadius: 4,
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: {
+            y: { suggestedMin: 0, suggestedMax: 100, ticks: { color: '#6b7280' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+            x: { ticks: { color: '#6b7280' }, grid: { display: false } }
+          }
+        }
+      });
+    }, 50);
+  } catch (err) {
+    body.innerHTML = `<div style="color:#f87171">Error: ${esc(err.message)}</div>`;
+  }
+}
+
+async function showUserHistory(userId) {
+  const modal = document.getElementById('testDetailModal');
+  const body = document.getElementById('testDetailModalBody');
+  document.getElementById('testDetailModalTitle').textContent = `User History #${userId}`;
+  modal.classList.remove('hidden');
+  body.innerHTML = '<div class="spinner"></div>';
+  try {
+    const data = await api.admin.getTestResultHistory(userId);
+    const items = (data.items || []).slice().reverse();
+    if (!items.length) { body.innerHTML = '<div class="table-empty">No history found.</div>'; return; }
+
+    const labels = items.map(i => i.started_at ? new Date(i.started_at).toLocaleDateString() : '');
+    const scores = items.map(i => i.score_pct || 0);
+
+    body.innerHTML = `
+      <div style="background:rgba(0,0,0,0.2);border-radius:8px;padding:12px;margin-bottom:16px">
+        <canvas id="historyLineChart" height="120"></canvas>
+      </div>
+      <div style="max-height:300px;overflow-y:auto">
+        ${items.map(i => `
+          <div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04);display:flex;align-items:center;gap:12px">
+            <span style="font-size:0.78rem;color:#6b7280;width:90px;flex-shrink:0">${i.started_at ? new Date(i.started_at).toLocaleDateString() : ''}</span>
+            <div style="flex:1">
+              <span style="font-weight:600;color:#c7d2fe">${esc(i.subject)}</span>
+              <span style="color:#6b7280;font-size:0.78rem;margin-left:8px">${i.correct_answers}/${i.total_questions}</span>
+            </div>
+            <span style="color:${i.score_pct >= 80 ? '#34d399' : i.score_pct >= 60 ? '#fbbf24' : '#f87171'};font-weight:700">${i.score_pct}%</span>
+          </div>
+        `).join('')}
+      </div>
+    `;
+
+    setTimeout(() => {
+      const ctx = document.getElementById('historyLineChart')?.getContext('2d');
+      if (!ctx) return;
+      if (detailChartInstance) { detailChartInstance.destroy(); detailChartInstance = null; }
+      detailChartInstance = new Chart(ctx, {
         type: 'line',
         data: {
-          labels: labels,
+          labels,
           datasets: [{
             label: 'Score %',
             data: scores,
-            borderColor: '#2563eb',
-            backgroundColor: 'rgba(37,99,235,0.08)',
-            fill: true,
-            tension: 0.2,
-            pointRadius: 4
+            borderColor: '#818cf8',
+            backgroundColor: 'rgba(99,102,241,0.1)',
+            fill: true, tension: 0.3, pointRadius: 4,
+            pointBackgroundColor: '#818cf8',
           }]
         },
         options: {
           responsive: true,
-          scales: { y: { suggestedMin: 0, suggestedMax: 100 } }
+          plugins: { legend: { display: false } },
+          scales: {
+            y: { suggestedMin: 0, suggestedMax: 100, ticks: { color: '#6b7280' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+            x: { ticks: { color: '#6b7280' }, grid: { display: false } }
+          }
         }
       });
+    }, 50);
+  } catch (err) {
+    body.innerHTML = `<div style="color:#f87171">Error: ${esc(err.message)}</div>`;
+  }
+}
 
-      // Render history list with a View button per test
-      const listHtml = chronological.map(i=>`<div style="padding:6px 0;display:flex;justify-content:space-between;align-items:center">
-          <div><strong>${i.subject}</strong> — ${i.score_pct}% (${i.correct_answers}/${i.total_questions})${i.avg_time_per_question ? ` · avg ${i.avg_time_per_question}s` : ''} · ${i.started_at ? new Date(i.started_at).toLocaleString() : ''}</div>
-          <div><button class="viewTestBtn" data-test-id="${i.id}">View Test</button></div>
-        </div>`).join('');
-      document.getElementById('historyList').innerHTML = listHtml;
+function setupTestResultsPanel() {
+  document.getElementById('resultsSearchBtn').addEventListener('click', () => loadTestResults(1));
+  document.getElementById('exportResultsCsvBtn').addEventListener('click', async () => {
+    const minScoreValue = parseFloat(document.getElementById('resultsMinScore').value);
+    const maxScoreValue = parseFloat(document.getElementById('resultsMaxScore').value);
+    try {
+      const csv = await api.admin.exportTestResultsCsv({
+        subject: document.getElementById('resultsSubjectFilter').value.trim(),
+        email: document.getElementById('resultsEmailFilter').value.trim(),
+        status: document.getElementById('resultsStatusFilter').value,
+        school_id: document.getElementById('resultsSchoolFilter').value,
+        start: document.getElementById('resultsDateFrom').value,
+        end: document.getElementById('resultsDateTo').value,
+        min_score: Number.isFinite(minScoreValue) ? minScoreValue : 0,
+        max_score: Number.isFinite(maxScoreValue) ? maxScoreValue : 100,
+      });
+      downloadText(csv, `test_results_${today()}.csv`, 'text/csv');
+      showToast('CSV downloaded', 'success');
+    } catch (err) { showToast(err.message, 'error'); }
+  });
+  document.getElementById('testDetailModalClose').addEventListener('click', () => {
+    document.getElementById('testDetailModal').classList.add('hidden');
+  });
+}
 
-      // Attach handlers for viewing a specific test's answers
-      document.querySelectorAll('.viewTestBtn').forEach(btn => btn.addEventListener('click', async (e) => {
-        const testId = e.target.dataset.testId;
-        await loadTestDetail(testId);
+// =====================================================
+// Training Jobs Panel
+// =====================================================
+let jobsPage = 1;
+const jobsPerPage = 10;
+
+async function loadTrainingJobs(page = 1) {
+  jobsPage = page;
+  const status = document.getElementById('jobStatusFilter').value;
+  const tbody = document.getElementById('jobsTableBody');
+  tbody.innerHTML = `<tr><td colspan="8" class="table-empty"><div class="spinner"></div></td></tr>`;
+  try {
+    const data = await api.admin.listTrainingJobs({ page, per_page: jobsPerPage, status, sync: true });
+    const items = data.items || [];
+    if (!items.length) {
+      tbody.innerHTML = `<tr><td colspan="8" class="table-empty">No training jobs found.</td></tr>`;
+    } else {
+      tbody.innerHTML = items.map(j => {
+        const sbadge = j.status === 'succeeded' ? 'badge-green' : j.status === 'running' ? 'badge-blue' : j.status === 'failed' ? 'badge-red' : 'badge-gray';
+        const dur = j.duration_ms ? `${(j.duration_ms/1000).toFixed(0)}s` : '—';
+        const shortJobId = j.job_id ? (String(j.job_id).length > 16 ? `${String(j.job_id).slice(0, 16)}...` : String(j.job_id)) : '—';
+        return `<tr>
+          <td>${j.id}</td>
+          <td><code style="font-size:0.72rem;color:#94a3b8">${esc(shortJobId)}</code></td>
+          <td><span class="badge ${sbadge}">${j.status}</span></td>
+          <td>${esc(j.source || '—')}</td>
+          <td>${esc(j.triggered_by_name || `ID:${j.triggered_by}` || '—')}</td>
+          <td>${dur}</td>
+          <td style="font-size:0.78rem;color:#6b7280">${j.started_at ? new Date(j.started_at).toLocaleString() : '—'}</td>
+          <td>
+            <button class="action-btn action-btn-primary view-job-btn" data-id="${j.id}">Details</button>
+            ${j.status === 'running' ? `<button class="action-btn action-btn-warning refresh-job-btn" data-job-id="${j.job_id}">Sync</button>` : ''}
+          </td>
+        </tr>`;
+      }).join('');
+      tbody.querySelectorAll('.view-job-btn').forEach(btn => btn.addEventListener('click', () => showJobDetail(parseInt(btn.dataset.id))));
+      tbody.querySelectorAll('.refresh-job-btn').forEach(btn => btn.addEventListener('click', async () => {
+        try {
+          await api.admin.getTrainingStatus(btn.dataset.jobId);
+          showToast('Job status synced', 'info');
+          loadTrainingJobs(jobsPage);
+        } catch (err) { showToast(err.message, 'error'); }
       }));
-
-    }catch(err){
-      resultsModalBody.textContent = 'Error: '+String(err);
     }
+    const totalPages = Math.ceil((data.total || 0) / jobsPerPage);
+    renderPagination(document.getElementById('jobsPagination'), page, totalPages, loadTrainingJobs);
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="8" class="table-empty">Error: ${esc(err.message)}</td></tr>`;
+  }
+}
+
+async function showJobDetail(jobDbId) {
+  const body = document.getElementById('jobDetailModalBody');
+  document.getElementById('jobDetailModal').classList.remove('hidden');
+  document.getElementById('jobDetailModalTitle').textContent = `Job #${jobDbId}`;
+  body.innerHTML = '<div class="spinner"></div>';
+
+  let j;
+  try {
+    const detail = await api.admin.getTrainingJob(jobDbId, { sync: true });
+    j = detail.job;
+  } catch (err) {
+    body.innerHTML = `<div style="color:#f87171">Error: ${esc(err.message)}</div>`;
+    return;
   }
 
-  async function loadTestDetail(testId){
-    const token = getAdminToken();
-    const target = document.getElementById('perTestDetails');
-    target.textContent = 'Loading test details...';
-    try{
-      const res = await apiFetch(`/api/admin/test-results/${testId}`, { headers: { 'X-Admin-Token': token } });
-      if(!res.ok){
-        const t = await res.text().catch(()=>null);
-        target.textContent = `Failed to load (${res.status}): ${t || ''}`;
-        return;
-      }
-      const data = await res.json();
-      const answers = data.answers || [];
-      if (answers.length === 0){
-        target.textContent = 'No answers recorded for this test.';
-        return;
-      }
+  const shortTitle = j.job_id ? (String(j.job_id).length > 20 ? `${String(j.job_id).slice(0, 20)}...` : String(j.job_id)) : `#${jobDbId}`;
+  document.getElementById('jobDetailModalTitle').textContent = `Job: ${shortTitle}`;
+  body.innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px">
+      <div><strong style="color:#94a3b8">Status:</strong> ${j.status}</div>
+      <div><strong style="color:#94a3b8">Source:</strong> ${j.source || '—'}</div>
+      <div><strong style="color:#94a3b8">Triggered by:</strong> ${j.triggered_by_name || j.triggered_by || '—'}</div>
+      <div><strong style="color:#94a3b8">Duration:</strong> ${j.duration_ms ? (j.duration_ms/1000).toFixed(1) + 's' : '—'}</div>
+      <div><strong style="color:#94a3b8">Started:</strong> ${j.started_at ? new Date(j.started_at).toLocaleString() : '—'}</div>
+      <div><strong style="color:#94a3b8">Finished:</strong> ${j.finished_at ? new Date(j.finished_at).toLocaleString() : '—'}</div>
+    </div>
+    ${j.error_summary ? `<div style="color:#f87171;background:rgba(239,68,68,0.1);padding:8px 12px;border-radius:8px;margin-bottom:12px">⚠ ${esc(j.error_summary)}</div>` : ''}
+    ${Object.keys(j.metrics || {}).length ? `<div style="margin-bottom:12px"><strong style="color:#94a3b8">Metrics:</strong><pre class="info-pre">${JSON.stringify(j.metrics, null, 2)}</pre></div>` : ''}
+    ${Object.keys(j.artifact_manifest || {}).length ? `<div style="margin-bottom:12px"><strong style="color:#94a3b8">Artifacts:</strong><pre class="info-pre">${JSON.stringify(j.artifact_manifest, null, 2)}</pre></div>` : ''}
+    ${j.stdout_tail ? `<div style="margin-bottom:12px"><strong style="color:#94a3b8">Stdout tail:</strong><pre class="info-pre">${esc(j.stdout_tail)}</pre></div>` : ''}
+    ${j.stderr_tail ? `<div><strong style="color:#94a3b8">Stderr tail:</strong><pre class="info-pre" style="color:#f87171">${esc(j.stderr_tail)}</pre></div>` : ''}
+  `;
+}
 
-      // Build per-question chart data (0 or 100 for wrong/correct)
-      const labels = answers.map((a, idx) => `Q${idx+1}`);
-      const values = answers.map(a => a.is_correct ? 100 : 0);
+function setupTrainingPanel() {
+  document.getElementById('refreshJobsBtn').addEventListener('click', () => loadTrainingJobs(1));
+  document.getElementById('jobStatusFilter').addEventListener('change', () => loadTrainingJobs(1));
+  document.getElementById('jobDetailModalClose').addEventListener('click', () => document.getElementById('jobDetailModal').classList.add('hidden'));
 
-      // Destroy previous chart
-      const perCtx = document.getElementById('perTestChart').getContext('2d');
-      if (perTestChart) perTestChart.destroy();
-      perTestChart = new Chart(perCtx, {
-        type: 'bar',
+  document.getElementById('triggerTrainingBtn').addEventListener('click', async () => {
+    if (!await showConfirm('Trigger Training', 'This will start a strict HF training pipeline. Continue?')) return;
+    const btn = document.getElementById('triggerTrainingBtn');
+    btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Triggering...';
+    try {
+      const result = await api.admin.triggerTraining();
+      showToast(`Training triggered! Job: ${result.job_id || 'started'}`, 'success');
+      loadTrainingJobs(1);
+    } catch (err) { showToast('Failed: ' + err.message, 'error'); }
+    finally { btn.disabled = false; btn.innerHTML = '<i class="fas fa-play-circle"></i> Trigger Training'; }
+  });
+}
+
+// =====================================================
+// Model Registry Panel
+// =====================================================
+let versionsPage = 1;
+const versionsPerPage = 15;
+
+async function loadModelVersions(page = 1) {
+  versionsPage = page;
+  const tbody = document.getElementById('versionsTableBody');
+  tbody.innerHTML = `<tr><td colspan="8" class="table-empty"><div class="spinner"></div></td></tr>`;
+  try {
+    const data = await api.admin.listModelVersions({ page, per_page: versionsPerPage });
+    const items = data.items || [];
+    if (!items.length) {
+      tbody.innerHTML = `<tr><td colspan="8" class="table-empty">No model versions registered yet.</td></tr>`;
+    } else {
+      tbody.innerHTML = items.map(v => `<tr>
+        <td>${v.id}</td>
+        <td><strong>${esc(v.model_name)}</strong></td>
+        <td><code style="color:#818cf8">${esc(v.version_tag)}</code></td>
+        <td>${v.is_production ? '<span class="badge badge-green">✓ Production</span>' : '—'}</td>
+        <td>${v.is_rollback_candidate ? '<span class="badge badge-orange">✓ Rollback</span>' : '—'}</td>
+        <td style="font-size:0.75rem;color:#6b7280">${Object.keys(v.metrics || {}).length ? JSON.stringify(v.metrics).slice(0,60) + '…' : '—'}</td>
+        <td style="font-size:0.78rem;color:#6b7280">${v.created_at ? new Date(v.created_at).toLocaleDateString() : '—'}</td>
+        <td>
+          ${!v.is_production ? `<button class="action-btn action-btn-success promote-version-btn" data-id="${v.id}">Promote</button>` : ''}
+          ${!v.is_rollback_candidate ? `<button class="action-btn action-btn-warning rollback-version-btn" data-id="${v.id}">Set Rollback</button>` : ''}
+        </td>
+      </tr>`).join('');
+      tbody.querySelectorAll('.promote-version-btn').forEach(btn => btn.addEventListener('click', async () => {
+        if (!await showConfirm('Promote Version', 'Set this version as production?')) return;
+        try { await api.admin.promoteModelVersion(parseInt(btn.dataset.id)); showToast('Promoted to production!', 'success'); loadModelVersions(versionsPage); loadModelRegistrySummary(); }
+        catch (err) { showToast(err.message, 'error'); }
+      }));
+      tbody.querySelectorAll('.rollback-version-btn').forEach(btn => btn.addEventListener('click', async () => {
+        try { await api.admin.setRollbackTarget(parseInt(btn.dataset.id)); showToast('Set as rollback target', 'warning'); loadModelVersions(versionsPage); loadModelRegistrySummary(); }
+        catch (err) { showToast(err.message, 'error'); }
+      }));
+    }
+    const totalPages = Math.ceil((data.total || 0) / versionsPerPage);
+    renderPagination(document.getElementById('versionsPagination'), page, totalPages, loadModelVersions);
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="8" class="table-empty">Error: ${esc(err.message)}</td></tr>`;
+  }
+}
+
+async function loadModelRegistrySummary() {
+  const container = document.getElementById('modelRegistrySummaryBody');
+  if (!container) return;
+
+  container.innerHTML = '<div class="table-empty"><div class="spinner"></div></div>';
+  try {
+    const data = await api.admin.getModelRegistrySummary();
+    const items = data.items || [];
+    if (!items.length) {
+      container.innerHTML = '<div class="table-empty">No model registry data found.</div>';
+      return;
+    }
+
+    container.innerHTML = items.map(item => {
+      const current = item.current_production;
+      const previous = item.previous;
+      const rollback = item.rollback_target;
+      return `
+        <div class="model-summary-item">
+          <div class="model-summary-title">${esc(item.model_name)}</div>
+          <div class="model-summary-row"><span>Current:</span><strong>${esc(current?.version_tag || '—')}</strong></div>
+          <div class="model-summary-row"><span>Previous:</span><strong>${esc(previous?.version_tag || '—')}</strong></div>
+          <div class="model-summary-row"><span>Rollback:</span><strong>${esc(rollback?.version_tag || '—')}</strong></div>
+          <div class="model-summary-row model-summary-muted"><span>Total Versions:</span><strong>${item.total_versions || 0}</strong></div>
+        </div>
+      `;
+    }).join('');
+  } catch (err) {
+    container.innerHTML = `<div class="table-empty">Error: ${esc(err.message)}</div>`;
+  }
+}
+
+function setupModelRegistryPanel() {
+  document.getElementById('registerVersionBtn').addEventListener('click', () => {
+    document.getElementById('registerVersionModal').classList.remove('hidden');
+    document.getElementById('registerVersionFeedback').textContent = '';
+  });
+  document.getElementById('registerVersionModalClose').addEventListener('click', () => document.getElementById('registerVersionModal').classList.add('hidden'));
+  document.getElementById('registerVersionCancel').addEventListener('click', () => document.getElementById('registerVersionModal').classList.add('hidden'));
+  document.getElementById('registerVersionSave').addEventListener('click', async () => {
+    const payload = {
+      model_name: document.getElementById('regModelName').value.trim(),
+      version_tag: document.getElementById('regVersionTag').value.trim(),
+      artifact_uri: document.getElementById('regArtifactUri').value.trim(),
+      training_job_id: document.getElementById('regTrainingJobId').value.trim(),
+      notes: document.getElementById('regNotes').value.trim(),
+    };
+    const fb = document.getElementById('registerVersionFeedback');
+    if (!payload.model_name || !payload.version_tag) { fb.textContent = 'Model name and version tag required.'; return; }
+    try {
+      fb.textContent = 'Registering...';
+      await api.admin.createModelVersion(payload);
+      showToast('Version registered!', 'success');
+      document.getElementById('registerVersionModal').classList.add('hidden');
+      loadModelVersions(versionsPage);
+      loadModelRegistrySummary();
+    } catch (err) { fb.textContent = err.message; }
+  });
+}
+
+// =====================================================
+// MCQ Observability Panel
+// =====================================================
+let mcqTimeChart = null;
+let mcqModeChart = null;
+
+async function loadMcqObservability() {
+  const days = parseInt(document.getElementById('mcqObsDays').value || 30);
+  const subject = document.getElementById('mcqObsSubject').value.trim();
+  try {
+    const data = await api.admin.getMcqObservability({ days, subject });
+    const s = data.summary || {};
+    document.getElementById('mcqTotal').textContent = s.total ?? '—';
+    document.getElementById('mcqSuccessRate').textContent = (s.success_rate ?? 0) + '%';
+    document.getElementById('mcqFailureRate').textContent = (s.failure_rate ?? 0) + '%';
+    document.getElementById('mcqFallbackRate').textContent = (s.fallback_rate ?? 0) + '%';
+    document.getElementById('mcqGenerationCounts').textContent = `${s.questions_generated_total ?? 0} / ${s.questions_requested_total ?? 0}`;
+    document.getElementById('mcqAvgLatency').textContent = s.avg_latency_ms ?? '—';
+
+    // Time series chart
+    const ts = data.time_series || [];
+    const tsLabels = ts.map(t => t.date);
+    const tsSuccess = ts.map(t => t.success);
+    const tsFailure = ts.map(t => t.failure);
+    const tsFallback = ts.map(t => t.fallback);
+
+    const timeCtx = document.getElementById('mcqTimeChart')?.getContext('2d');
+    if (timeCtx) {
+      if (mcqTimeChart) { mcqTimeChart.destroy(); mcqTimeChart = null; }
+      mcqTimeChart = new Chart(timeCtx, {
+        type: 'line',
         data: {
-          labels: labels,
+          labels: tsLabels,
+          datasets: [
+            { label: 'Success', data: tsSuccess, borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', fill: true, tension: 0.3 },
+            { label: 'Failure', data: tsFailure, borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', fill: true, tension: 0.3 },
+            { label: 'Fallback', data: tsFallback, borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', fill: true, tension: 0.3 },
+          ]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { labels: { color: '#94a3b8' } } },
+          scales: {
+            y: { ticks: { color: '#6b7280' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+            x: { ticks: { color: '#6b7280', maxTicksLimit: 8 }, grid: { display: false } }
+          }
+        }
+      });
+    }
+
+    // Mode chart (donut)
+    const modes = data.by_mode || {};
+    const modeCtx = document.getElementById('mcqModeChart')?.getContext('2d');
+    if (modeCtx && Object.keys(modes).length) {
+      if (mcqModeChart) { mcqModeChart.destroy(); mcqModeChart = null; }
+      const modeColors = ['#818cf8', '#34d399', '#fbbf24', '#f87171', '#22d3ee', '#f472b6'];
+      mcqModeChart = new Chart(modeCtx, {
+        type: 'doughnut',
+        data: {
+          labels: Object.keys(modes),
           datasets: [{
-            label: 'Correct (100 = correct, 0 = wrong)',
-            data: values,
-            backgroundColor: values.map(v => v===100 ? 'rgba(16,185,129,0.8)' : 'rgba(239,68,68,0.8)')
+            data: Object.values(modes),
+            backgroundColor: modeColors,
+            borderColor: '#1a2236',
+            borderWidth: 3,
           }]
         },
         options: {
           responsive: true,
-          scales: { y: { suggestedMin: 0, suggestedMax: 100 } }
+          plugins: { legend: { labels: { color: '#94a3b8' } } }
         }
       });
-
-      // Show detailed list
-      const detailsHtml = answers.map((a, i) => `
-        <div style="padding:6px 0">
-          <strong>Q${i+1}:</strong> ${a.question_text || '—'} — <em>${a.is_correct ? 'Correct' : 'Wrong'}</em> · ${a.time_spent}s · ${a.emotion_at_time || '—'}
-        </div>
-      `).join('');
-      document.getElementById('perTestDetails').innerHTML = `<div style="margin-bottom:8px"><strong>Test ${data.test.id}</strong> — ${data.test.score_pct}%${data.test.avg_time_per_question ? ` · avg ${data.test.avg_time_per_question}s` : ''}</div>${detailsHtml}`;
-
-    }catch(err){
-      target.textContent = 'Error: '+String(err);
     }
+  } catch (err) {
+    showToast('Failed to load MCQ observability: ' + err.message, 'error');
   }
+}
 
-  // Login
-  const loginBtn = document.getElementById('loginBtn');
-  const loginOut = document.getElementById('loginOutput');
-  loginBtn.addEventListener('click', async () => {
-    const email = document.getElementById('loginEmail').value.trim();
-    const password = document.getElementById('loginPassword').value;
-    loginOut.textContent = 'Logging in...';
+function setupMcqObsPanel() {
+  document.getElementById('refreshMcqObsBtn').addEventListener('click', loadMcqObservability);
+  document.getElementById('mcqObsDays').addEventListener('change', loadMcqObservability);
+}
+
+// =====================================================
+// Audit Trail Panel
+// =====================================================
+let auditPage = 1;
+const auditPerPage = 15;
+
+async function loadAuditLogs(page = 1) {
+  auditPage = page;
+  const params = {
+    page, per_page: auditPerPage,
+    action: document.getElementById('auditActionFilter').value.trim(),
+    target_type: document.getElementById('auditTargetType').value,
+    date_from: document.getElementById('auditDateFrom').value,
+    date_to: document.getElementById('auditDateTo').value,
+  };
+  const tbody = document.getElementById('auditTableBody');
+  tbody.innerHTML = `<tr><td colspan="7" class="table-empty"><div class="spinner"></div></td></tr>`;
+  try {
+    const data = await api.admin.listAuditLogs(params);
+    const items = data.items || [];
+    if (!items.length) {
+      tbody.innerHTML = `<tr><td colspan="7" class="table-empty">No audit logs found.</td></tr>`;
+    } else {
+      tbody.innerHTML = items.map(log => `<tr>
+        <td>${log.id}</td>
+        <td><span class="badge badge-purple">${esc(log.action)}</span></td>
+        <td>${esc(log.actor_name || `ID:${log.actor_id}` || '—')}</td>
+        <td>${log.target_type ? `<span class="badge badge-gray">${esc(log.target_type)}</span> ${esc(log.target_id || '')}` : '—'}</td>
+        <td style="color:#6b7280;font-size:0.75rem">${esc(log.ip || '—')}</td>
+        <td style="color:#6b7280;font-size:0.78rem;max-width:200px;overflow:hidden;text-overflow:ellipsis">${esc(log.notes || '—')}</td>
+        <td style="font-size:0.78rem;color:#6b7280">${log.created_at ? new Date(log.created_at).toLocaleString() : '—'}</td>
+      </tr>`).join('');
+    }
+    const totalPages = Math.ceil((data.total || 0) / auditPerPage);
+    renderPagination(document.getElementById('auditPagination'), page, totalPages, loadAuditLogs);
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="7" class="table-empty">Error: ${esc(err.message)}</td></tr>`;
+  }
+}
+
+function setupAuditPanel() {
+  document.getElementById('auditSearchBtn').addEventListener('click', () => loadAuditLogs(1));
+  document.getElementById('exportAuditBtn').addEventListener('click', async () => {
     try {
-      const res = await apiFetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      });
-      let data;
-      try { data = await res.json(); } catch(e){ data = null }
-      if (!res.ok) {
-        loginOut.textContent = `Login failed (${res.status}): ${data ? JSON.stringify(data) : 'no details'}`;
-        return;
+      const csv = await api.admin.exportAuditLogs();
+      downloadText(csv, `audit_logs_${today()}.csv`, 'text/csv');
+      showToast('Audit CSV downloaded', 'success');
+    } catch (err) { showToast(err.message, 'error'); }
+  });
+}
+
+// =====================================================
+// Utilities
+// =====================================================
+function esc(str) {
+  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function today() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function downloadText(text, filename, mime) {
+  const blob = new Blob([text], { type: mime });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+// =====================================================
+// Main Init
+// =====================================================
+document.addEventListener('DOMContentLoaded', () => {
+  const session = enforceAdmin();
+  if (!session) return;
+
+  const user = session.user;
+
+  // Setup navbar / sidebar user info
+  ['sidebarUserName', 'topbarUserName'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = user.name || 'Admin';
+  });
+  ['sidebarAvatar', 'topbarAvatar'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = (user.name || 'A').charAt(0).toUpperCase();
+  });
+
+  // Profile Dropdown Toggle Logic
+  const profileBtn = document.getElementById('profile-btn');
+  const dropdown = document.getElementById('profile-dropdown');
+  const profileMenuContainer = document.getElementById('profile-menu-container');
+
+  if (profileBtn && dropdown && profileMenuContainer) {
+    profileBtn.addEventListener('click', (e) => {
+      e.stopPropagation(); // Prevent immediate closing
+      dropdown.classList.toggle('hidden');
+    });
+
+    document.addEventListener('click', (event) => {
+      if (!profileMenuContainer.contains(event.target)) {
+        dropdown.classList.add('hidden');
       }
-      if (data && data.token) localStorage.setItem('jwt', data.token);
-      loginOut.textContent = `Logged in: ${data ? JSON.stringify(data.user) : 'ok'}`;
-      document.getElementById('authOutput').textContent = data && data.user ? `Logged in as ${data.user.email}` : 'Logged in';
-    } catch (err) {
-      const msg = String(err) === 'TypeError: Failed to fetch'
-        ? 'Network error: cannot reach backend. Is the backend running? Try `cd backend && python app.py` and serve frontend via `cd frontend && python -m http.server 8000`.'
-        : 'Error: ' + String(err);
-      loginOut.textContent = msg;
-    }
-  });
-
-  // Authenticated actions
-  const whoamiBtn = document.getElementById('whoami');
-  const getSummaryBtn = document.getElementById('getSummary');
-  const logoutBtn = document.getElementById('logoutBtn');
-  const authOut = document.getElementById('authOutput');
-
-  function getAuthHeader() {
-    const token = localStorage.getItem('jwt');
-    return token ? { 'Authorization': 'Bearer ' + token } : {};
+    });
   }
 
-  // Quick server health check to aid debugging
-  const apiUrlEl = document.getElementById('apiUrl');
-  async function checkServer(){
-    const statusEl = document.getElementById('serverStatus');
-    apiUrlEl.textContent = `API: ${API_BASE || location.origin}`;
-    try {
-      const res = await apiFetch('/health');
-      const text = await res.text().catch(()=>null);
-      if (!res.ok) {
-        statusEl.textContent = `Server: Unhealthy (${res.status})`;
-        statusEl.style.color='orange';
-        return text ? `Details: ${text}` : undefined;
-      }
-      // Try parse JSON, fallback to raw text
-      let data;
-      try { data = JSON.parse(text); } catch(e){ data = null }
-      statusEl.textContent = `Server: ${data?.status || 'ok'}`;
-      statusEl.style.color = 'green';
-      return data || text;
-    } catch (err) {
-      statusEl.textContent = 'Server: unreachable (start backend)';
-      statusEl.style.color = 'red';
-      return String(err);
+  // Logout (Sidebar & Topbar) with Global Confirmation Dialog
+  const performLogout = async () => {
+    const isConfirmed = await showConfirm('Log Out', 'Are you sure you want to log out?');
+    if (isConfirmed) {
+      clearSession();
+      window.location.replace('/index.html');
+    } else {
+      // Close dropdown if user cancels
+      if (dropdown) dropdown.classList.add('hidden');
     }
-  }
-  // Run initial check
-  (async()=>{ await checkServer(); })();
+  };
 
-  // Retry button
-  document.getElementById('healthRetry').addEventListener('click', async () => {
-    const r = await checkServer();
-    if (r) console.info('Health check result:', r);
+  document.getElementById('sidebarLogoutBtn')?.addEventListener('click', performLogout);
+  document.getElementById('topbarLogoutBtn')?.addEventListener('click', performLogout);
+
+  // Mobile sidebar toggle
+  document.getElementById('sidebarToggle')?.addEventListener('click', () => {
+    document.getElementById('adminSidebar').classList.toggle('open');
   });
 
-  whoamiBtn.addEventListener('click', async () => {
-    authOut.textContent = 'Calling /api/auth/me...';
-    try {
-      const res = await apiFetch('/api/auth/me', { headers: getAuthHeader() });
-      const data = await res.json();
-      authOut.textContent = res.ok ? JSON.stringify(data) : `Error ${res.status}: ${JSON.stringify(data)}`;
-    } catch (err) {
-      authOut.textContent = 'Error: ' + String(err);
-    }
-  });
+  // Health retry
+  document.getElementById('healthRetryBtn')?.addEventListener('click', checkServer);
 
-  getSummaryBtn.addEventListener('click', async () => {
-    authOut.textContent = 'Fetching my summary...';
-    try {
-      const res = await apiFetch('/api/reports/summary', { headers: getAuthHeader() });
-      const data = await res.json();
-      authOut.textContent = res.ok ? JSON.stringify(data, null, 2) : `Error ${res.status}: ${JSON.stringify(data)}`;
-    } catch (err) {
-      authOut.textContent = 'Error: ' + String(err);
-    }
-  });
+  // Panel navigation
+  setupPanelNav();
+  setupQuickActions();
 
-  logoutBtn.addEventListener('click', () => {
-    localStorage.removeItem('jwt');
-    authOut.textContent = 'Logged out';
-    loginOut.textContent = 'Not logged in';
-    signupOut.textContent = 'Not logged in';
-  });
+  // Setup all panels
+  setupUsersPanel();
+  setupSchoolsPanel();
+  setupTeacherRequestsPanel();
+  setupTestResultsPanel();
+  setupTrainingPanel();
+  setupModelRegistryPanel();
+  setupMcqObsPanel();
+  setupAuditPanel();
+
+  // Dashboard refresh
+  document.getElementById('refreshStatsBtn')?.addEventListener('click', () => loadPanelData('dashboard', true));
+
+  // Initial loads
+  checkServer();
+  activatePanel('dashboard', true);
+  loadSchools(); // Also populates allSchools for user filters
+  // Keep pending teacher requests badge up to date.
+  loadTeacherRequests(1);
 });
