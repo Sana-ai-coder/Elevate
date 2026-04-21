@@ -217,14 +217,16 @@ async function loadDashboardStats() {
 // =====================================================
 let usersPage = 1;
 const usersPerPage = 15;
-let editingUserId = null;
-let editingUserIsDisabled = false;
-let allSchools = [];
+let currentUsersList = []; // Store users to easily find them for the edit modal
 
 async function loadUsers(page = 1) {
   usersPage = page;
-  const search = document.getElementById('userSearch')?.value.trim() || '';
-  const role = document.getElementById('userRoleFilter')?.value || '';
+  const searchInput = document.getElementById('userSearch');
+  const roleFilter = document.getElementById('userRoleFilter');
+  
+  const search = searchInput ? searchInput.value.trim() : '';
+  const role = roleFilter ? roleFilter.value : '';
+  
   const tbody = document.getElementById('usersTableBody');
   const adminBody = document.getElementById('adminProfileBody');
   const currentUser = loadSession().user;
@@ -239,7 +241,7 @@ async function loadUsers(page = 1) {
                   <div class="user-cell" style="display:flex;align-items:center;gap:12px;">
                       <div class="user-avatar" style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg, #6366f1, #8b5cf6);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:bold;">${(currentUser.name || 'A').charAt(0).toUpperCase()}</div>
                       <div class="user-details" style="display:flex;flex-direction:column;">
-                          <span class="user-name" style="font-weight:600;">${esc(currentUser.name)}</span>
+                          <span class="user-name" style="font-weight:600;color:#e2e8f0">${esc(currentUser.name)}</span>
                       </div>
                   </div>
               </td>
@@ -251,15 +253,14 @@ async function loadUsers(page = 1) {
   }
 
   try {
-    // Fetch users (ignoring the old status/school filters from the UI since we removed them)
     const data = await api.admin.listUsers({ page, per_page: usersPerPage, search, role });
-    const items = data.items || [];
+    currentUsersList = data.items || [];
 
-    if (!items.length) {
+    if (!currentUsersList.length) {
       if (tbody) tbody.innerHTML = `<tr><td colspan="6" class="table-empty">No users found.</td></tr>`;
     } else {
-      // 2. Filter out admins from the main list
-      const editableUsers = items.filter(u => u.role !== 'admin');
+      // 2. Filter out admins from the bottom list
+      const editableUsers = currentUsersList.filter(u => u.role !== 'admin');
 
       if (!editableUsers.length && tbody) {
            tbody.innerHTML = `<tr><td colspan="6" class="table-empty">No teachers or students found.</td></tr>`;
@@ -284,7 +285,7 @@ async function loadUsers(page = 1) {
               <td>${school ? esc(school.name) : '<span style="color:#6b7280">Unassigned</span>'}</td>
               <td>${statusBadge}</td>
               <td class="text-right" style="white-space:nowrap;">
-                <button class="action-btn action-btn-primary edit-user-btn" data-id="${u.id}">Edit</button>
+                <button class="action-btn action-btn-primary edit-user-btn" data-id="${u.id}"><i class="fas fa-edit"></i> Edit</button>
                 ${u.is_disabled
                   ? `<button class="action-btn action-btn-success enable-user-btn" data-id="${u.id}">Enable</button>`
                   : `<button class="action-btn action-btn-danger disable-user-btn" data-id="${u.id}">Disable</button>`}
@@ -292,8 +293,8 @@ async function loadUsers(page = 1) {
             </tr>`;
           }).join('');
 
-          // Bind events
-          tbody.querySelectorAll('.edit-user-btn').forEach(btn => btn.addEventListener('click', () => openUserEditModal(parseInt(btn.dataset.id), editableUsers)));
+          // Bind row events
+          tbody.querySelectorAll('.edit-user-btn').forEach(btn => btn.addEventListener('click', () => openUserEditModal(parseInt(btn.dataset.id))));
           tbody.querySelectorAll('.disable-user-btn').forEach(btn => btn.addEventListener('click', () => quickDisableUser(parseInt(btn.dataset.id))));
           tbody.querySelectorAll('.enable-user-btn').forEach(btn => btn.addEventListener('click', () => quickEnableUser(parseInt(btn.dataset.id))));
       }
@@ -304,6 +305,83 @@ async function loadUsers(page = 1) {
     if (tbody) tbody.innerHTML = `<tr><td colspan="6" class="table-empty">Error: ${esc(err.message)}</td></tr>`;
   }
 }
+
+function openUserEditModal(userId) {
+  const u = currentUsersList.find(x => x.id === userId);
+  if (!u) return;
+  
+  document.getElementById('editUserId').value = u.id;
+  document.getElementById('editUserName').value = u.name;
+  document.getElementById('editUserEmail').value = u.email;
+  document.getElementById('editUserRole').value = u.role;
+  
+  // Populate school select
+  const schoolSel = document.getElementById('editUserSchool');
+  if (schoolSel) {
+    schoolSel.innerHTML = '<option value="">— Unassigned —</option>' +
+      allSchools.map(s => `<option value="${s.id}" ${u.school_id === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
+  }
+
+  document.getElementById('userEditModal').classList.remove('hidden');
+}
+
+async function quickDisableUser(userId) {
+  if (!await showConfirm('Disable User', 'Are you sure you want to disable this user?')) return;
+  try {
+    await api.admin.disableUser(userId, 'Admin action');
+    showToast('User disabled', 'success');
+    loadUsers(usersPage);
+  } catch (err) { showToast(err.message, 'error'); }
+}
+
+async function quickEnableUser(userId) {
+  try {
+    await api.admin.enableUser(userId);
+    showToast('User enabled', 'success');
+    loadUsers(usersPage);
+  } catch (err) { showToast(err.message, 'error'); }
+}
+
+function setupUsersPanel() {
+  // Bind Search Input
+  const searchInput = document.getElementById('userSearch');
+  if (searchInput) {
+      searchInput.addEventListener('keydown', e => { if (e.key === 'Enter') loadUsers(1); });
+  }
+
+  // Bind Role Filter
+  const roleFilter = document.getElementById('userRoleFilter');
+  if (roleFilter) {
+      roleFilter.addEventListener('change', () => loadUsers(1));
+  }
+
+  // Edit Modal Events
+  const modal = document.getElementById('userEditModal');
+  document.getElementById('closeUserEditModal')?.addEventListener('click', () => modal.classList.add('hidden'));
+  document.getElementById('cancelUserEditBtn')?.addEventListener('click', () => modal.classList.add('hidden'));
+
+  // Save changes from the Edit Modal
+  document.getElementById('saveUserEditBtn')?.addEventListener('click', async () => {
+    const userId = document.getElementById('editUserId').value;
+    const role = document.getElementById('editUserRole').value;
+    const school_id = document.getElementById('editUserSchool').value || null;
+    
+    try {
+      await api.admin.updateUser(userId, {
+        role,
+        school_id: school_id ? parseInt(school_id) : null,
+      });
+      showToast('User updated successfully', 'success');
+      modal.classList.add('hidden');
+      loadUsers(usersPage);
+    } catch (err) {
+      showToast(err.message || 'Failed to update user', 'error');
+    }
+  });
+}
+// =====================================================
+// (End of Users Panel)
+// =====================================================
 
 function openUserEditModal(userId, items) {
   const u = items.find(x => x.id === userId);

@@ -1032,3 +1032,76 @@ body {
 .dropdown-item.text-danger:hover {
   background: rgba(239, 68, 68, 0.1);
 }
+
+/* ---- User Panel Toolbar & UI Polish ---- */
+.panel-toolbar.card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 24px;
+  margin-bottom: 24px;
+  background: #1a2236;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+}
+
+.toolbar-left .search-box {
+  position: relative;
+  width: 320px;
+}
+
+.toolbar-left .search-box i {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #94a3b8;
+}
+
+.toolbar-left .search-box input {
+  width: 100%;
+  padding: 10px 14px 10px 38px;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #e2e8f0;
+  font-size: 0.875rem;
+  transition: all 0.2s;
+}
+
+.toolbar-left .search-box input:focus {
+  outline: none;
+  border-color: #6366f1;
+  background: rgba(0, 0, 0, 0.3);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+}
+
+.toolbar-right .filter-select {
+  padding: 10px 14px;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #e2e8f0;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.toolbar-right .filter-select:focus {
+  outline: none;
+  border-color: #6366f1;
+}
+
+/* Modal Polish */
+#userEditModal .modal-box {
+  background: #1a2236;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  width: 450px;
+  max-width: 90vw;
+}
+
+#userEditModal .form-control[readonly] {
+  background: rgba(0, 0, 0, 0.2);
+  color: #94a3b8;
+  cursor: not-allowed;
+}
