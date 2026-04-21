@@ -8,6 +8,8 @@ werkzeug
 bleach
 alembic
 psycopg2-binary
+requests>=2.31.0
+pgvector>=0.2.5
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest

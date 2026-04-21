@@ -1,6 +1,13 @@
 from datetime import datetime, timezone
-
 from flask_sqlalchemy import SQLAlchemy
+
+# --- ADD THIS BLOCK ---
+try:
+    from pgvector.sqlalchemy import Vector
+    VectorType = Vector
+except ImportError:
+    VectorType = db.Text
+# ----------------------
 
 db = SQLAlchemy()
 
@@ -574,7 +581,7 @@ class TeacherDocumentChunk(db.Model):
 
     embedding_vector = db.Column(db.JSON, nullable=True)
     # Optional pgvector-backed storage (kept as text in ORM for sqlite test compatibility).
-    embedding_vector_pg = db.Column(db.Text, nullable=True)
+    embedding_vector_pg = db.Column(VectorType, nullable=True)
     embedding_dim = db.Column(db.Integer, nullable=True)
     embedding_provider = db.Column(db.String(64), nullable=True)
     embedding_model = db.Column(db.String(128), nullable=True)
