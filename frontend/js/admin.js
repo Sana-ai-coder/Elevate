@@ -404,72 +404,72 @@ function setupUsersPanel() {
 //   document.getElementById('userModal').classList.remove('hidden');
 // }
 
-async function quickDisableUser(userId) {
-  if (!await showConfirm('Disable User', 'Are you sure you want to disable this user?')) return;
-  try {
-    await api.admin.disableUser(userId, 'Admin action');
-    showToast('User disabled', 'success');
-    loadUsers(usersPage);
-  } catch (err) { showToast(err.message, 'error'); }
-}
+// async function quickDisableUser(userId) {
+//   if (!await showConfirm('Disable User', 'Are you sure you want to disable this user?')) return;
+//   try {
+//     await api.admin.disableUser(userId, 'Admin action');
+//     showToast('User disabled', 'success');
+//     loadUsers(usersPage);
+//   } catch (err) { showToast(err.message, 'error'); }
+// }
 
-async function quickEnableUser(userId) {
-  try {
-    await api.admin.enableUser(userId);
-    showToast('User enabled', 'success');
-    loadUsers(usersPage);
-  } catch (err) { showToast(err.message, 'error'); }
-}
+// async function quickEnableUser(userId) {
+//   try {
+//     await api.admin.enableUser(userId);
+//     showToast('User enabled', 'success');
+//     loadUsers(usersPage);
+//   } catch (err) { showToast(err.message, 'error'); }
+// }
 
-function setupUsersPanel() {
-  document.getElementById('usersSearchBtn').addEventListener('click', () => loadUsers(1));
-  document.getElementById('userSearch').addEventListener('keydown', e => { if (e.key === 'Enter') loadUsers(1); });
+// function setupUsersPanel() {
+//   document.getElementById('usersSearchBtn').addEventListener('click', () => loadUsers(1));
+//   document.getElementById('userSearch').addEventListener('keydown', e => { if (e.key === 'Enter') loadUsers(1); });
 
-  document.getElementById('userModalClose').addEventListener('click', () => document.getElementById('userModal').classList.add('hidden'));
-  document.getElementById('userModalCancel').addEventListener('click', () => document.getElementById('userModal').classList.add('hidden'));
+//   document.getElementById('userModalClose').addEventListener('click', () => document.getElementById('userModal').classList.add('hidden'));
+//   document.getElementById('userModalCancel').addEventListener('click', () => document.getElementById('userModal').classList.add('hidden'));
 
-  document.getElementById('userModalSave').addEventListener('click', async () => {
-    if (!editingUserId) return;
-    const role = document.getElementById('editUserRole').value;
-    const school_id = document.getElementById('editUserSchool').value || null;
-    const feedback = document.getElementById('userModalFeedback');
-    feedback.textContent = 'Saving...';
-    try {
-      await api.admin.updateUser(editingUserId, {
-        role,
-        school_id: school_id ? parseInt(school_id) : null,
-      });
-      feedback.style.color = '#34d399';
-      feedback.textContent = 'Saved!';
-      showToast('User updated', 'success');
-      document.getElementById('userModal').classList.add('hidden');
-      loadUsers(usersPage);
-    } catch (err) {
-      feedback.style.color = '#f87171';
-      feedback.textContent = err.message;
-    }
-  });
+//   document.getElementById('userModalSave').addEventListener('click', async () => {
+//     if (!editingUserId) return;
+//     const role = document.getElementById('editUserRole').value;
+//     const school_id = document.getElementById('editUserSchool').value || null;
+//     const feedback = document.getElementById('userModalFeedback');
+//     feedback.textContent = 'Saving...';
+//     try {
+//       await api.admin.updateUser(editingUserId, {
+//         role,
+//         school_id: school_id ? parseInt(school_id) : null,
+//       });
+//       feedback.style.color = '#34d399';
+//       feedback.textContent = 'Saved!';
+//       showToast('User updated', 'success');
+//       document.getElementById('userModal').classList.add('hidden');
+//       loadUsers(usersPage);
+//     } catch (err) {
+//       feedback.style.color = '#f87171';
+//       feedback.textContent = err.message;
+//     }
+//   });
 
-  document.getElementById('userModalToggleDisable').addEventListener('click', async () => {
-    if (!editingUserId) return;
-    const reason = document.getElementById('editUserDisableReason').value.trim();
-    const feedback = document.getElementById('userModalFeedback');
-    try {
-      if (editingUserIsDisabled) {
-        await api.admin.enableUser(editingUserId);
-        showToast('User enabled', 'success');
-      } else {
-        await api.admin.disableUser(editingUserId, reason || 'Admin action');
-        showToast('User disabled', 'warning');
-      }
-      document.getElementById('userModal').classList.add('hidden');
-      loadUsers(usersPage);
-    } catch (err) {
-      feedback.style.color = '#f87171';
-      feedback.textContent = err.message;
-    }
-  });
-}
+//   document.getElementById('userModalToggleDisable').addEventListener('click', async () => {
+//     if (!editingUserId) return;
+//     const reason = document.getElementById('editUserDisableReason').value.trim();
+//     const feedback = document.getElementById('userModalFeedback');
+//     try {
+//       if (editingUserIsDisabled) {
+//         await api.admin.enableUser(editingUserId);
+//         showToast('User enabled', 'success');
+//       } else {
+//         await api.admin.disableUser(editingUserId, reason || 'Admin action');
+//         showToast('User disabled', 'warning');
+//       }
+//       document.getElementById('userModal').classList.add('hidden');
+//       loadUsers(usersPage);
+//     } catch (err) {
+//       feedback.style.color = '#f87171';
+//       feedback.textContent = err.message;
+//     }
+//   });
+// }
 
 // =====================================================
 // Schools Panel
