@@ -599,6 +599,10 @@ def get_training_job_detail(jid):
             # Pull Errors
             if payload.get("error"):
                 j.error_message = payload.get("error")
+            elif remote_status in ["failed", "succeeded"] and not j.error_message:
+                rc = payload.get("return_code")
+                if rc is not None and rc != 0:
+                    j.error_message = f"Process failed silently (Exit Code: {rc}). An exit code of -9 or 137 means the AI training exceeded the memory limits of the Hugging Face Free Tier and was killed by the system."
                 
             db.session.commit()
 

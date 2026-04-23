@@ -13,9 +13,10 @@ ENV HF_HOME=/root/.cache/huggingface
 WORKDIR /app
 
 # ---------------------------------------------------------
-# NEW: Install C++ Compilers and CMake for llama-cpp-python
+# Install system dependencies (Git, C++ Compilers, CMake)
 # ---------------------------------------------------------
 RUN apt-get update && apt-get install -y \
+    git \
     build-essential \
     gcc \
     g++ \
