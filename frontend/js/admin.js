@@ -117,8 +117,6 @@ function loadPanelData(panelKey, force = false) {
       return loadUsers(force ? 1 : usersPage || 1);
     case 'schools':
       return loadSchools();
-    case 'teacher-requests':
-      return loadTeacherRequests(force ? 1 : reqPage || 1);
     case 'test-results':
       return loadTestResults(force ? 1 : resPage || 1);
     case 'training':
@@ -786,73 +784,6 @@ function setupSchoolsPanel() {
     const slug = e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     document.getElementById('newSchoolSlug').value = slug;
   });
-}
-
-// =====================================================
-// Teacher Requests Panel
-// =====================================================
-let reqPage = 1;
-const reqPerPage = 10;
-
-async function loadTeacherRequests(page = 1) {
-  reqPage = page;
-  const status = document.getElementById('requestStatusFilter').value;
-  const tbody = document.getElementById('requestsTableBody');
-  tbody.innerHTML = `<tr><td colspan="7" class="table-empty"><div class="spinner"></div></td></tr>`;
-  try {
-    const data = await api.admin.listTeacherRequests({ page, per_page: reqPerPage, status });
-    const items = data.items || [];
-    if (!items.length) {
-      tbody.innerHTML = `<tr><td colspan="7" class="table-empty">No requests found.</td></tr>`;
-    } else {
-      tbody.innerHTML = items.map(r => {
-        const statusBadge = r.status === 'pending' ? 'badge-orange' : r.status === 'approved' ? 'badge-green' : 'badge-red';
-        return `<tr>
-          <td>${r.id}</td>
-          <td><strong>${esc(r.name)}</strong></td>
-          <td style="color:#94a3b8">${esc(r.email)}</td>
-          <td>${r.grade || '—'}</td>
-          <td style="color:#6b7280;font-size:0.78rem">${r.created_at ? new Date(r.created_at).toLocaleString() : '—'}</td>
-          <td><span class="badge ${statusBadge}">${r.status}</span></td>
-          <td>
-            ${r.status === 'pending' ? `
-              <button class="action-btn action-btn-success approve-req-btn" data-id="${r.id}">Approve</button>
-              <button class="action-btn action-btn-danger reject-req-btn" data-id="${r.id}">Reject</button>
-            ` : '—'}
-          </td>
-        </tr>`;
-      }).join('');
-      tbody.querySelectorAll('.approve-req-btn').forEach(btn => btn.addEventListener('click', async () => {
-        if (!await showConfirm('Approve Request', 'Approve this teacher request?')) return;
-        try { await api.admin.approveTeacherRequest(btn.dataset.id); showToast('Approved!', 'success'); loadTeacherRequests(reqPage); }
-        catch (err) { showToast(err.message, 'error'); }
-      }));
-      tbody.querySelectorAll('.reject-req-btn').forEach(btn => btn.addEventListener('click', async () => {
-        if (!await showConfirm('Reject Request', 'Reject this teacher request?')) return;
-        try { await api.admin.rejectTeacherRequest(btn.dataset.id); showToast('Rejected', 'warning'); loadTeacherRequests(reqPage); }
-        catch (err) { showToast(err.message, 'error'); }
-      }));
-    }
-    const totalPages = Math.ceil((data.total || 0) / reqPerPage);
-    renderPagination(document.getElementById('requestsPagination'), page, totalPages, loadTeacherRequests);
-
-    // Update badge
-    const badge = document.getElementById('pendingRequestsBadge');
-    if (status === 'pending' && data.total > 0) {
-      badge.textContent = data.total;
-      badge.style.display = 'inline';
-    } else {
-      badge.textContent = '0';
-      badge.style.display = 'none';
-    }
-  } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="7" class="table-empty">Error: ${esc(err.message)}</td></tr>`;
-  }
-}
-
-function setupTeacherRequestsPanel() {
-  document.getElementById('refreshRequestsBtn').addEventListener('click', () => loadTeacherRequests(1));
-  document.getElementById('requestStatusFilter').addEventListener('change', () => loadTeacherRequests(1));
 }
 
 // =====================================================
@@ -1565,7 +1496,6 @@ document.addEventListener('DOMContentLoaded', () => {
   // Setup all panels
   setupUsersPanel();
   // setupSchoolsPanel();
-  // setupTeacherRequestsPanel();
   setupTestResultsPanel();
   setupTrainingPanel();
   setupModelRegistryPanel();
@@ -1580,5 +1510,4 @@ document.addEventListener('DOMContentLoaded', () => {
   activatePanel('dashboard', true);
   loadSchools(); // Also populates allSchools for user filters
   // Keep pending teacher requests badge up to date.
-  // loadTeacherRequests(1);
 });

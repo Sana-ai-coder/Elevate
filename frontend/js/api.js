@@ -668,23 +668,6 @@ export const api = {
       });
     },
 
-    async listTeacherRequests(params = {}) {
-      const query = new URLSearchParams();
-      if (params.page) query.append('page', String(params.page));
-      if (params.per_page) query.append('per_page', String(params.per_page));
-      if (params.status) query.append('status', params.status);
-      const qs = query.toString();
-      return await api.request(`/admin/teacher-requests${qs ? `?${qs}` : ''}`, { method: 'GET' });
-    },
-
-    async approveTeacherRequest(requestId) {
-      return await api.request(`/admin/teacher-requests/${requestId}/approve`, { method: 'POST' });
-    },
-
-    async rejectTeacherRequest(requestId) {
-      return await api.request(`/admin/teacher-requests/${requestId}/reject`, { method: 'POST' });
-    },
-
     async listTestResults(params = {}) {
       const query = new URLSearchParams();
       if (params.page) query.append('page', String(params.page));

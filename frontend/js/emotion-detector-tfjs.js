@@ -665,14 +665,20 @@ export const emotionDetector = {
     if (!this._lastFacePrediction && !this.serverModelAvailable) return;
     let result = null;
     const hasTfjsModel = Boolean(this.tfjsEmotionHeadModel || this.tfjsModel);
+    const preferServer = config.EMOTION_PREFER_SERVER_INFERENCE === true;
 
-    // Prefer local TF.js for lower latency; use server as fallback.
-    if (hasTfjsModel) {
+    // For high-accuracy deployments, prefer server CNN first.
+    if (preferServer && this.serverModelAvailable) {
+      result = await this._serverInference(this._lastFacePrediction);
+      if (result) this.inferenceMode = MODE_SERVER;
+    }
+
+    if (!result && hasTfjsModel) {
       result = await this._tfjsInference(this._lastFacePrediction);
       if (result) this.inferenceMode = MODE_TFJS;
     }
 
-    if (!result && this.serverModelAvailable) {
+    if (!result && this.serverModelAvailable && !preferServer) {
       result = await this._serverInference(this._lastFacePrediction);
       if (result) this.inferenceMode = MODE_SERVER;
       else if (!hasTfjsModel) this.serverModelAvailable = false;

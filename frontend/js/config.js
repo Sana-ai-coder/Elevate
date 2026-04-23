@@ -53,6 +53,7 @@ export const config = {
   EMOTION_TFJS_MODEL_URL: '/js/emotion_tfjs/model.json',
   EMOTION_TFJS_EMOTION_HEAD_URL: '',
   EMOTION_TFJS_ENGAGEMENT_HEAD_URL: '',
+  EMOTION_PREFER_SERVER_INFERENCE: true,
   
   // Model URLs (face-api.js CDN)
   MODEL_URLS: [

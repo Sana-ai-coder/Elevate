@@ -25,6 +25,15 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
+EMOTION_CLASS_ALIASES = {
+    "happy": ["happy"],
+    "bored": ["bored"],
+    "focused": ["focused"],
+    "confused": ["confused"],
+    "neutral": ["neutral"],
+    "angry": ["angry"],
+    "surprised": ["surprised", "surprise"],
+}
 DEFAULT_DB_URL = f"sqlite:///{(ROOT / 'elevate_dev.db').as_posix()}"
 STRICT_DB_URL = (
     str(os.environ.get("ELEVATE_STRICT_DATABASE_URL") or "").strip()
@@ -147,13 +156,6 @@ def _count_questions() -> int:
 
 
 def _extract_metrics() -> tuple[dict[str, float], dict[str, float]]:
-    emotion_info_path = ROOT / "backend" / "ai_models" / "emotion_model_info.json"
-    if not emotion_info_path.exists():
-        raise FileNotFoundError(f"Missing emotion metadata: {emotion_info_path}")
-
-    emotion_info = json.loads(emotion_info_path.read_text(encoding="utf-8"))
-    emotion_test = emotion_info.get("test_metrics") if isinstance(emotion_info.get("test_metrics"), dict) else {}
-
     bkt_metrics = _latest_json_by_mtime(ROOT / "backend" / "models" / "bkt", "bkt_metrics_*.json")
     dkt_metrics = _latest_json_by_mtime(ROOT / "backend" / "models" / "dkt", "dkt_metrics_*.json")
 
@@ -174,20 +176,32 @@ def _extract_metrics() -> tuple[dict[str, float], dict[str, float]]:
     )
 
     metrics = {
-        "emotion_test_accuracy": _to_float(emotion_test.get("accuracy"), "emotion_test_accuracy"),
-        "emotion_test_macro_f1": _to_float(emotion_test.get("macro_f1"), "emotion_test_macro_f1"),
         "bkt_test_auc": _to_float(bkt_metrics.get("test_metrics", {}).get("auc"), "bkt_test_auc"),
         "dkt_test_auc": _to_float(dkt_metrics.get("test_metrics", {}).get("auc"), "dkt_test_auc"),
         "at_risk_test_auc": _to_float(at_risk_auc, "at_risk_test_auc"),
     }
 
     per_class_recall: dict[str, float] = {}
-    per_class = emotion_test.get("per_class") if isinstance(emotion_test.get("per_class"), dict) else {}
-    for class_name, row in per_class.items():
-        if isinstance(row, dict):
-            per_class_recall[str(class_name)] = _to_float(
-                row.get("recall"), f"emotion_recall_{class_name}"
-            )
+    emotion_info_path = ROOT / "backend" / "ai_models" / "emotion_model_info.json"
+    if emotion_info_path.exists():
+        emotion_info = json.loads(emotion_info_path.read_text(encoding="utf-8"))
+        emotion_test = emotion_info.get("test_metrics") if isinstance(emotion_info.get("test_metrics"), dict) else {}
+        if isinstance(emotion_test, dict):
+            if emotion_test.get("accuracy") is not None:
+                metrics["emotion_test_accuracy"] = _to_float(
+                    emotion_test.get("accuracy"), "emotion_test_accuracy"
+                )
+            if emotion_test.get("macro_f1") is not None:
+                metrics["emotion_test_macro_f1"] = _to_float(
+                    emotion_test.get("macro_f1"), "emotion_test_macro_f1"
+                )
+            per_class = emotion_test.get("per_class") if isinstance(emotion_test.get("per_class"), dict) else {}
+            for class_name, row in per_class.items():
+                if isinstance(row, dict):
+                    per_class_recall[str(class_name)] = _to_float(
+                        row.get("recall"), f"emotion_recall_{class_name}"
+                    )
+
     return metrics, per_class_recall
 
 
@@ -234,6 +248,45 @@ def _write_summary(metrics: dict[str, float], thresholds: dict[str, float], elap
     return latest
 
 
+def _detect_emotion_dataset_readiness() -> tuple[bool, str]:
+    dataset_dir = ROOT / "dataset"
+    if not dataset_dir.exists():
+        return False, f"missing directory: {dataset_dir}"
+
+    folder_map = {
+        p.name.strip().lower(): p
+        for p in dataset_dir.iterdir()
+        if p.is_dir()
+    }
+    missing = []
+    for cls, aliases in EMOTION_CLASS_ALIASES.items():
+        if not any(alias.lower() in folder_map for alias in aliases):
+            missing.append(cls)
+    if missing:
+        return False, "missing class folder(s): " + ", ".join(missing)
+
+    empty = []
+    for cls, aliases in EMOTION_CLASS_ALIASES.items():
+        folder = None
+        for alias in aliases:
+            folder = folder_map.get(alias.lower())
+            if folder is not None:
+                break
+        if folder is None:
+            empty.append(cls)
+            continue
+        has_images = any(
+            f.is_file() and f.suffix.lower() in {".jpg", ".jpeg", ".png"}
+            for f in folder.iterdir()
+        )
+        if not has_images:
+            empty.append(cls)
+    if empty:
+        return False, "class folder(s) have no images: " + ", ".join(empty)
+
+    return True, "ok"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run strict, fail-fast full ML training pipeline")
     parser.add_argument(
@@ -242,8 +295,8 @@ def parse_args() -> argparse.Namespace:
         default=max(2, min(os.cpu_count() or 2, 4)),
         help="Parallel process budget for training jobs",
     )
-    parser.add_argument("--min-emotion-accuracy", type=float, default=0.90)
-    parser.add_argument("--min-emotion-macro-f1", type=float, default=0.90)
+    parser.add_argument("--min-emotion-accuracy", type=float, default=0.95)
+    parser.add_argument("--min-emotion-macro-f1", type=float, default=0.92)
     parser.add_argument("--min-bkt-auc", type=float, default=0.75)
     parser.add_argument("--min-dkt-auc", type=float, default=0.75)
     parser.add_argument("--min-atrisk-auc", type=float, default=0.80)
@@ -262,8 +315,6 @@ def main() -> int:
     started = time.perf_counter()
 
     thresholds = {
-        "emotion_test_accuracy": float(args.min_emotion_accuracy),
-        "emotion_test_macro_f1": float(args.min_emotion_macro_f1),
         "bkt_test_auc": float(args.min_bkt_auc),
         "dkt_test_auc": float(args.min_dkt_auc),
         "at_risk_test_auc": float(args.min_atrisk_auc),
@@ -341,10 +392,20 @@ def main() -> int:
             min_users=max(10, int(args.dataset_min_users)),
         )
 
+        emotion_dataset_ready, emotion_dataset_reason = _detect_emotion_dataset_readiness()
+        if emotion_dataset_ready:
+            thresholds["emotion_test_accuracy"] = float(args.min_emotion_accuracy)
+            thresholds["emotion_test_macro_f1"] = float(args.min_emotion_macro_f1)
+            print("[strict-ml] Emotion dataset detected. Emotion training enabled.")
+        else:
+            print(
+                "[strict-ml] WARNING: Emotion dataset unavailable; skipping emotion training "
+                f"and emotion quality gates ({emotion_dataset_reason})"
+            )
+
         parallel_steps = [
             ("train-bkt", [PYTHON, str(ROOT / "scripts" / "fit_bkt_model.py")]),
             ("train-dkt", [PYTHON, str(ROOT / "scripts" / "train_dkt_model.py")]),
-            ("train-emotion-hog-mlp", [PYTHON, str(ROOT / "scripts" / "train_emotion_fast.py")]),
             (
                 "train-at-risk",
                 [
@@ -359,12 +420,17 @@ def main() -> int:
                 ],
             ),
         ]
+        if emotion_dataset_ready:
+            parallel_steps.append(
+                ("train-emotion-cnn", [PYTHON, str(ROOT / "scripts" / "train_emotion_cnn_hf.py")])
+            )
         _run_parallel_steps(parallel_steps, max_workers=max(1, int(args.processes)))
 
         metrics, per_class_recall = _extract_metrics()
         for metric_name, minimum in thresholds.items():
             _assert_threshold(metric_name, metrics[metric_name], minimum)
-        _assert_per_class_recall(per_class_recall, float(args.min_emotion_per_class_recall))
+        if emotion_dataset_ready:
+            _assert_per_class_recall(per_class_recall, float(args.min_emotion_per_class_recall))
 
         elapsed = time.perf_counter() - started
         summary_path = _write_summary(metrics, thresholds, elapsed)

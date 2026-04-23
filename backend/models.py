@@ -413,28 +413,6 @@ class TestResult(db.Model):
         }
 
 
-class TeacherRequest(db.Model):
-    __tablename__ = "teacher_requests"
-
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(120), nullable=False)
-    email = db.Column(db.String(255), nullable=False, index=True)
-    password_hash = db.Column(db.String(255), nullable=False)
-    grade = db.Column(db.String(32), nullable=True)
-    status = db.Column(db.String(32), default='pending', nullable=False)
-    created_at = db.Column(db.DateTime, default=utcnow, nullable=False)
-
-    def as_dict(self):
-        return {
-            'id': self.id,
-            'name': self.name,
-            'email': self.email,
-            'grade': self.grade,
-            'status': self.status,
-            'created_at': self.created_at.isoformat() if self.created_at else None
-        }
-
-
 class SyllabusTopic(db.Model):
     __tablename__ = 'syllabus_topics'
 

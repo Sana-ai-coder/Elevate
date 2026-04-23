@@ -25,7 +25,7 @@ from .models import (
     db, User, School, Question, UserProgress, EmotionLog,
     SubjectPerformance, AnswerLog, Test, TestQuestion, TestResult,
     TeacherIntervention, TeacherDocument, TeacherDocumentChunk,
-    TeacherRequest, SyllabusTopic, UserSetting, RagRetrievalEvent,
+    SyllabusTopic, UserSetting, RagRetrievalEvent,
     AuditLog, ModelVersion, TrainingJob, MCQPipelineEvent,  # ← NEW
 )
 from .routes.auth      import auth_bp

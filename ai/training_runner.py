@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from huggingface_hub import snapshot_download
+
 
 DEFAULT_WORKSPACE = Path("/data/elevate_training_workspace")
 DEFAULT_OUTPUT_ROOT = Path("/data/elevate_models_v3/strict_training")
@@ -78,6 +80,27 @@ def _sync_artifacts(repo_dir: Path, output_root: Path) -> Path:
     return target
 
 
+def _prepare_emotion_dataset(repo_dir: Path) -> None:
+    """Ensure repo/dataset exists before strict training starts."""
+    target_dir = repo_dir / "dataset"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    repo_id = str(os.environ.get("HF_EMOTION_DATASET_REPO") or "Sana2704/elevate-emotion-dataset").strip()
+    if not repo_id:
+        print("[hf-train-runner] No dataset repo configured; skipping emotion dataset download")
+        return
+
+    token = os.environ.get("AI_TOPIC_SERVICE_TOKEN") or os.environ.get("HF_TOKEN")
+    print(f"[hf-train-runner] Downloading emotion dataset repo={repo_id} -> {target_dir}")
+    snapshot_download(
+        repo_id=repo_id,
+        repo_type="dataset",
+        local_dir=str(target_dir),
+        token=token,
+    )
+    print("[hf-train-runner] Emotion dataset ready")
+
+
 def _load_summary(repo_dir: Path) -> dict[str, Any]:
     summary_path = repo_dir / "backend" / "models" / "training" / "strict_training_summary_latest.json"
     if not summary_path.exists():
@@ -92,7 +115,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="HF strict training runner")
     parser.add_argument("--repo-url", required=True)
     parser.add_argument("--repo-ref", default="main")
-    parser.add_argument("--min-emotion-accuracy", type=float, default=0.90)
+    parser.add_argument("--min-emotion-accuracy", type=float, default=0.95)
     parser.add_argument("--processes", type=int, default=4)
     return parser.parse_args()
 
@@ -122,6 +145,7 @@ def main() -> int:
         _run([python_bin, "-m", "pip", "install", "--upgrade", "pip"], cwd=repo_dir)
         _run([python_bin, "-m", "pip", "install", "-r", "requirements.txt"], cwd=repo_dir)
         _run([python_bin, "-m", "pip", "install", "-r", "ai/requirements.txt"], cwd=repo_dir)
+        _prepare_emotion_dataset(repo_dir)
 
         _run(
             [

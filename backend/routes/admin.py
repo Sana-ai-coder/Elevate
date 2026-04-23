@@ -30,16 +30,14 @@ from ..models import (
     Question,
     School,
     SyllabusTopic,
-    TeacherRequest,
     Test,
     TestResult,
     TrainingJob,
     User,
     utcnow,
 )
-from ..security import decode_token, get_token_from_request, hash_password
+from ..security import decode_token, get_token_from_request
 from ..validation import sanitize_string
-from ..notifications import send_email
 from ..hf_training_service import (
     get_hf_strict_training_status,
     get_hf_training_service_url,
@@ -1108,99 +1106,6 @@ def test_result_detail(result_id):
         })
 
     return jsonify({"test": test_payload, "answers": answers_payload})
-
-
-# ─── Teacher requests (unchanged, kept for compatibility) ────────────────────
-
-@admin_bp.post("/teacher-requests")
-def create_teacher_request():
-    data = request.get_json(silent=True) or {}
-    name = data.get("name")
-    email = data.get("email")
-    password = data.get("password")
-    grade = data.get("grade")
-    if not name or not email or not password:
-        return jsonify({"error": "Missing required fields"}), 400
-    if (
-        User.query.filter_by(email=email).first()
-        or TeacherRequest.query.filter_by(email=email, status="pending").first()
-    ):
-        return jsonify({"error": "Email already registered or pending"}), 409
-    tr = TeacherRequest(
-        name=name, email=email,
-        password_hash=hash_password(password), grade=grade
-    )
-    db.session.add(tr)
-    db.session.commit()
-    return jsonify({"message": "Request submitted", "request": tr.as_dict()}), 201
-
-
-@admin_bp.get("/teacher-requests")
-@admin_required
-def list_teacher_requests():
-    page = max(1, int(request.args.get("page", 1) or 1))
-    per_page = min(100, max(1, int(request.args.get("per_page", 20) or 20)))
-    status = request.args.get("status", "pending")
-    q = TeacherRequest.query
-    if status:
-        q = q.filter_by(status=status)
-    pag = q.order_by(TeacherRequest.created_at.desc()).paginate(
-        page=page, per_page=per_page, error_out=False
-    )
-    return jsonify({
-        "items": [r.as_dict() for r in pag.items],
-        "page": page, "per_page": per_page,
-        "total": pag.total,
-    })
-
-
-@admin_bp.post("/teacher-requests/<int:req_id>/approve")
-@admin_required
-def approve_teacher_request(req_id):
-    tr = db.session.get(TeacherRequest, req_id)
-    if not tr:
-        return jsonify({"error": "not found"}), 404
-    if tr.status != "pending":
-        return jsonify({"error": "already processed"}), 400
-    if User.query.filter_by(email=tr.email).first():
-        tr.status = "rejected"
-        db.session.commit()
-        return jsonify({"error": "user already exists, request rejected"}), 409
-    user = User(
-        name=tr.name, email=tr.email,
-        password_hash=tr.password_hash, grade=tr.grade,
-        role="teacher", is_verified=True
-    )
-    db.session.add(user)
-    tr.status = "approved"
-    _audit("teacher_request.approved", "user", None, tr.email, None,
-           {"email": tr.email, "role": "teacher"})
-    db.session.commit()
-    send_email(
-        tr.email,
-        "Your Elevate teacher request has been approved",
-        f"Hello {tr.name},\n\nYour teacher account is approved. Log in at {tr.email}.\n\nElevate Team",
-    )
-    return jsonify({"message": "approved", "user": {"id": user.id, "email": user.email}})
-
-
-@admin_bp.post("/teacher-requests/<int:req_id>/reject")
-@admin_required
-def reject_teacher_request(req_id):
-    tr = db.session.get(TeacherRequest, req_id)
-    if not tr:
-        return jsonify({"error": "not found"}), 404
-    if tr.status != "pending":
-        return jsonify({"error": "already processed"}), 400
-    tr.status = "rejected"
-    _audit("teacher_request.rejected", "user", None, tr.email, None, {"status": "rejected"})
-    db.session.commit()
-    send_email(
-        tr.email,
-        "Your Elevate teacher request",
-        f"Hello {tr.name},\n\nWe could not approve your request at this time.\n\nElevate Team",
-    )
-    return jsonify({"message": "rejected"})
 
 
 # ─── Syllabus topics (unchanged) ─────────────────────────────────────────────
