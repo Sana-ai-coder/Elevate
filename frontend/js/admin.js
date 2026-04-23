@@ -492,13 +492,19 @@ function setupUsersPanel() {
       showToast('User linked successfully!', 'success');
       loadUsers(1);
     } catch (err) {
-      if (err.status === 'similar_found') {
-        warningBox.innerHTML = `<strong>User Not Found!</strong><br/>${err.error}<br/><br/><em>${err.suggestion}</em>`;
+      console.error("Single Add Error:", err);
+      // Safely extract the JSON payload attached to the Error object by api.js
+      const payload = err.payload || {};
+      
+      if (payload.status === 'similar_found') {
+        // Show the intelligent yellow warning box
+        warningBox.innerHTML = `<strong>Wait!</strong><br/>${payload.error}<br/><br/><em>${payload.suggestion}</em>`;
         warningBox.classList.remove('hidden');
       } else {
+        // Show standard red error using the exact message from the backend
         importFeedback.className = '';
         importFeedback.style = 'margin-top:16px; padding:12px; border-radius:8px; text-align:center; font-size:0.875rem; font-weight:500; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.2);';
-        importFeedback.textContent = err.error || err.message || 'Failed to process user.';
+        importFeedback.textContent = err.serverMessage || payload.error || err.message || 'Failed to process user.';
       }
     } finally {
       btn.innerHTML = '<i class="fas fa-user-plus"></i> Add User';

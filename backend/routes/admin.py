@@ -268,9 +268,14 @@ def bulk_import_users():
         return jsonify({"error": "No file provided"}), 400
         
     file = request.files['file']
-    admin_user = db.session.get(User, getattr(request, 'user_id', 1)) 
     
-    stream = io.StringIO(file.stream.read().decode("UTF8"), newline=None)
+    # FIX 1: Safely get the admin user from the global context
+    admin_user = getattr(g, "current_user", None)
+    if not admin_user:
+        return jsonify({"error": "Session expired or admin context lost."}), 401
+    
+    # FIX 2: Use StringIO directly matching your file's imports
+    stream = StringIO(file.stream.read().decode("UTF8"), newline=None)
     csv_input = csv.DictReader(stream)
     
     updated_count = 0
@@ -310,9 +315,12 @@ def single_add_user():
     email = data.get('email', '').strip().lower()
     name = data.get('name', '').strip()
     role = data.get('role', 'student').strip().lower()
-    admin_user = db.session.get(User, getattr(request, 'user_id', 1))
     
-    # 1. Check exact email
+    # FIX 1: Safely get the admin user from the global context
+    admin_user = getattr(g, "current_user", None)
+    if not admin_user:
+        return jsonify({"error": "Session expired or admin context lost."}), 401
+    
     exact_user = User.query.filter_by(email=email).first()
     if exact_user:
         exact_user.school_id = admin_user.school_id
@@ -321,7 +329,6 @@ def single_add_user():
         db.session.commit()
         return jsonify({"status": "linked", "message": f"Success! {exact_user.name} has been added to your school."}), 200
         
-    # 2. Fuzzy Search: If email is wrong, check for similar names
     similar_user = User.query.filter(User.name.ilike(f"%{name}%")).first()
     if similar_user:
         parts = similar_user.email.split('@')
@@ -330,13 +337,11 @@ def single_add_user():
             "status": "similar_found", 
             "error": f"We could not find the exact email '{email}'.",
             "suggestion": f"However, a user named '{similar_user.name}' ({masked}) exists. Is this who you meant? Please verify their exact email and try again."
-        }), 404
+        }), 409 
 
-    # 3. Completely Not Found (No creation fallback!)
     return jsonify({
         "error": f"No user named '{name}' is registered on Elevate. They must sign up for an account first before you can add them to your school."
-    }), 404
-
+    }), 400
 
 # ─── 3. School hierarchy ──────────────────────────────────────────────────────
 
