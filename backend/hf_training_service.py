@@ -20,9 +20,10 @@ def get_hf_training_service_url() -> str:
 
 
 def _hf_headers() -> dict:
+    # FIX 1: Look for AI_TOPIC_SERVICE_TOKEN to match your Render environment variables!
     token = os.environ.get(
-        "HF_TRAINING_SERVICE_TOKEN",
-        current_app.config.get("HF_TRAINING_SERVICE_TOKEN", "")
+        "AI_TOPIC_SERVICE_TOKEN",
+        current_app.config.get("AI_TOPIC_SERVICE_TOKEN", "")
     )
     h = {"Content-Type": "application/json"}
     if token:
@@ -32,7 +33,7 @@ def _hf_headers() -> dict:
 
 def start_hf_strict_training(payload: dict | None = None) -> dict:
     """
-    POST to /train/strict on the HF training service.
+    POST to /training/strict/start on the HF training service.
     Returns: { ok, payload, latency_ms, error, status_code }
     """
     base_url = get_hf_training_service_url()
@@ -43,7 +44,8 @@ def start_hf_strict_training(payload: dict | None = None) -> dict:
             "status_code": 503,
         }
 
-    url = f"{base_url}/train/strict"
+    # FIX 2: Match the app.py exact path!
+    url = f"{base_url}/training/strict/start"
     t0 = time.time()
     try:
         resp = requests.post(
@@ -76,7 +78,7 @@ def start_hf_strict_training(payload: dict | None = None) -> dict:
 
 def get_hf_strict_training_status(job_id: str) -> dict:
     """
-    GET /train/strict/<job_id> on the HF training service.
+    GET /training/strict/status/<job_id> on the HF training service.
     Returns: { ok, payload, latency_ms, error, status_code }
     """
     base_url = get_hf_training_service_url()
@@ -87,7 +89,8 @@ def get_hf_strict_training_status(job_id: str) -> dict:
             "status_code": 503,
         }
 
-    url = f"{base_url}/train/strict/{job_id}"
+    # FIX 3: Match the app.py exact path for status checking!
+    url = f"{base_url}/training/strict/status/{job_id}"
     t0 = time.time()
     try:
         resp = requests.get(url, headers=_hf_headers(), timeout=15)
