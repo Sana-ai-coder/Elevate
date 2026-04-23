@@ -14,8 +14,8 @@ from flask import current_app
 
 def get_hf_training_service_url() -> str:
     return os.environ.get(
-        "HF_TRAINING_SERVICE_URL",
-        current_app.config.get("HF_TRAINING_SERVICE_URL", "")
+        "AI_TOPIC_SERVICE_URL",
+        current_app.config.get("AI_TOPIC_SERVICE_URL", "")
     ).rstrip("/")
 
 
@@ -39,7 +39,7 @@ def start_hf_strict_training(payload: dict | None = None) -> dict:
     if not base_url:
         return {
             "ok": False,
-            "error": "HF_TRAINING_SERVICE_URL not configured",
+            "error": "AI_TOPIC_SERVICE_URL not configured",
             "status_code": 503,
         }
 
@@ -83,7 +83,7 @@ def get_hf_strict_training_status(job_id: str) -> dict:
     if not base_url:
         return {
             "ok": False,
-            "error": "HF_TRAINING_SERVICE_URL not configured",
+            "error": "AI_TOPIC_SERVICE_URL not configured",
             "status_code": 503,
         }
 
