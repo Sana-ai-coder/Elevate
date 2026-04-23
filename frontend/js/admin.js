@@ -383,26 +383,26 @@ function setupUsersPanel() {
 // (End of Users Panel)
 // =====================================================
 
-function openUserEditModal(userId, items) {
-  const u = items.find(x => x.id === userId);
-  if (!u) return;
-  editingUserId = userId;
-  editingUserIsDisabled = u.is_disabled;
-  document.getElementById('editUserRole').value = u.role;
+// function openUserEditModal(userId, items) {
+//   const u = items.find(x => x.id === userId);
+//   if (!u) return;
+//   editingUserId = userId;
+//   editingUserIsDisabled = u.is_disabled;
+//   document.getElementById('editUserRole').value = u.role;
 
-  // Populate school select
-  const schoolSel = document.getElementById('editUserSchool');
-  schoolSel.innerHTML = '<option value="">— No School —</option>' +
-    allSchools.map(s => `<option value="${s.id}" ${u.school_id === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
+//   // Populate school select
+//   const schoolSel = document.getElementById('editUserSchool');
+//   schoolSel.innerHTML = '<option value="">— No School —</option>' +
+//     allSchools.map(s => `<option value="${s.id}" ${u.school_id === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
 
-  const toggleBtn = document.getElementById('userModalToggleDisable');
-  toggleBtn.textContent = u.is_disabled ? 'Enable User' : 'Disable User';
-  toggleBtn.className = u.is_disabled ? 'btn btn-success' : 'btn btn-danger';
+//   const toggleBtn = document.getElementById('userModalToggleDisable');
+//   toggleBtn.textContent = u.is_disabled ? 'Enable User' : 'Disable User';
+//   toggleBtn.className = u.is_disabled ? 'btn btn-success' : 'btn btn-danger';
 
-  document.getElementById('userModalTitle').textContent = `Edit User: ${u.name}`;
-  document.getElementById('userModalFeedback').textContent = '';
-  document.getElementById('userModal').classList.remove('hidden');
-}
+//   document.getElementById('userModalTitle').textContent = `Edit User: ${u.name}`;
+//   document.getElementById('userModalFeedback').textContent = '';
+//   document.getElementById('userModal').classList.remove('hidden');
+// }
 
 async function quickDisableUser(userId) {
   if (!await showConfirm('Disable User', 'Are you sure you want to disable this user?')) return;
