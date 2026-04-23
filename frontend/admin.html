@@ -659,7 +659,7 @@
     <div class="modal-box">
       <div class="modal-header">
         <h3>Add Users to School</h3>
-        <button class="btn-close" id="closeImportModal"><i class="fas fa-times"></i></button>
+        <button class="modal-close" id="closeImportModal"><i class="fas fa-times"></i></button>
       </div>
       
       <div class="modal-tabs">
@@ -668,26 +668,26 @@
       </div>
 
       <div class="modal-body">
-        <div id="tabBulkContent" class="tab-content">
-          <p class="modal-description">
+        <div id="tabBulkContent">
+          <p style="font-size: 0.85rem; color: #cbd5e1; margin-bottom: 16px; line-height: 1.5;">
             Download the format, fill in your institutional data, and upload the CSV to automatically provision accounts.
           </p>
-          <button class="btn btn-secondary w-full mb-3" id="downloadCsvTemplateBtn">
+          <button class="btn btn-secondary w-full" id="downloadCsvTemplateBtn" style="margin-bottom: 20px;">
             <i class="fas fa-download"></i> Download CSV Template
           </button>
           
           <div class="form-group">
             <label>Upload Completed CSV</label>
-            <input type="file" id="csvFileInput" accept=".csv" class="form-control file-input" />
+            <input type="file" id="csvFileInput" accept=".csv" class="form-control" style="padding: 8px;" />
           </div>
-          <button class="btn btn-primary w-full mt-2" id="uploadCsvBtn">
+          <button class="btn btn-primary w-full" id="uploadCsvBtn" style="margin-top: 8px;">
             <i class="fas fa-upload"></i> Process Upload
           </button>
         </div>
 
-        <div id="tabSingleContent" class="tab-content hidden">
-          <p class="modal-description">
-            Search the global database. If the user is found, they will be assigned to your school and notified.
+        <div id="tabSingleContent" class="hidden">
+          <p style="font-size: 0.85rem; color: #cbd5e1; margin-bottom: 16px; line-height: 1.5;">
+            Search the database. If the user is found, they will be assigned to your school and notified.
           </p>
           <div class="form-group">
             <label>User's Email Address</label>
@@ -705,12 +705,14 @@
             </select>
           </div>
 
-          <div id="singleAddWarning" class="hidden" style="margin-bottom:12px; padding:12px; background:rgba(245,158,11,0.1); border:1px solid rgba(245,158,11,0.2); border-radius:8px; color:#fbbf24; font-size:0.8rem;"></div>
+          <div id="singleAddWarning" class="hidden" style="margin-bottom:16px; padding:12px; background:rgba(245,158,11,0.1); border:1px solid rgba(245,158,11,0.2); border-radius:8px; color:#fbbf24; font-size:0.85rem; line-height: 1.4;"></div>
 
-          <button class="btn btn-primary w-full mt-2" id="singleAddBtn">Add User</button>
+          <button class="btn btn-primary w-full" id="singleAddBtn" style="margin-top: 8px;">
+            <i class="fas fa-user-plus"></i> Add User
+          </button>
         </div>
         
-        <div id="importFeedback" class="modal-feedback mt-3 hidden"></div>
+        <div id="importFeedback" class="hidden" style="margin-top: 16px; padding: 12px; border-radius: 8px; text-align: center; font-size: 0.875rem; font-weight: 500;"></div>
       </div>
     </div>
   </div>

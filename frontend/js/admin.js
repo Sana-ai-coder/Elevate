@@ -387,14 +387,14 @@ function setupUsersPanel() {
   const tabSingleBtn = document.getElementById('tabSingleBtn');
   const tabBulkContent = document.getElementById('tabBulkContent');
   const tabSingleContent = document.getElementById('tabSingleContent');
+  const warningBox = document.getElementById('singleAddWarning');
 
-  // Open Modal
   document.getElementById('openImportModalBtn')?.addEventListener('click', () => {
     importModal.classList.remove('hidden');
-    importFeedback.className = 'modal-feedback mt-3 hidden'; // Reset feedback
+    importFeedback.classList.add('hidden');
+    warningBox.classList.add('hidden');
   });
 
-  // Close Modal
   document.getElementById('closeImportModal')?.addEventListener('click', () => importModal.classList.add('hidden'));
 
   // Tab Switching Logic
@@ -403,7 +403,7 @@ function setupUsersPanel() {
     tabSingleBtn.classList.remove('active');
     tabBulkContent.classList.remove('hidden');
     tabSingleContent.classList.add('hidden');
-    importFeedback.className = 'modal-feedback mt-3 hidden';
+    importFeedback.classList.add('hidden');
   });
 
   tabSingleBtn?.addEventListener('click', () => {
@@ -411,7 +411,7 @@ function setupUsersPanel() {
     tabBulkBtn.classList.remove('active');
     tabSingleContent.classList.remove('hidden');
     tabBulkContent.classList.add('hidden');
-    importFeedback.className = 'modal-feedback mt-3 hidden';
+    importFeedback.classList.add('hidden');
   });
 
   // 1. Download Template
@@ -428,21 +428,23 @@ function setupUsersPanel() {
     const fileInput = document.getElementById('csvFileInput');
     if (!fileInput.files[0]) return showToast('Please select a CSV file first.', 'warning');
     
-    const formData = new FormData();
-    formData.append('file', fileInput.files[0]);
-    
     const btn = document.getElementById('uploadCsvBtn');
     btn.innerHTML = '<div class="spinner"></div> Processing...';
     btn.disabled = true;
 
     try {
+      const formData = new FormData();
+      formData.append('file', fileInput.files[0]);
       const res = await api.admin.bulkImportUsers(formData);
-      importFeedback.className = 'modal-feedback mt-3 success';
+      
+      importFeedback.className = '';
+      importFeedback.style = 'margin-top:16px; padding:12px; border-radius:8px; text-align:center; font-size:0.875rem; font-weight:500; background:rgba(16,185,129,0.1); color:#34d399; border:1px solid rgba(16,185,129,0.2);';
       importFeedback.textContent = `Success! Added ${res.added} new users, linked ${res.updated} existing.`;
       showToast('Bulk import complete', 'success');
       loadUsers(1);
     } catch (err) {
-      importFeedback.className = 'modal-feedback mt-3 error';
+      importFeedback.className = '';
+      importFeedback.style = 'margin-top:16px; padding:12px; border-radius:8px; text-align:center; font-size:0.875rem; font-weight:500; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.2);';
       importFeedback.textContent = err.error || 'Upload failed.';
     } finally {
       btn.innerHTML = '<i class="fas fa-upload"></i> Process Upload';
@@ -450,40 +452,38 @@ function setupUsersPanel() {
     }
   });
 
-  // 3. Single User Database Search
+  // 3. Single User Search / Add
   document.getElementById('singleAddBtn')?.addEventListener('click', async () => {
     const email = document.getElementById('singleAddEmail').value.trim();
     const name = document.getElementById('singleAddName').value.trim();
     const role = document.getElementById('singleAddRole').value;
     
-    if (!email || !name) return showToast('Please enter both Email and Name.', 'warning');
+    if (!email || !name) return showToast('Email and Name are required', 'warning');
     
     const btn = document.getElementById('singleAddBtn');
     btn.innerHTML = '<div class="spinner"></div> Searching...';
     btn.disabled = true;
-    
-    const warningBox = document.getElementById('singleAddWarning');
-    warningBox.classList.add('hidden'); // Hide warning on new search
+    warningBox.classList.add('hidden');
+    importFeedback.classList.add('hidden');
     
     try {
       const res = await api.admin.singleAddUser({ email, name, role });
-      importFeedback.className = 'modal-feedback mt-3 success';
+      importFeedback.className = '';
+      importFeedback.style = 'margin-top:16px; padding:12px; border-radius:8px; text-align:center; font-size:0.875rem; font-weight:500; background:rgba(16,185,129,0.1); color:#34d399; border:1px solid rgba(16,185,129,0.2);';
       importFeedback.textContent = res.message;
       showToast('User linked successfully!', 'success');
       loadUsers(1);
     } catch (err) {
       if (err.status === 'similar_found') {
-        // Show the intelligent yellow warning box
-        importFeedback.className = 'modal-feedback mt-3 hidden';
-        warningBox.innerHTML = `<strong>User Not Found!</strong><br>${err.error}<br><br><em>${err.suggestion}</em>`;
+        warningBox.innerHTML = `<strong>User Not Found!</strong><br/>${err.error}<br/><br/><em>${err.suggestion}</em>`;
         warningBox.classList.remove('hidden');
       } else {
-        // Show standard red error
-        importFeedback.className = 'modal-feedback mt-3 error';
-        importFeedback.textContent = err.error || 'An error occurred during search.';
+        importFeedback.className = '';
+        importFeedback.style = 'margin-top:16px; padding:12px; border-radius:8px; text-align:center; font-size:0.875rem; font-weight:500; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.2);';
+        importFeedback.textContent = err.error || 'Failed to process user.';
       }
     } finally {
-      btn.innerHTML = 'Add User';
+      btn.innerHTML = '<i class="fas fa-user-plus"></i> Add User';
       btn.disabled = false;
     }
   });
