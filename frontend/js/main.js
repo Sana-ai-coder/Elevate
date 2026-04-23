@@ -1957,6 +1957,40 @@ function displayQuestion(question) {
   startQuestionTimer(`${question.id || 'q'}-${state.currentQuestionIndex}`);
 }
 
+function highlightAnswerReview(selectedIndex, correctIndex) {
+  const optionNodes = document.querySelectorAll('#answerOptions .option');
+  optionNodes.forEach((node, index) => {
+    node.classList.remove('option-selected', 'option-correct', 'option-incorrect');
+    if (index === selectedIndex) node.classList.add('option-selected');
+    if (index === correctIndex) node.classList.add('option-correct');
+    if (index === selectedIndex && selectedIndex !== correctIndex) node.classList.add('option-incorrect');
+  });
+}
+
+function renderAnswerFeedback({ isCorrect, selectedText, correctText, explanationText, timeout }) {
+  const feedbackEl = document.getElementById('feedbackMessage');
+  if (!feedbackEl) return;
+
+  const statusClass = isCorrect ? 'alert-success' : 'alert-danger';
+  const statusTitle = isCorrect ? 'Correct!' : 'Incorrect';
+  const timeoutLine = timeout ? '<div class="feedback-line"><strong>Note:</strong> Time expired before selection.</div>' : '';
+  const selectedLine = `<div class="feedback-line"><strong>Your answer:</strong> ${selectedText || 'No option selected'}</div>`;
+  const correctLine = `<div class="feedback-line"><strong>Correct answer:</strong> ${correctText || 'Not available'}</div>`;
+  const explanationLine = explanationText
+    ? `<div class="feedback-line"><strong>Explanation:</strong> ${explanationText}</div>`
+    : '';
+
+  feedbackEl.innerHTML = `
+    <div class="alert ${statusClass} answer-review-card">
+      <strong>${statusTitle}</strong>
+      ${timeoutLine}
+      ${selectedLine}
+      ${correctLine}
+      ${explanationLine}
+    </div>
+  `;
+}
+
 async function handleQuestionSubmit(options = {}) {
   const { forceTimeoutSubmit = false, autoAdvanceOnTimeout = false } = options;
   const question = state.questions[state.currentQuestionIndex];
@@ -2063,19 +2097,28 @@ async function handleQuestionSubmit(options = {}) {
       console.log('🔇 Sound effects disabled in settings');
     }
     
-    // Show feedback
-    const feedbackEl = document.getElementById('feedbackMessage');
+    // Show detailed review feedback and mark options.
+    const correctIndex = Number(result.correct_index ?? -1);
+    const correctAnswer = correctIndex >= 0 ? question.options[correctIndex] : '';
+    const selectedAnswer = selectedIndex >= 0 ? question.options[selectedIndex] : '';
+    highlightAnswerReview(selectedIndex, correctIndex);
     if (result.correct) {
-      if (feedbackEl) {
-        feedbackEl.innerHTML = `<div class="alert alert-success"><strong>Correct!</strong> ${explanationText}</div>`;
-      }
+      renderAnswerFeedback({
+        isCorrect: true,
+        selectedText: selectedAnswer,
+        correctText: correctAnswer,
+        explanationText,
+        timeout: forceTimeoutSubmit && !selectedOption
+      });
       utils.showNotification('Correct!', 'success');
     } else {
-      if (feedbackEl) {
-        const correctAnswer = question.options[result.correct_index];
-        const timeoutMsg = forceTimeoutSubmit && !selectedOption ? 'Time expired with no selected answer. ' : '';
-        feedbackEl.innerHTML = `<div class="alert alert-danger"><strong>Incorrect.</strong> ${timeoutMsg}Correct answer was: ${correctAnswer}. ${explanationText}</div>`;
-      }
+      renderAnswerFeedback({
+        isCorrect: false,
+        selectedText: selectedAnswer,
+        correctText: correctAnswer,
+        explanationText,
+        timeout: forceTimeoutSubmit && !selectedOption
+      });
       utils.showNotification(forceTimeoutSubmit && !selectedOption ? 'Time expired. Marked as incorrect.' : 'Incorrect', 'error');
     }
     
@@ -2111,7 +2154,7 @@ async function handleQuestionSubmit(options = {}) {
 }
 
 function getDifficultyRank(level) {
-  const order = ['easy', 'medium', 'hard', 'expert'];
+  const order = ['easy', 'medium', 'hard'];
   const idx = order.indexOf(String(level || 'medium').toLowerCase());
   return idx === -1 ? 1 : idx;
 }
@@ -2481,7 +2524,6 @@ function normalizeTimelineData(timeline) {
     easy: Number(rawDifficulty.easy || 0),
     medium: Number(rawDifficulty.medium || 0),
     hard: Number(rawDifficulty.hard || 0),
-    expert: Number(rawDifficulty.expert || 0),
     unknown: Number(rawDifficulty.unknown || 0)
   };
 

@@ -2,87 +2,80 @@ import random
 
 def generate_fallback_mcqs(topic: str, count: int, difficulty: str, subject: str, grade: str) -> list:
     """
-    Generates highly sensible, original fallback questions if the AI service fails.
-    Tailors the vocabulary and complexity based on difficulty and grade.
+    Generate readable fallback MCQs when external AI generation is unavailable.
+    These are deterministic STEM-safe templates with clear, domain-relevant wording.
     """
-    safe_topic = topic.strip().title() if topic else "General Concepts"
-    safe_subject = subject.strip().capitalize() if subject else "STEM"
-    
+    safe_topic = (topic or "general concept").strip().replace("_", " ").title()
+    safe_subject = (subject or "stem").strip().lower()
+    safe_grade = (grade or "high").strip().lower()
+    safe_difficulty = (difficulty or "medium").strip().lower()
+
+    def _subject_noun():
+        mapping = {
+            "mathematics": "model",
+            "science": "investigation",
+            "physics": "system",
+            "chemistry": "reaction setup",
+            "biology": "biological process",
+            "technology": "software workflow",
+            "engineering": "design process",
+        }
+        return mapping.get(safe_subject, "problem-solving workflow")
+
+    def _difficulty_hint():
+        if safe_difficulty == "easy":
+            return "Start from the core definition and identify the most direct concept."
+        if safe_difficulty == "hard":
+            return "Check assumptions, constraints, and which option is technically defensible."
+        return "Focus on method selection and evidence-based reasoning."
+
+    templates = [
+        {
+            "text": f"In a {safe_grade} {safe_subject.capitalize()} class, what is the best first step when solving a {safe_topic} problem?",
+            "correct": f"Define the goal, list known information, and choose an approach that fits the { _subject_noun() }.",
+            "distractors": [
+                "Memorize one previous answer pattern and apply it without checking context.",
+                "Skip the problem statement and begin with random option elimination.",
+                "Ignore constraints because they usually do not affect the final answer.",
+            ],
+            "explanation": f"Strong solutions in {safe_topic} begin with clear goals, knowns, and method fit."
+        },
+        {
+            "text": f"Which statement is most accurate about using {safe_topic} in practical {safe_subject.capitalize()} tasks?",
+            "correct": "Reliable results depend on correct assumptions, valid steps, and verification of outcomes.",
+            "distractors": [
+                "Any method is acceptable if it produces an answer quickly.",
+                "Context never matters once you know one formula.",
+                "Verification is optional when the topic appears familiar.",
+            ],
+            "explanation": "Practical application requires valid assumptions, method correctness, and checks."
+        },
+        {
+            "text": f"While reviewing answers in {safe_topic}, what is the strongest quality check?",
+            "correct": "Test whether the result is logically consistent with the problem conditions and units/constraints.",
+            "distractors": [
+                "Prefer the longest explanation, because longer answers are usually correct.",
+                "Accept the first answer that matches a keyword from class notes.",
+                "Ignore edge cases because typical examples are sufficient for all situations.",
+            ],
+            "explanation": "Quality checks should validate consistency, conditions, and constraints."
+        },
+    ]
+
     mcqs = []
-    
-    # Define difficulty-based contextual phrasing
-    if difficulty.lower() == "hard":
-        action = "Critically analyze the primary function of"
-        distractor_prefix = "A commonly misunderstood"
-        scenario = "In an advanced application scenario,"
-    elif difficulty.lower() == "medium":
-        action = "Identify the core principle behind"
-        distractor_prefix = "An alternative but incorrect"
-        scenario = "When applying this concept in practice,"
-    else:
-        action = "What is the basic definition of"
-        distractor_prefix = "A completely unrelated"
-        scenario = "In basic terms,"
-
-    for i in range(count):
-        # Create sensible, context-aware fallback templates
-        templates = [
-            {
-                "question": f"{scenario} how does the concept of {safe_topic} directly impact outcomes in {safe_subject}?",
-                "correct_answer": "A",
-                "options": [
-                    f"It provides the foundational framework necessary for optimizing {safe_topic} processes.",
-                    f"{distractor_prefix} theory suggests it eliminates the need for mathematical modeling.",
-                    f"It relies entirely on outdated methodologies that are rarely used in modern {safe_subject}.",
-                    f"It primarily acts as a theoretical placeholder without practical application."
-                ],
-                "explanation": f"In {safe_subject}, {safe_topic} serves as a foundational framework, allowing practitioners to optimize and predict reliable outcomes."
-            },
-            {
-                "question": f"{action} {safe_topic} within a {grade.lower()}-level educational context?",
-                "correct_answer": "B",
-                "options": [
-                    f"It is exclusively used for visual design and has no technical merit.",
-                    f"It acts as a key mechanism to solve complex problems relevant to {safe_subject}.",
-                    f"It is a deprecated practice that has been replaced by manual computation.",
-                    f"It is only applicable in non-scientific disciplines."
-                ],
-                "explanation": f"{safe_topic} is highly relevant in {safe_subject} as a mechanism for solving complex, domain-specific problems effectively."
-            },
-            {
-                "question": f"Which of the following best describes a critical limitation or boundary condition of {safe_topic}?",
-                "correct_answer": "C",
-                "options": [
-                    f"It can solve any problem instantaneously regardless of the inputs provided.",
-                    f"It requires zero computational or physical resources to execute perfectly.",
-                    f"Its effectiveness is heavily dependent on the quality of initial parameters and contextual constraints.",
-                    f"It operates completely independently of the laws governing {safe_subject}."
-                ],
-                "explanation": f"Like all technical concepts in {safe_subject}, {safe_topic} is constrained by the quality of inputs and the environment in which it operates."
-            }
-        ]
-        
-        # Pick a template and randomize the options layout securely
-        template = templates[i % len(templates)]
-        
-        # Shuffle options while keeping track of the correct answer
-        correct_text = template["options"][0 if template["correct_answer"] == "A" else 
-                                          1 if template["correct_answer"] == "B" else 
-                                          2] # Based on the hardcoded correct answers above
-        
-        shuffled_options = template["options"][:]
-        random.shuffle(shuffled_options)
-        new_correct_index = shuffled_options.index(correct_text)
-        new_correct_letter = ["A", "B", "C", "D"][new_correct_index]
-
+    for idx in range(max(1, int(count or 1))):
+        template = templates[idx % len(templates)]
+        correct = template["correct"]
+        options = [correct] + list(template["distractors"])
+        random.shuffle(options)
         mcqs.append({
-            "text": template["question"],           # CHANGED from "question"
-            "options": shuffled_options,
-            "correct_index": new_correct_index,     # CHANGED from "correct_answer"
+            "text": template["text"],
+            "options": options,
+            "correct_index": options.index(correct),
             "explanation": template["explanation"],
-            "difficulty": difficulty,
+            "hint": _difficulty_hint(),
+            "difficulty": safe_difficulty,
             "topic": safe_topic,
-            "source": "robust_fallback"
+            "source": "robust_fallback_v2",
         })
-        
     return mcqs

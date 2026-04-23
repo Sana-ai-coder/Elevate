@@ -7,8 +7,6 @@ from ..validation import sanitize_string
 from sqlalchemy import and_, func
 import random
 
-# IMPORT FIX: Use our new fallback generator and the actual AI topic service
-from ..question_generator import generate_fallback_mcqs
 from ..ai_topic_service import generate_topic_mcqs
 
 from ..recommendation_service import (
@@ -59,6 +57,9 @@ def _select_adaptive_questions(base_filters: dict, count: int, target_difficulty
         if base_filters.get("subject"):
             q = apply_subject_filter(q, base_filters["subject"])
         q = q.filter(Question.difficulty == difficulty_level)
+        # Practice mode should draw from generated banks (AI + teacher-generated),
+        # not from legacy static seed content.
+        q = q.filter(Question.is_generated.is_(True))
 
         if user_id and not include_answered:
             q = q.filter(~Question.id.in_(answered_ids))
@@ -66,19 +67,57 @@ def _select_adaptive_questions(base_filters: dict, count: int, target_difficulty
         rows = q.order_by(func.random()).limit(limit).all()
         return rows
 
-    for difficulty in difficulty_fallback_sequence(target_difficulty):
+    ordered = [d for d in difficulty_fallback_sequence(target_difficulty) if d in {"easy", "medium", "hard"}]
+    if not ordered:
+        ordered = ["medium", "easy", "hard"]
+    if target_difficulty == "easy":
+        ratios = [0.7, 0.3, 0.0]
+    elif target_difficulty == "hard":
+        ratios = [0.0, 0.35, 0.65]
+    else:
+        ratios = [0.2, 0.6, 0.2]
+
+    requested_per_level = {}
+    remaining = count
+    for idx, level in enumerate(ordered):
+        planned = int(round(count * ratios[idx]))
+        requested_per_level[level] = min(max(planned, 0), remaining)
+        remaining -= requested_per_level[level]
+    for level in ordered:
+        if remaining <= 0:
+            break
+        requested_per_level[level] += 1
+        remaining -= 1
+
+    for difficulty in ordered:
         if len(picked) >= count:
             break
-        needed = count - len(picked)
-        rows = query_for(difficulty, include_answered=not exclude_answered, limit=needed)
+        needed = max(0, requested_per_level.get(difficulty, 0))
+        if needed <= 0:
+            continue
+        rows = query_for(difficulty, include_answered=not exclude_answered, limit=needed * 2)
         for row in rows:
             if row.id in seen_ids:
                 continue
             seen_ids.add(row.id)
             picked.append(row)
+            if len([q for q in picked if q.difficulty == difficulty]) >= needed:
+                break
+
+    if len(picked) < count:
+        for difficulty in ordered:
+            if len(picked) >= count:
+                break
+            needed = count - len(picked)
+            rows = query_for(difficulty, include_answered=not exclude_answered, limit=needed)
+            for row in rows:
+                if row.id in seen_ids:
+                    continue
+                seen_ids.add(row.id)
+                picked.append(row)
 
     if exclude_answered and len(picked) < count:
-        for difficulty in difficulty_fallback_sequence(target_difficulty):
+        for difficulty in ordered:
             if len(picked) >= count:
                 break
             needed = count - len(picked)
@@ -273,19 +312,42 @@ def generate_questions():
             if recommendation_scores:
                 recommendation_context['scores'] = recommendation_scores
 
-        # TOP-UP LOGIC FIX: Do NOT use the slow LLM for students. Serve fallbacks instantly!
+        # TOP-UP LOGIC: first attempt high-quality AI generation (teacher-grade flow),
+        # then fallback templates only as final continuity layer.
         if len(questions) < count and subject:
             needed = count - len(questions)
             generation_difficulty = (target_difficulty or 'medium').strip().lower()
-            
-            # Instantly generate fallback questions to avoid freezing the student's UI
-            generated_payload = generate_fallback_mcqs(
+
+            generated_payload = []
+            service_result = generate_topic_mcqs(
+                subject=sanitize_string(subject).strip().lower(),
+                grade=normalized_grade,
+                difficulty=generation_difficulty,
                 topic=normalized_topic or topic or "General",
                 count=needed,
-                difficulty=generation_difficulty,
-                subject=sanitize_string(subject).strip().lower(),
-                grade=normalized_grade
+                seed=random.randint(1, 2_147_483_647),
+                generation_mode="standard",
             )
+            if service_result.get("ok"):
+                for item in (service_result.get("questions") or []):
+                    text = sanitize_string(item.get("text") or item.get("question") or "", max_length=4000)
+                    options = item.get("options") if isinstance(item.get("options"), list) else []
+                    options = [sanitize_string(str(o), max_length=300) for o in options if sanitize_string(str(o), max_length=300)]
+                    if text and len(options) >= 2:
+                        try:
+                            correct_index = int(item.get("correct_index", 0))
+                        except (TypeError, ValueError):
+                            correct_index = 0
+                        if correct_index < 0 or correct_index >= len(options):
+                            correct_index = 0
+                        generated_payload.append({
+                            "text": text,
+                            "options": options[:4],
+                            "correct_index": correct_index,
+                            "explanation": sanitize_string(item.get("explanation") or "", max_length=1500),
+                            "topic": sanitize_string(item.get("topic") or normalized_topic or topic or "", max_length=128) or normalized_topic,
+                            "source": "topic_ai_service",
+                        })
 
             created_questions = []
             for item in generated_payload:
@@ -299,7 +361,7 @@ def generate_questions():
                     explanation=item.get("explanation", ""),
                     syllabus_topic=item.get("topic", normalized_topic),
                     is_generated=True,
-                    generation_meta={"source": "robust_fallback"}
+                    generation_meta={"source": item.get("source", "topic_ai_service")}
                 )
                 db.session.add(new_q)
                 created_questions.append(new_q)

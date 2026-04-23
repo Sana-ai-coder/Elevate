@@ -26,8 +26,7 @@ class ChartRenderer {
     this.difficultyColors = {
       easy: '#28a745',
       medium: '#ffc107',
-      hard: '#fd7e14',
-      expert: '#dc3545'
+      hard: '#fd7e14'
     };
 
     this.subjectPalette = ['#2563eb', '#0891b2', '#16a34a', '#f59e0b', '#db2777', '#7c3aed', '#dc2626', '#0d9488'];
@@ -395,7 +394,7 @@ class ChartRenderer {
       difficultyData = {};
     }
     
-    const difficulties = ['easy', 'medium', 'hard', 'expert'];
+    const difficulties = ['easy', 'medium', 'hard'];
     const data = difficulties.map(d => difficultyData[d] || 0);
     const colors = difficulties.map(d => this.difficultyColors[d] || '#94a3b8');
     

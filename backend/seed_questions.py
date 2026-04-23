@@ -10,9 +10,11 @@ Usage:
 """
 
 import sys, os
+import random
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from backend.app import create_app
 from backend.models import db, Question
+from backend.ai_topic_service import generate_topic_mcqs
 
 # Create Flask app instance
 app = create_app('development')
@@ -1008,32 +1010,8 @@ CURATED_TOPIC_QUESTION_BANK = {
 
 
 def _get_curated_question(subject: str, topic: str, difficulty: str, variant_index: int):
-    key = (subject, topic)
-    bucket = CURATED_TOPIC_QUESTION_BANK.get(key, {})
-    entries = bucket.get(difficulty, [])
-    if not entries:
-        return None
-
-    base = dict(entries[variant_index % len(entries)])
-    cycle = variant_index // len(entries)
-    if cycle > 0:
-        scenario_contexts = [
-            "an exam preparation workflow",
-            "a classroom project review",
-            "a model debugging session",
-            "a real-time prediction system",
-            "a quality assurance checkpoint",
-            "a student mentoring exercise",
-            "a production monitoring report",
-            "a fairness and reliability audit",
-        ]
-        scenario = scenario_contexts[(cycle - 1) % len(scenario_contexts)]
-        original = str(base.get("text", "")).strip()
-        if original:
-            if original[0].isupper():
-                original = original[0].lower() + original[1:]
-            base["text"] = f"In {scenario}, {original}"
-    return base
+    # Curated static bank disabled: we now prefer AI-generated batches.
+    return None
 
 
 def _build_synthetic_question(subject: str, grade: str, topic: str, difficulty: str, variant_index: int):
@@ -1222,6 +1200,35 @@ def _build_synthetic_question(subject: str, grade: str, topic: str, difficulty: 
     }
 
 
+def _normalize_generated_item(item, subject: str, grade: str, topic: str, difficulty: str):
+    if not isinstance(item, dict):
+        return None
+    text = str(item.get("text") or item.get("question") or "").strip()
+    options = item.get("options") if isinstance(item.get("options"), list) else []
+    options = [str(o).strip() for o in options if str(o).strip()]
+    if not text or len(options) < 2:
+        return None
+    try:
+        correct_index = int(item.get("correct_index", 0))
+    except (TypeError, ValueError):
+        correct_index = 0
+    if correct_index < 0 or correct_index >= len(options):
+        correct_index = 0
+    return {
+        "subject": subject,
+        "grade": grade,
+        "difficulty": difficulty,
+        "text": text,
+        "options": options[:4],
+        "correct_index": correct_index,
+        "hint": str(item.get("hint") or f"Use core {topic} reasoning.").strip(),
+        "explanation": str(item.get("explanation") or f"This answer best matches {topic} concepts in {subject}.").strip(),
+        "tags": [subject, topic, difficulty, "ai_seed"],
+        "syllabus_topic": topic,
+        "readability_level": _readability_for_difficulty(difficulty),
+    }
+
+
 def build_large_question_bank(manifest: dict, per_topic: int = 12):
     """Create a large deterministic bank for all subject/grade/topic combinations."""
     if not manifest:
@@ -1245,7 +1252,26 @@ def build_large_question_bank(manifest: dict, per_topic: int = 12):
 
         for topic in topics:
             for difficulty in difficulties:
-                for idx in range(per_topic):
+                ai_seed_batch = []
+                service = generate_topic_mcqs(
+                    subject=subject,
+                    grade=grade,
+                    difficulty=difficulty,
+                    topic=topic,
+                    count=per_topic,
+                    generation_mode="standard",
+                    seed=random.randint(1, 2_147_483_647),
+                )
+                if service.get("ok"):
+                    for item in (service.get("questions") or []):
+                        normalized = _normalize_generated_item(item, subject, grade, topic, difficulty)
+                        if normalized:
+                            ai_seed_batch.append(normalized)
+                        if len(ai_seed_batch) >= per_topic:
+                            break
+
+                generated.extend(ai_seed_batch)
+                for idx in range(max(0, per_topic - len(ai_seed_batch))):
                     generated.append(
                         _build_synthetic_question(subject, grade, topic, difficulty, idx)
                     )
@@ -1286,7 +1312,26 @@ def build_strict_stem_bank(manifest: dict, per_subtopic: int = 20):
         for topic in topics:
             variant = 0
             for difficulty, qty in distribution.items():
-                for _ in range(qty):
+                ai_seed_batch = []
+                service = generate_topic_mcqs(
+                    subject=subject,
+                    grade=grade,
+                    difficulty=difficulty,
+                    topic=topic,
+                    count=qty,
+                    generation_mode="standard",
+                    seed=random.randint(1, 2_147_483_647),
+                )
+                if service.get("ok"):
+                    for item in (service.get("questions") or []):
+                        normalized = _normalize_generated_item(item, subject, grade, topic, difficulty)
+                        if normalized:
+                            ai_seed_batch.append(normalized)
+                        if len(ai_seed_batch) >= qty:
+                            break
+
+                generated.extend(ai_seed_batch)
+                for _ in range(max(0, qty - len(ai_seed_batch))):
                     generated.append(
                         _build_synthetic_question(subject, grade, topic, difficulty, variant)
                     )

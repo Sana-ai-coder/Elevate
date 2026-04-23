@@ -43,6 +43,12 @@ from ..hf_training_service import (
     get_hf_training_service_url,
     start_hf_strict_training,
 )
+from ..question_bank_automation import (
+    generate_ai_question_batch,
+    get_question_automation_status,
+    start_hourly_question_automation,
+    stop_hourly_question_automation,
+)
 
 admin_bp = Blueprint("admin", __name__)
 
@@ -116,6 +122,83 @@ def stats():
         "schools": School.query.count(),
         "tests": Test.query.count(),
         "test_results": TestResult.query.count(),
+    })
+
+
+@admin_bp.get("/question-automation/status")
+@admin_required
+def question_automation_status():
+    return jsonify(get_question_automation_status())
+
+
+@admin_bp.post("/question-automation/start")
+@admin_required
+def question_automation_start():
+    data = request.get_json(silent=True) or {}
+    try:
+        hourly_batch_size = int(data.get("hourly_batch_size") or 10)
+    except (TypeError, ValueError):
+        hourly_batch_size = 10
+    hourly_batch_size = max(1, min(hourly_batch_size, 100))
+    admin = getattr(g, "current_user", None)
+    state = start_hourly_question_automation(
+        started_by=admin.id if admin else None,
+        hourly_batch_size=hourly_batch_size,
+    )
+    _audit(
+        action="question_automation_started",
+        target_type="question_automation",
+        target_id=1,
+        target_label=f"hourly_batch_size={hourly_batch_size}",
+        after=state,
+    )
+    db.session.commit()
+    return jsonify({"message": "Question automation started", "state": state})
+
+
+@admin_bp.post("/question-automation/stop")
+@admin_required
+def question_automation_stop():
+    admin = getattr(g, "current_user", None)
+    state = stop_hourly_question_automation(stopped_by=admin.id if admin else None)
+    _audit(
+        action="question_automation_stopped",
+        target_type="question_automation",
+        target_id=1,
+        target_label="stop",
+        after=state,
+    )
+    db.session.commit()
+    return jsonify({"message": "Question automation stopped", "state": state})
+
+
+@admin_bp.post("/question-automation/generate-batch")
+@admin_required
+def question_automation_generate_batch():
+    data = request.get_json(silent=True) or {}
+    try:
+        requested_count = int(data.get("count") or 700)
+    except (TypeError, ValueError):
+        requested_count = 700
+    requested_count = max(1, min(requested_count, 2000))
+    admin = getattr(g, "current_user", None)
+    stats = generate_ai_question_batch(
+        target_count=requested_count,
+        source="manual_admin_batch",
+        started_by=admin.id if admin else None,
+    )
+    _audit(
+        action="question_automation_batch_generated",
+        target_type="question_automation",
+        target_id=1,
+        target_label=f"count={requested_count}",
+        after=stats,
+    )
+    db.session.commit()
+    return jsonify({
+        "message": "Batch generation completed",
+        "stats": stats,
+        "state": get_question_automation_status(),
     })
 
 
@@ -1068,12 +1151,21 @@ def test_results_history(uid):
     u = db.session.get(User, uid)
     if not u:
         return jsonify({"error": "not found"}), 404
-    items = [
-        tr.as_dict()
-        for tr in TestResult.query.filter_by(user_id=uid)
+    items = []
+    for tr in (
+        TestResult.query
+        .filter_by(user_id=uid)
         .order_by(TestResult.started_at.desc())
         .all()
-    ]
+    ):
+        row = tr.as_dict()
+        row["score_pct"] = (
+            round(tr.correct_answers / tr.total_questions * 100, 1)
+            if tr.total_questions else 0
+        )
+        row["avg_time_per_question"] = tr.average_time_per_question
+        row["user"] = {"id": u.id, "name": u.name, "email": u.email}
+        items.append(row)
     return jsonify({"user": u.as_dict(), "items": items})
 
 @admin_bp.get("/test-results/<int:result_id>")

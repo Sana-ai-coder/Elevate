@@ -454,6 +454,25 @@
   font-weight: 500;
 }
 
+.answer-options .option.option-selected {
+  border-color: #4a6cf7;
+  background: #eef2ff;
+}
+
+.answer-options .option.option-correct {
+  border-color: #198754;
+  background: #d1f4de;
+}
+
+.answer-options .option.option-incorrect {
+  border-color: #dc3545;
+  background: #fde2e5;
+}
+
+.answer-review-card .feedback-line {
+  margin-top: 6px;
+}
+
 .answer-option:hover {
   border-color: var(--primary-color);
   background: #f0f2ff;

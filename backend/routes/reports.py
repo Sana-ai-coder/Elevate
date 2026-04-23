@@ -22,11 +22,12 @@ def _normalize_difficulty(value):
         "intermediate": "medium",
         "advanced": "hard",
         "challenging": "hard",
-        "pro": "expert",
-        "extreme": "expert",
+        "pro": "hard",
+        "extreme": "hard",
+        "expert": "hard",
     }
     canonical = aliases.get(raw, raw)
-    if canonical in {"easy", "medium", "hard", "expert"}:
+    if canonical in {"easy", "medium", "hard"}:
         return canonical
     return "unknown"
 
@@ -74,7 +75,6 @@ def _build_timeline_payload(user_id, raw_days):
         "easy": 0,
         "medium": 0,
         "hard": 0,
-        "expert": 0,
         "unknown": 0,
     }
 

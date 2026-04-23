@@ -944,7 +944,7 @@ async function showUserHistory(userId) {
   body.innerHTML = '<div class="spinner"></div>';
   try {
     const data = await api.admin.getTestResultHistory(userId);
-    const items = (data.items || []).slice().reverse();
+    const items = data.items || [];
     if (!items.length) { body.innerHTML = '<div class="table-empty">No history found.</div>'; return; }
 
     const labels = items.map(i => i.started_at ? new Date(i.started_at).toLocaleDateString() : '');
