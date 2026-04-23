@@ -9,7 +9,6 @@ Supabase-safe: uses SQLAlchemy ORM only, no raw PRAGMA/SQLite calls.
 import csv
 import re
 import os
-import requests
 import random
 import string
 from datetime import datetime, timedelta
@@ -48,52 +47,6 @@ from ..hf_training_service import (
 )
 
 admin_bp = Blueprint("admin", __name__)
-
-def _send_invite_email(email, name, role, raw_password):
-    api_key = os.environ.get("BREVO_API_KEY")
-    if not api_key:
-        print(f"Warning: BREVO_API_KEY not set. Cannot send email to {email}.")
-        return
-
-    url = "https://api.brevo.com/v3/smtp/email"
-    
-    headers = {
-        "accept": "application/json",
-        "api-key": api_key,
-        "content-type": "application/json"
-    }
-    
-    # NOTE: Change the "email" below to the exact email address you used to sign up for Brevo!
-    payload = {
-        "sender": {
-            "name": "Elevate Administration",
-            "email": "sanagirish0@gmail.com" 
-        },
-        "to": [{"email": email, "name": name}],
-        "subject": "Welcome to Elevate Learning Platform!",
-        "htmlContent": f"""
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e5e7eb; border-radius: 8px;">
-                <h2 style="color: #6366f1;">Welcome to Elevate!</h2>
-                <p>Hello <strong>{name}</strong>,</p>
-                <p>An administrator has created an Elevate <strong>{role.title()}</strong> account for you.</p>
-                <div style="background-color: #f3f4f6; padding: 15px; border-radius: 6px; margin: 20px 0;">
-                    <p style="margin: 0;"><strong>Your Login Email:</strong> {email}</p>
-                    <p style="margin: 10px 0 0 0;"><strong>Temporary Password:</strong> <span style="font-family: monospace; font-size: 1.1em; color: #ef4444;">{raw_password}</span></p>
-                </div>
-                <p>Please log in and change your password immediately for security purposes.</p>
-                <br>
-                <p style="color: #6b7280; font-size: 0.9em;">- The Elevate Team</p>
-            </div>
-        """
-    }
-    
-    try:
-        response = requests.post(url, json=payload, headers=headers)
-        response.raise_for_status() # Throws an error if it fails
-        print(f"Success: Invite email sent to {email}")
-    except Exception as e:
-        print(f"Failed to send email to {email}. Error: {e}")
-
 
 # ─── Auth helpers ────────────────────────────────────────────────────────────
 
@@ -315,42 +268,38 @@ def bulk_import_users():
         return jsonify({"error": "No file provided"}), 400
         
     file = request.files['file']
-    admin_user = db.session.get(User, getattr(request, 'user_id', 1)) # Safely get admin ID
+    admin_user = db.session.get(User, getattr(request, 'user_id', 1)) 
     
     stream = io.StringIO(file.stream.read().decode("UTF8"), newline=None)
     csv_input = csv.DictReader(stream)
     
-    added_count = 0
     updated_count = 0
+    not_found_count = 0
     
     for row in csv_input:
         email = row.get('Email', '').strip().lower()
-        name = row.get('Name', '').strip()
         role = row.get('Role', 'student').strip().lower()
-        grade = row.get('Grade', '').strip()
         
-        if not email or not name:
+        if not email:
             continue
             
         existing_user = User.query.filter_by(email=email).first()
         if existing_user:
+            # User exists! Link them to the school.
             existing_user.school_id = admin_user.school_id
-            if role in ['student', 'teacher']:
+            if role in ['student', 'teacher'] and existing_user.role != 'admin':
                 existing_user.role = role
             updated_count += 1
         else:
-            raw_password = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-            new_user = User(
-                email=email, name=name, role=role if role in ['student', 'teacher'] else 'student',
-                grade=grade, school_id=admin_user.school_id, is_verified=True
-            )
-            new_user.set_password(raw_password)
-            db.session.add(new_user)
-            added_count += 1
-            _send_invite_email(email, name, role, raw_password)
+            # User does not exist, ignore and count as not found
+            not_found_count += 1
             
     db.session.commit()
-    return jsonify({"message": "Import successful", "added": added_count, "updated": updated_count}), 200
+    return jsonify({
+        "message": "Import processed successfully", 
+        "updated": updated_count,
+        "not_found": not_found_count
+    }), 200
 
 @admin_bp.post('/users/single-add')
 def single_add_user():
@@ -361,40 +310,31 @@ def single_add_user():
     email = data.get('email', '').strip().lower()
     name = data.get('name', '').strip()
     role = data.get('role', 'student').strip().lower()
+    admin_user = db.session.get(User, getattr(request, 'user_id', 1))
     
-    admin_id = getattr(request, 'user_id', 1)
-    admin_user = db.session.get(User, admin_id)
-    
-    # 1. Search the database for the exact email
+    # 1. Check exact email
     exact_user = User.query.filter_by(email=email).first()
-    
     if exact_user:
         exact_user.school_id = admin_user.school_id
         if exact_user.role != 'admin':
             exact_user.role = role
-            
         db.session.commit()
-        return jsonify({
-            "status": "linked", 
-            "message": f"Success! {email} was found and assigned to your school."
-        }), 200
+        return jsonify({"status": "linked", "message": f"Success! {exact_user.name} has been added to your school."}), 200
         
-    # 2. Fuzzy Search: If email is wrong, check if a similar name exists
-    if name:
-        similar_user = User.query.filter(User.name.ilike(f"%{name}%")).first()
-        if similar_user:
-            # Mask the email to protect privacy (e.g., joh***@gmail.com)
-            parts = similar_user.email.split('@')
-            masked = parts[0][:3] + "***@" + parts[1] if len(parts[0]) > 3 else "***@" + parts[1]
-            return jsonify({
-                "status": "similar_found", 
-                "error": f"We could not find the email '{email}'.",
-                "suggestion": f"Did you mean '{similar_user.name}' ({masked})? Please verify their exact email and try again."
-            }), 404
+    # 2. Fuzzy Search: If email is wrong, check for similar names
+    similar_user = User.query.filter(User.name.ilike(f"%{name}%")).first()
+    if similar_user:
+        parts = similar_user.email.split('@')
+        masked = parts[0][:3] + "***@" + parts[1] if len(parts[0]) > 3 else "***@" + parts[1]
+        return jsonify({
+            "status": "similar_found", 
+            "error": f"We could not find the exact email '{email}'.",
+            "suggestion": f"However, a user named '{similar_user.name}' ({masked}) exists. Is this who you meant? Please verify their exact email and try again."
+        }), 404
 
-    # 3. Complete failure
+    # 3. Completely Not Found (No creation fallback!)
     return jsonify({
-        "error": f"User '{email}' not found. They must register on Elevate before you can assign them."
+        "error": f"No user named '{name}' is registered on Elevate. They must sign up for an account first before you can add them to your school."
     }), 404
 
 

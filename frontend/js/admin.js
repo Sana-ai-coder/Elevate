@@ -440,6 +440,9 @@ function setupUsersPanel() {
     const fileInput = document.getElementById('csvFileInput');
     if (!fileInput.files[0]) return showToast('Please select a CSV file first.', 'warning');
     
+    // --> NEW CONFIRMATION DIALOG <--
+    if (!await showConfirm('Confirm Bulk Assignment', 'Are you sure you want to process this list and link matching users to your school?')) return;
+
     const btn = document.getElementById('uploadCsvBtn');
     btn.innerHTML = '<div class="spinner"></div> Processing...';
     btn.disabled = true;
@@ -451,11 +454,10 @@ function setupUsersPanel() {
       
       importFeedback.className = '';
       importFeedback.style = 'margin-top:16px; padding:12px; border-radius:8px; text-align:center; font-size:0.875rem; font-weight:500; background:rgba(16,185,129,0.1); color:#34d399; border:1px solid rgba(16,185,129,0.2);';
-      importFeedback.textContent = `Success! Added ${res.added} new users, linked ${res.updated} existing.`;
-      showToast('Bulk import complete', 'success');
+      importFeedback.textContent = `Success! Linked ${res.updated} users to your school. (${res.not_found} users were not found in the database).`;
+      showToast('Bulk processing complete', 'success');
       loadUsers(1);
     } catch (err) {
-      console.error("Bulk Import Error:", err); // <--- Log exact error to console
       importFeedback.className = '';
       importFeedback.style = 'margin-top:16px; padding:12px; border-radius:8px; text-align:center; font-size:0.875rem; font-weight:500; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.2);';
       importFeedback.textContent = err.error || err.message || 'Upload failed.';
@@ -473,6 +475,9 @@ function setupUsersPanel() {
     
     if (!email || !name) return showToast('Email and Name are required', 'warning');
     
+    // --> NEW CONFIRMATION DIALOG <--
+    if (!await showConfirm('Confirm User Assignment', `Are you sure you want to search and add ${name} to your school?`)) return;
+
     const btn = document.getElementById('singleAddBtn');
     btn.innerHTML = '<div class="spinner"></div> Searching...';
     btn.disabled = true;
@@ -487,7 +492,6 @@ function setupUsersPanel() {
       showToast('User linked successfully!', 'success');
       loadUsers(1);
     } catch (err) {
-      console.error("Single Add Error:", err); // <--- Log exact error to console
       if (err.status === 'similar_found') {
         warningBox.innerHTML = `<strong>User Not Found!</strong><br/>${err.error}<br/><br/><em>${err.suggestion}</em>`;
         warningBox.classList.remove('hidden');

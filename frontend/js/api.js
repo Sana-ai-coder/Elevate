@@ -835,7 +835,7 @@ export const api = {
         let baseUrl = config.API_BASE_URL || config.API_URL || config.BASE_URL || '';
         baseUrl = baseUrl.replace(/\/$/, '');
         
-        const res = await fetch(`${baseUrl}/api/admin/users/bulk-import`, {
+        const res = await fetch(`${baseUrl}/admin/users/bulk-import`, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${token}` }, 
             body: formData
