@@ -342,6 +342,20 @@ def delete_school(sid):
     db.session.commit()
     return jsonify({"message": "deleted"})
 
+@admin_bp.get('/schools/hierarchy')
+def get_schools_hierarchy():
+    if not _check_admin_token():
+        return {"error": "unauthorized"}, 401
+    
+    try:
+        from ..models import School
+        schools = School.query.all()
+        # Return the basic school data needed for the dropdowns
+        items = [{"id": s.id, "name": s.name, "slug": getattr(s, 'slug', '')} for s in schools]
+        return jsonify({"items": items}), 200
+    except Exception as e:
+        # Fallback if School model isn't fully migrated yet
+        return jsonify({"items": []}), 200
 
 # ─── 4 & 5. Training monitor ──────────────────────────────────────────────────
 

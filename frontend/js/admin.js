@@ -218,6 +218,7 @@ async function loadDashboardStats() {
 let usersPage = 1;
 const usersPerPage = 15;
 let currentUsersList = []; // Store users to easily find them for the edit modal
+let allSchools = [];
 
 async function loadUsers(page = 1) {
   usersPage = page;
