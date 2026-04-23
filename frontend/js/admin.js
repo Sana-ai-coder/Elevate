@@ -419,41 +419,19 @@ function setupUsersPanel() {
     importFeedback.classList.add('hidden');
   });
 
-  // 1. Download Template (Now with the correct Backend Base URL)
-  document.getElementById('downloadCsvTemplateBtn')?.addEventListener('click', async () => {
+  // 1. Download Template (100% Client-Side, No Backend Needed!)
+  document.getElementById('downloadCsvTemplateBtn')?.addEventListener('click', () => {
     try {
-      const btn = document.getElementById('downloadCsvTemplateBtn');
-      btn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;margin-right:8px;"></div> Downloading...';
-      btn.disabled = true;
+      // 1. We write the exact CSV text directly in the browser
+      const csvText = "Name,Email,Role,Grade\nJohn Doe,john.doe@example.com,student,10\nJane Smith,jane.smith@example.com,teacher,\n";
 
-      const session = loadSession();
-      const token = session ? session.token : '';
-      
-      // Grab the backend URL from config
-      const baseUrl = config.API_BASE_URL || config.API_URL || config.BASE_URL || '';
-
-      const res = await fetch(`${baseUrl}/api/admin/users/csv-template`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-
-      if (!res.ok) {
-        throw new Error(`Server responded with status ${res.status}`);
-      }
-
-      const csvText = await res.text();
+      // 2. Use your existing utility function to force the browser to download it
       downloadText(csvText, 'elevate_users_template.csv', 'text/csv');
-      showToast('Template downloaded successfully!', 'success');
       
+      showToast('Template downloaded successfully!', 'success');
     } catch (err) {
-      console.error("CSV Download Error:", err);
-      showToast('Failed to download template. See console.', 'error');
-    } finally {
-      const btn = document.getElementById('downloadCsvTemplateBtn');
-      btn.innerHTML = '<i class="fas fa-download"></i> Download CSV Template';
-      btn.disabled = false;
+      console.error(err);
+      showToast('Failed to download template.', 'error');
     }
   });
 
