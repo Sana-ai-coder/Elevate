@@ -923,7 +923,7 @@ class ModelVersion(db.Model):
     __tablename__ = "model_versions"
 
     id = db.Column(db.Integer, primary_key=True)
-    model_type = db.Column(db.String(64), nullable=False, index=True)   # "emotion" | "at_risk"
+    model_name = db.Column(db.String(64), nullable=False, index=True)   # "emotion" | "at_risk"
     version_tag = db.Column(db.String(64), nullable=False)              # e.g. "v1.3.0" or a commit sha
     status = db.Column(db.String(32), default="archived", nullable=False, index=True)
     # status: "training" | "staging" | "production" | "archived" | "rollback_candidate"
@@ -940,7 +940,7 @@ class ModelVersion(db.Model):
     def as_dict(self):
         return {
             "id": self.id,
-            "model_type": self.model_type,
+            "model_name": self.model_name,
             "version_tag": self.version_tag,
             "status": self.status,
             "accuracy": self.accuracy,
@@ -961,7 +961,7 @@ class TrainingJob(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     job_id = db.Column(db.String(128), nullable=True, index=True)    # HF job id or local run id
-    model_type = db.Column(db.String(64), nullable=False, index=True)
+    model_name = db.Column(db.String(64), nullable=False, index=True)
     triggered_by = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     trigger_source = db.Column(db.String(64), default="admin_ui")   # "admin_ui" | "ci" | "scheduled"
     status = db.Column(db.String(32), default="queued", nullable=False, index=True)
@@ -979,7 +979,7 @@ class TrainingJob(db.Model):
         return {
             "id": self.id,
             "job_id": self.job_id,
-            "model_type": self.model_type,
+            "model_name": self.model_name,
             "triggered_by": self.triggered_by,
             "trigger_source": self.trigger_source,
             "status": self.status,

@@ -466,10 +466,13 @@ def get_schools_hierarchy():
 def trigger_strict_ml_training():
     result = start_hf_strict_training()
 
+    admin_user = getattr(g, "current_user", None)
+    
+    # FIX: Use model_name to match PostgreSQL schema
     job = TrainingJob(
         job_id=result.get("payload", {}).get("job_id") if isinstance(result.get("payload"), dict) else None,
-        model_type="emotion",
-        triggered_by=getattr(getattr(g, "current_user", None), "id", None),
+        model_name="emotion",  
+        triggered_by=admin_user.id if admin_user else None,
         trigger_source="admin_ui",
         status="queued" if result.get("ok") else "failed",
         started_at=utcnow(),
@@ -524,12 +527,20 @@ def strict_ml_training_status(job_id):
 def list_training_jobs():
     page = max(1, int(request.args.get("page", 1) or 1))
     per_page = min(100, max(1, int(request.args.get("per_page", 20) or 20)))
+    
     q = TrainingJob.query
     if request.args.get("status"):
         q = q.filter_by(status=request.args["status"])
-
+    if request.args.get("model_name"):
+        q = q.filter_by(model_name=request.args["model_name"])
+        
     pag = q.order_by(TrainingJob.created_at.desc()).paginate(page=page, per_page=per_page, error_out=False)
-    return jsonify({"items": [j.as_dict() for j in pag.items], "page": page, "per_page": per_page, "total": pag.total, "pages": pag.pages})
+    
+    items = []
+    for j in pag.items:
+        items.append(j.as_dict())
+
+    return jsonify({"items": items, "page": page, "per_page": per_page, "total": pag.total, "pages": pag.pages})
 
 @admin_bp.get("/ml/training-jobs/<int:jid>")
 @admin_required
@@ -547,20 +558,20 @@ def list_model_versions():
     page = max(1, int(request.args.get("page", 1) or 1))
     per_page = min(100, max(1, int(request.args.get("per_page", 20) or 20)))
     
-    # Adapt UI 'model_name' to DB 'model_type'
-    model_type = request.args.get("model_name") or request.args.get("model_type")
+    # FIX: Use model_name for UI payload parsing and DB querying
+    model_name = request.args.get("model_name") or request.args.get("model_type")
     q = ModelVersion.query
-    if model_type:
-        q = q.filter_by(model_type=model_type)
+    if model_name:
+        q = q.filter_by(model_name=model_name)
         
     pag = q.order_by(ModelVersion.created_at.desc()).paginate(page=page, per_page=per_page, error_out=False)
     
     items = []
     for v in pag.items:
         d = v.as_dict()
-        d["model_name"] = d.get("model_type", "unknown")
-        d["is_production"] = (d.get("status") == "production")
-        d["is_rollback_candidate"] = (d.get("status") == "rollback_candidate")
+        d["model_name"] = getattr(v, "model_name", "unknown")
+        d["is_production"] = (getattr(v, "status", "") == "production")
+        d["is_rollback_candidate"] = (getattr(v, "status", "") == "rollback_candidate")
         items.append(d)
 
     return jsonify({"items": items, "page": page, "per_page": per_page, "total": pag.total, "pages": pag.pages})
@@ -568,17 +579,17 @@ def list_model_versions():
 @admin_bp.get("/ml/model-versions/registry-summary")
 @admin_required
 def registry_summary():
-    model_types = db.session.query(ModelVersion.model_type).distinct().all()
+    model_names = db.session.query(ModelVersion.model_name).distinct().all()
     items = []
-    for (m_type,) in model_types:
-        if not m_type: continue
-        total = ModelVersion.query.filter_by(model_type=m_type).count()
-        current = ModelVersion.query.filter_by(model_type=m_type, status="production").order_by(ModelVersion.created_at.desc()).first()
-        rollback = ModelVersion.query.filter_by(model_type=m_type, status="rollback_candidate").order_by(ModelVersion.created_at.desc()).first()
-        previous = ModelVersion.query.filter_by(model_type=m_type, status="archived").order_by(ModelVersion.promoted_at.desc()).first()
+    for (m_name,) in model_names:
+        if not m_name: continue
+        total = ModelVersion.query.filter_by(model_name=m_name).count()
+        current = ModelVersion.query.filter_by(model_name=m_name, status="production").order_by(ModelVersion.created_at.desc()).first()
+        rollback = ModelVersion.query.filter_by(model_name=m_name, status="rollback_candidate").order_by(ModelVersion.created_at.desc()).first()
+        previous = ModelVersion.query.filter_by(model_name=m_name, status="archived").order_by(ModelVersion.promoted_at.desc()).first()
 
         items.append({
-            "model_name": m_type,
+            "model_name": m_name,
             "total_versions": total,
             "current_production": {"version_tag": current.version_tag} if current else None,
             "previous": {"version_tag": previous.version_tag} if previous else None,
@@ -590,14 +601,20 @@ def registry_summary():
 @admin_required
 def register_model_version():
     data = request.get_json(silent=True) or {}
-    model_type = data.get("model_name") or data.get("model_type")
+    model_name = data.get("model_name") or data.get("model_type")
     version_tag = data.get("version_tag")
-    if not model_type or not version_tag:
+    if not model_name or not version_tag:
         return jsonify({"error": "Model Name and Version Tag required"}), 400
 
-    v = ModelVersion(model_type=model_type, version_tag=version_tag, status="staging", notes=data.get("notes"))
+    v = ModelVersion(
+        model_name=model_name, 
+        version_tag=version_tag, 
+        status="staging", 
+        notes=data.get("notes"),
+        artifact_path=data.get("artifact_uri")
+    )
     db.session.add(v)
-    _audit("model_version.registered", "model_version", None, f"{model_type}:{version_tag}", None, None)
+    _audit("model_version.registered", "model_version", None, f"{model_name}:{version_tag}", None, None)
     db.session.commit()
     return jsonify({"version": v.as_dict()}), 201
 
@@ -608,14 +625,16 @@ def promote_model_version(vid):
     if not v:
         return jsonify({"error": "not found"}), 404
 
-    old_prod = ModelVersion.query.filter_by(model_type=v.model_type, status="production").all()
+    old_prod = ModelVersion.query.filter_by(model_name=v.model_name, status="production").all()
     for old in old_prod:
         old.status = "archived"
 
     v.status = "production"
-    v.promoted_by = getattr(getattr(g, "current_user", None), "id", None)
+    admin_user = getattr(g, "current_user", None)
+    v.promoted_by = admin_user.id if admin_user else None
     v.promoted_at = utcnow()
-    _audit("model_version.promoted", "model_version", v.id, f"{v.model_type}:{v.version_tag}", None, {"status": "production"})
+    
+    _audit("model_version.promoted", "model_version", v.id, f"{v.model_name}:{v.version_tag}", None, {"status": "production"})
     db.session.commit()
     return jsonify({"version": v.as_dict()})
 
@@ -626,12 +645,12 @@ def rollback_model_version(vid):
     if not v:
         return jsonify({"error": "not found"}), 404
 
-    old_rollbacks = ModelVersion.query.filter_by(model_type=v.model_type, status="rollback_candidate").all()
+    old_rollbacks = ModelVersion.query.filter_by(model_name=v.model_name, status="rollback_candidate").all()
     for old in old_rollbacks:
         old.status = "archived"
 
     v.status = "rollback_candidate"
-    _audit("model_version.rollback", "model_version", v.id, f"{v.model_type}:{v.version_tag}", None, {"status": "rollback_candidate"})
+    _audit("model_version.rollback", "model_version", v.id, f"{v.model_name}:{v.version_tag}", None, {"status": "rollback_candidate"})
     db.session.commit()
     return jsonify({"version": v.as_dict(), "message": "rollback set"})
 
