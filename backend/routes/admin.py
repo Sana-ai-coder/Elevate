@@ -529,10 +529,30 @@ def get_schools_hierarchy():
 @admin_required
 def trigger_strict_ml_training():
     admin_user = getattr(g, "current_user", None)
-    
-    # 1. Attempt the remote execution FIRST
+
+    hf_payload = {}
+    repo_url = str(os.environ.get("HF_ML_TRAINING_GITHUB_REPO_URL") or "").strip()
+    repo_ref = str(os.environ.get("HF_ML_TRAINING_GITHUB_REF") or "main").strip()
+    if repo_url:
+        hf_payload["github_repo_url"] = repo_url
+    if repo_ref:
+        hf_payload["github_ref"] = repo_ref
+    min_acc = str(os.environ.get("HF_ML_MIN_EMOTION_ACCURACY") or "").strip()
+    if min_acc:
+        try:
+            hf_payload["min_emotion_accuracy"] = float(min_acc)
+        except ValueError:
+            pass
+    procs = str(os.environ.get("HF_ML_TRAINING_PROCESSES") or "").strip()
+    if procs:
+        try:
+            hf_payload["process_count"] = max(1, min(int(procs), 16))
+        except ValueError:
+            pass
+
+    # 1. Attempt the remote execution FIRST (long HF cold-starts are handled in hf_training_service).
     try:
-        result = start_hf_strict_training()
+        result = start_hf_strict_training(hf_payload or None)
     except Exception as e:
         current_app.logger.error(f"[HF CRASH] Failed to contact Hugging Face: {str(e)}")
         # Do NOT touch the database. Return the error directly to the UI.

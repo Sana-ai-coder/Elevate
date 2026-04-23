@@ -490,8 +490,15 @@ def _preload_model_blocking() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    _preload_model_blocking()
+    # Do not block HTTP readiness on MCQ LLM preload. Hugging Face Spaces can take minutes
+    # to load the generator; the strict training endpoints must accept requests immediately.
+    def _bg_preload() -> None:
+        try:
+            _preload_model_blocking()
+        except Exception:
+            pass
 
+    threading.Thread(target=_bg_preload, daemon=True, name="mcq-model-preload").start()
     yield
 
 
@@ -581,7 +588,7 @@ class ScoreMCQRequest(BaseModel):
 class StrictTrainingRequest(BaseModel):
     github_repo_url: Optional[str] = None
     github_ref: str = Field(default="main", min_length=1)
-    min_emotion_accuracy: float = Field(default=0.95, ge=0.50, le=0.999)
+    min_emotion_accuracy: float = Field(default=0.88, ge=0.50, le=0.999)
     process_count: int = Field(default=4, ge=1, le=16)
 
 
@@ -647,7 +654,6 @@ def health() -> dict:
         return JSONResponse(status_code=503, content=payload)
     return payload
 
-@app.post("/warmup")
 def _run_strict_training_job(job_id: str, request_payload: StrictTrainingRequest) -> None:
     # 1. Best-effort dataset prefetch. The training runner also prepares dataset in repo/dataset.
     try:

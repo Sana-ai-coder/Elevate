@@ -713,8 +713,10 @@ export const api = {
     },
 
     async triggerTraining() {
+      // HF Spaces cold start + proxy can exceed normal API timeout; match backend HF client (~300s).
       return await api.request('/admin/ml/train-strict', {
         method: 'POST',
+        timeoutMs: 360000,
       });
     },
 
