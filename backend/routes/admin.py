@@ -496,6 +496,7 @@ def trigger_strict_ml_training():
         trigger_source="admin_ui",
         status="queued",
         started_at=utcnow()
+        updated_at=utcnow()
     )
     db.session.add(job)
     
