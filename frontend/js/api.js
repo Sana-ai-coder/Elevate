@@ -822,6 +822,20 @@ export const api = {
     async exportAuditLogs() {
       return await this.fetchText('/admin/audit-logs/export', 'GET');
     },
+
+    enableUser: (id) => fetchWithAuth(`/api/admin/users/${id}/enable`, { method: 'POST' }),
+
+    // --- NEW IMPORT ENDPOINTS ---
+    downloadCsvTemplate: () => fetchWithAuth('/api/admin/users/csv-template', {}, false), 
+    bulkImportUsers: (formData) => {
+        const token = localStorage.getItem('elevate_token') || sessionStorage.getItem('elevate_token');
+        return fetch('/api/admin/users/bulk-import', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}` }, // Browser auto-sets multipart boundary
+            body: formData
+        }).then(res => res.json().then(data => res.ok ? data : Promise.reject(data)));
+    },
+    singleAddUser: (data) => fetchWithAuth('/api/admin/users/single-add', { method: 'POST', body: JSON.stringify(data) }),
   },
 
   student: {

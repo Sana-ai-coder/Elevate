@@ -379,6 +379,99 @@ function setupUsersPanel() {
       showToast(err.message || 'Failed to update user', 'error');
     }
   });
+
+  // --- Import / Add Users Logic ---
+  const importModal = document.getElementById('importUsersModal');
+  const importFeedback = document.getElementById('importFeedback');
+
+  document.getElementById('openImportModalBtn')?.addEventListener('click', () => {
+    importModal.classList.remove('hidden');
+    importFeedback.textContent = '';
+    document.getElementById('singleAddWarning').classList.add('hidden');
+    document.getElementById('forceCreateBtn').classList.add('hidden');
+  });
+
+  document.getElementById('closeImportModal')?.addEventListener('click', () => importModal.classList.add('hidden'));
+
+  // Tab Switching
+  document.getElementById('tabBulkBtn')?.addEventListener('click', (e) => {
+    e.target.style.color = '#818cf8'; e.target.style.borderBottom = '2px solid #818cf8';
+    document.getElementById('tabSingleBtn').style.color = '#94a3b8'; document.getElementById('tabSingleBtn').style.borderBottom = 'none';
+    document.getElementById('tabBulkContent').classList.remove('hidden');
+    document.getElementById('tabSingleContent').classList.add('hidden');
+  });
+
+  document.getElementById('tabSingleBtn')?.addEventListener('click', (e) => {
+    e.target.style.color = '#818cf8'; e.target.style.borderBottom = '2px solid #818cf8';
+    document.getElementById('tabBulkBtn').style.color = '#94a3b8'; document.getElementById('tabBulkBtn').style.borderBottom = 'none';
+    document.getElementById('tabSingleContent').classList.remove('hidden');
+    document.getElementById('tabBulkContent').classList.add('hidden');
+  });
+
+  // 1. Download Template
+  document.getElementById('downloadCsvTemplateBtn')?.addEventListener('click', async () => {
+    try {
+      const csv = await api.admin.downloadCsvTemplate();
+      downloadText(csv, 'elevate_users_template.csv', 'text/csv');
+      showToast('Template downloaded', 'success');
+    } catch (err) { showToast('Failed to download template', 'error'); }
+  });
+
+  // 2. Bulk Upload
+  document.getElementById('uploadCsvBtn')?.addEventListener('click', async () => {
+    const fileInput = document.getElementById('csvFileInput');
+    if (!fileInput.files[0]) return showToast('Please select a CSV file first.', 'warning');
+    
+    const formData = new FormData();
+    formData.append('file', fileInput.files[0]);
+    
+    importFeedback.style.color = '#94a3b8'; importFeedback.textContent = 'Processing upload...';
+    try {
+      const res = await api.admin.bulkImportUsers(formData);
+      importFeedback.style.color = '#34d399';
+      importFeedback.textContent = `Success! Added ${res.added} new users, linked ${res.updated} existing.`;
+      showToast('Bulk import complete', 'success');
+      loadUsers(1);
+    } catch (err) {
+      importFeedback.style.color = '#f87171';
+      importFeedback.textContent = err.error || 'Upload failed.';
+    }
+  });
+
+  // 3. Single User Search / Add
+  const handleSingleAdd = async (forceCreate = false) => {
+    const email = document.getElementById('singleAddEmail').value.trim();
+    const name = document.getElementById('singleAddName').value.trim();
+    const role = document.getElementById('singleAddRole').value;
+    
+    if (!email || !name) return showToast('Email and Name are required', 'warning');
+    
+    importFeedback.style.color = '#94a3b8'; importFeedback.textContent = 'Searching database...';
+    
+    try {
+      const res = await api.admin.singleAddUser({ email, name, role, force_create: forceCreate });
+      importFeedback.style.color = '#34d399';
+      importFeedback.textContent = res.message;
+      document.getElementById('singleAddWarning').classList.add('hidden');
+      document.getElementById('forceCreateBtn').classList.add('hidden');
+      showToast(res.status === 'linked' ? 'User Linked!' : 'Account Created!', 'success');
+      loadUsers(1);
+    } catch (err) {
+      if (err.status === 'similar_found') {
+        importFeedback.textContent = '';
+        const warningBox = document.getElementById('singleAddWarning');
+        warningBox.innerHTML = `<strong>Wait!</strong> ${err.message}<br><br><em>${err.suggestion}</em>`;
+        warningBox.classList.remove('hidden');
+        document.getElementById('forceCreateBtn').classList.remove('hidden');
+      } else {
+        importFeedback.style.color = '#f87171';
+        importFeedback.textContent = err.error || 'Failed to process user.';
+      }
+    }
+  };
+
+  document.getElementById('singleAddBtn')?.addEventListener('click', () => handleSingleAdd(false));
+  document.getElementById('forceCreateBtn')?.addEventListener('click', () => handleSingleAdd(true));
 }
 // =====================================================
 // (End of Users Panel)

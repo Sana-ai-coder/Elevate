@@ -8,11 +8,15 @@ Supabase-safe: uses SQLAlchemy ORM only, no raw PRAGMA/SQLite calls.
 
 import csv
 import re
+import os
+import requests
+import random
+import string
 from datetime import datetime, timedelta
 from io import StringIO
 from functools import wraps
 
-from flask import Blueprint, current_app, g, jsonify, request
+from flask import Blueprint, current_app, g, jsonify, request, make_response
 from sqlalchemy import func, or_
 
 from ..models import (
@@ -44,6 +48,51 @@ from ..hf_training_service import (
 )
 
 admin_bp = Blueprint("admin", __name__)
+
+def _send_invite_email(email, name, role, raw_password):
+    api_key = os.environ.get("BREVO_API_KEY")
+    if not api_key:
+        print(f"Warning: BREVO_API_KEY not set. Cannot send email to {email}.")
+        return
+
+    url = "https://api.brevo.com/v3/smtp/email"
+    
+    headers = {
+        "accept": "application/json",
+        "api-key": api_key,
+        "content-type": "application/json"
+    }
+    
+    # NOTE: Change the "email" below to the exact email address you used to sign up for Brevo!
+    payload = {
+        "sender": {
+            "name": "Elevate Administration",
+            "email": "sanagirish0@gmail.com" 
+        },
+        "to": [{"email": email, "name": name}],
+        "subject": "Welcome to Elevate Learning Platform!",
+        "htmlContent": f"""
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e5e7eb; border-radius: 8px;">
+                <h2 style="color: #6366f1;">Welcome to Elevate!</h2>
+                <p>Hello <strong>{name}</strong>,</p>
+                <p>An administrator has created an Elevate <strong>{role.title()}</strong> account for you.</p>
+                <div style="background-color: #f3f4f6; padding: 15px; border-radius: 6px; margin: 20px 0;">
+                    <p style="margin: 0;"><strong>Your Login Email:</strong> {email}</p>
+                    <p style="margin: 10px 0 0 0;"><strong>Temporary Password:</strong> <span style="font-family: monospace; font-size: 1.1em; color: #ef4444;">{raw_password}</span></p>
+                </div>
+                <p>Please log in and change your password immediately for security purposes.</p>
+                <br>
+                <p style="color: #6b7280; font-size: 0.9em;">- The Elevate Team</p>
+            </div>
+        """
+    }
+    
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status() # Throws an error if it fails
+        print(f"Success: Invite email sent to {email}")
+    except Exception as e:
+        print(f"Failed to send email to {email}. Error: {e}")
 
 
 # ─── Auth helpers ────────────────────────────────────────────────────────────
@@ -239,6 +288,105 @@ def disable_user(uid):
     _audit("user.disabled", "user", u.id, u.email, before, {"is_verified": False})
     db.session.commit()
     return jsonify({"message": "user disabled"})
+
+@admin_bp.get('/users/csv-template')
+def get_csv_template():
+    if not _check_admin_token():
+        return {"error": "unauthorized"}, 401
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Name', 'Email', 'Role', 'Grade'])
+    writer.writerow(['John Doe', 'john.doe@example.com', 'student', '10'])
+    writer.writerow(['Jane Smith', 'jane.smith@example.com', 'teacher', ''])
+    
+    from flask import make_response
+    response = make_response(output.getvalue())
+    response.headers["Content-Disposition"] = "attachment; filename=elevate_users_template.csv"
+    response.headers["Content-type"] = "text/csv"
+    return response
+
+@admin_bp.post('/users/bulk-import')
+def bulk_import_users():
+    if not _check_admin_token():
+        return {"error": "unauthorized"}, 401
+        
+    if 'file' not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+        
+    file = request.files['file']
+    admin_user = db.session.get(User, getattr(request, 'user_id', 1)) # Safely get admin ID
+    
+    stream = io.StringIO(file.stream.read().decode("UTF8"), newline=None)
+    csv_input = csv.DictReader(stream)
+    
+    added_count = 0
+    updated_count = 0
+    
+    for row in csv_input:
+        email = row.get('Email', '').strip().lower()
+        name = row.get('Name', '').strip()
+        role = row.get('Role', 'student').strip().lower()
+        grade = row.get('Grade', '').strip()
+        
+        if not email or not name:
+            continue
+            
+        existing_user = User.query.filter_by(email=email).first()
+        if existing_user:
+            existing_user.school_id = admin_user.school_id
+            if role in ['student', 'teacher']:
+                existing_user.role = role
+            updated_count += 1
+        else:
+            raw_password = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+            new_user = User(
+                email=email, name=name, role=role if role in ['student', 'teacher'] else 'student',
+                grade=grade, school_id=admin_user.school_id, is_verified=True
+            )
+            new_user.set_password(raw_password)
+            db.session.add(new_user)
+            added_count += 1
+            _send_invite_email(email, name, role, raw_password)
+            
+    db.session.commit()
+    return jsonify({"message": "Import successful", "added": added_count, "updated": updated_count}), 200
+
+@admin_bp.post('/users/single-add')
+def single_add_user():
+    if not _check_admin_token():
+        return {"error": "unauthorized"}, 401
+        
+    data = request.get_json()
+    email = data.get('email', '').strip().lower()
+    name = data.get('name', '').strip()
+    role = data.get('role', 'student').strip().lower()
+    admin_user = db.session.get(User, getattr(request, 'user_id', 1))
+    
+    exact_user = User.query.filter_by(email=email).first()
+    if exact_user:
+        exact_user.school_id = admin_user.school_id
+        db.session.commit()
+        return jsonify({"status": "linked", "message": f"User {email} linked to your school."}), 200
+        
+    similar_user = User.query.filter(User.name.ilike(f"%{name}%")).first()
+    if similar_user and not data.get('force_create'):
+        parts = similar_user.email.split('@')
+        masked = parts[0][:3] + "***@" + parts[1] if len(parts[0]) > 3 else "***@" + parts[1]
+        return jsonify({
+            "status": "similar_found", 
+            "message": f"A user named '{similar_user.name}' ({masked}) exists. Is this who you meant?",
+            "suggestion": "If you are sure this is a new user, click 'Force Create'."
+        }), 409
+
+    raw_password = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+    new_user = User(email=email, name=name, role=role, school_id=admin_user.school_id, is_verified=True)
+    new_user.set_password(raw_password)
+    db.session.add(new_user)
+    db.session.commit()
+    
+    _send_invite_email(email, name, role, raw_password)
+    return jsonify({"status": "created", "message": f"User created! Invite email sent to {email}."}), 201
 
 
 # ─── 3. School hierarchy ──────────────────────────────────────────────────────
