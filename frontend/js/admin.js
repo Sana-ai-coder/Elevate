@@ -4,6 +4,7 @@
  * Audit Trail, User Management, School Hierarchy, UX Parity
  */
 import { api } from './api.js';
+import { config } from './config.js';
 
 // =====================================================
 // Auth & Session
@@ -183,8 +184,12 @@ async function checkServer() {
   const text = document.getElementById('serverStatusText');
   const pre = document.getElementById('serverInfoPre');
   try {
-    const res = await fetch('/health');
+    // Dynamically grab the backend URL from your config
+    const baseUrl = config.API_BASE_URL || config.API_URL || config.BASE_URL || '';
+    
+    const res = await fetch(`${baseUrl}/health`);
     const data = await res.json().catch(() => ({}));
+    
     dot.className = 'status-dot online';
     text.textContent = data.status || 'Online';
     if (pre) pre.textContent = JSON.stringify(data, null, 2);
@@ -414,19 +419,20 @@ function setupUsersPanel() {
     importFeedback.classList.add('hidden');
   });
 
-  // 1. Download Template (FIXED: Bypassing JSON parser for raw CSV)
+  // 1. Download Template (Now with the correct Backend Base URL)
   document.getElementById('downloadCsvTemplateBtn')?.addEventListener('click', async () => {
     try {
       const btn = document.getElementById('downloadCsvTemplateBtn');
-      btn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;"></div> Downloading...';
+      btn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;margin-right:8px;"></div> Downloading...';
       btn.disabled = true;
 
-      // Get the token directly from the session
       const session = loadSession();
       const token = session ? session.token : '';
+      
+      // Grab the backend URL from config
+      const baseUrl = config.API_BASE_URL || config.API_URL || config.BASE_URL || '';
 
-      // Make a direct fetch call bypassing api.js so we don't force JSON parsing
-      const res = await fetch('/api/admin/users/csv-template', {
+      const res = await fetch(`${baseUrl}/api/admin/users/csv-template`, {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${token}`
@@ -437,10 +443,7 @@ function setupUsersPanel() {
         throw new Error(`Server responded with status ${res.status}`);
       }
 
-      // Explicitly read the response as raw text, NOT JSON
       const csvText = await res.text();
-      
-      // Use your existing utility function to trigger the browser download
       downloadText(csvText, 'elevate_users_template.csv', 'text/csv');
       showToast('Template downloaded successfully!', 'success');
       
