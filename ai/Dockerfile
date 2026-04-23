@@ -24,6 +24,9 @@ RUN apt-get update && apt-get install -y \
     cmake \
     && rm -rf /var/lib/apt/lists/*
 
+# THE FIX: Tell Git to ignore ownership mismatches system-wide
+RUN git config --system --add safe.directory '*'
+
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r /app/requirements.txt && \

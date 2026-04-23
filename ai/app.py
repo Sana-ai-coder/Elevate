@@ -635,15 +635,12 @@ def warmup(authorization: Optional[str] = Header(default=None, alias="Authorizat
 def _run_strict_training_job(job_id: str, request_payload: StrictTrainingRequest) -> None:
     command = [
         sys.executable,
+        "-u", 
         str(AI_ROOT / "training_runner.py"),
         "--repo-url",
-        str(
-            request_payload.github_repo_url
-            or os.environ.get("HF_ML_TRAINING_GITHUB_REPO_URL")
-            or ""
-        ).strip(),
+        str(request_payload.github_repo_url or os.environ.get("HF_ML_TRAINING_GITHUB_REPO_URL") or "").strip(),
         "--repo-ref",
-        str(request_payload.github_ref or "main").strip() or "main",
+        str(request_payload.github_ref or "main").strip(),
         "--min-emotion-accuracy",
         str(float(request_payload.min_emotion_accuracy)),
         "--processes",
@@ -651,37 +648,47 @@ def _run_strict_training_job(job_id: str, request_payload: StrictTrainingRequest
     ]
 
     started = time.perf_counter()
+    full_output = []
+
     with _TRAINING_LOCK:
         _TRAINING_JOBS[job_id]["status"] = "running"
         _TRAINING_JOBS[job_id]["started_at"] = datetime.now(timezone.utc).isoformat()
-        _TRAINING_JOBS[job_id]["command"] = command
 
     try:
-        completed = subprocess.run(
+        # Popen allows us to read line-by-line in real-time
+        process = subprocess.Popen(
             command,
             cwd=str(AI_ROOT),
-            check=False,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, # Merge stderr into stdout for easier logging
             text=True,
+            bufsize=1 # Line buffered
         )
+
+        # Read output in real-time
+        for line in process.stdout:
+            full_output.append(line)
+            # Optional: print to HF console too
+            print(line, end="") 
+            # Periodically sync "tail" to memory so Render can see it while running
+            with _TRAINING_LOCK:
+                _TRAINING_JOBS[job_id]["stdout_tail"] = "".join(full_output[-100:])
+
+        process.wait()
         duration_ms = max(0, int((time.perf_counter() - started) * 1000))
-        stdout_tail = (completed.stdout or "")[-6000:]
-        stderr_tail = (completed.stderr or "")[-6000:]
 
         with _TRAINING_LOCK:
             _TRAINING_JOBS[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
             _TRAINING_JOBS[job_id]["duration_ms"] = duration_ms
-            _TRAINING_JOBS[job_id]["return_code"] = int(completed.returncode)
-            _TRAINING_JOBS[job_id]["stdout_tail"] = stdout_tail
-            _TRAINING_JOBS[job_id]["stderr_tail"] = stderr_tail
-            _TRAINING_JOBS[job_id]["status"] = "succeeded" if completed.returncode == 0 else "failed"
+            _TRAINING_JOBS[job_id]["return_code"] = process.returncode
+            _TRAINING_JOBS[job_id]["status"] = "succeeded" if process.returncode == 0 else "failed"
+            _TRAINING_JOBS[job_id]["stdout_tail"] = "".join(full_output[-200:])
+
     except Exception as exc:
-        duration_ms = max(0, int((time.perf_counter() - started) * 1000))
         with _TRAINING_LOCK:
-            _TRAINING_JOBS[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
-            _TRAINING_JOBS[job_id]["duration_ms"] = duration_ms
             _TRAINING_JOBS[job_id]["status"] = "failed"
             _TRAINING_JOBS[job_id]["error"] = str(exc)
+            _TRAINING_JOBS[job_id]["stdout_tail"] = "".join(full_output[-200:])
 
 
 def _find_running_training_job_id() -> Optional[str]:
