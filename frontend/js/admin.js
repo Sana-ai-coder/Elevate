@@ -414,13 +414,44 @@ function setupUsersPanel() {
     importFeedback.classList.add('hidden');
   });
 
-  // 1. Download Template
+  // 1. Download Template (FIXED: Bypassing JSON parser for raw CSV)
   document.getElementById('downloadCsvTemplateBtn')?.addEventListener('click', async () => {
     try {
-      const csv = await api.admin.downloadCsvTemplate();
-      downloadText(csv, 'elevate_users_template.csv', 'text/csv');
-      showToast('Template downloaded', 'success');
-    } catch (err) { showToast('Failed to download template', 'error'); }
+      const btn = document.getElementById('downloadCsvTemplateBtn');
+      btn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;"></div> Downloading...';
+      btn.disabled = true;
+
+      // Get the token directly from the session
+      const session = loadSession();
+      const token = session ? session.token : '';
+
+      // Make a direct fetch call bypassing api.js so we don't force JSON parsing
+      const res = await fetch('/api/admin/users/csv-template', {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (!res.ok) {
+        throw new Error(`Server responded with status ${res.status}`);
+      }
+
+      // Explicitly read the response as raw text, NOT JSON
+      const csvText = await res.text();
+      
+      // Use your existing utility function to trigger the browser download
+      downloadText(csvText, 'elevate_users_template.csv', 'text/csv');
+      showToast('Template downloaded successfully!', 'success');
+      
+    } catch (err) {
+      console.error("CSV Download Error:", err);
+      showToast('Failed to download template. See console.', 'error');
+    } finally {
+      const btn = document.getElementById('downloadCsvTemplateBtn');
+      btn.innerHTML = '<i class="fas fa-download"></i> Download CSV Template';
+      btn.disabled = false;
+    }
   });
 
   // 2. Bulk Upload
