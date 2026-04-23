@@ -567,6 +567,41 @@ def get_training_job_detail(jid):
     j = db.session.get(TrainingJob, jid)
     if not j:
         return jsonify({"error": "not found"}), 404
+
+    # AUTO-SYNC: If the job is still active, fetch the latest data from Hugging Face
+    if j.job_id and j.status in ["queued", "running"]:
+        sync_result = get_hf_strict_training_status(j.job_id)
+        
+        if sync_result.get("ok"):
+            payload = sync_result.get("payload") or {}
+            remote_status = payload.get("status")
+            
+            # Update Status
+            if remote_status and j.status != remote_status:
+                j.status = remote_status
+                
+            # If it finished, calculate duration
+            if remote_status in ["succeeded", "completed", "failed"] and not j.finished_at:
+                j.finished_at = utcnow()
+                if j.started_at:
+                    j.duration_seconds = int((j.finished_at - j.started_at).total_seconds())
+            
+            # Pull Metrics
+            if payload.get("metrics"):
+                j.metrics = payload["metrics"]
+                
+            # Pull the Hidden Logs!
+            stdout = payload.get("stdout_tail") or ""
+            stderr = payload.get("stderr_tail") or ""
+            if stdout or stderr:
+                j.logs = f"--- STDOUT ---\n{stdout}\n\n--- STDERR ---\n{stderr}"
+                
+            # Pull Errors
+            if payload.get("error"):
+                j.error_message = payload.get("error")
+                
+            db.session.commit()
+
     return jsonify({"job": j.as_dict()})
 
 # ─── 6. Model version registry ───────────────────────────────────────────────
