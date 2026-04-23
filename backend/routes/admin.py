@@ -128,7 +128,11 @@ def stats():
 @admin_bp.get("/question-automation/status")
 @admin_required
 def question_automation_status():
-    return jsonify(get_question_automation_status())
+    try:
+        return jsonify(get_question_automation_status())
+    except Exception as exc:
+        current_app.logger.exception("[question-automation] status failed: %s", exc)
+        return jsonify({"error": "Question automation status unavailable", "details": str(exc)}), 500
 
 
 @admin_bp.post("/question-automation/start")
@@ -141,10 +145,14 @@ def question_automation_start():
         hourly_batch_size = 10
     hourly_batch_size = max(1, min(hourly_batch_size, 100))
     admin = getattr(g, "current_user", None)
-    state = start_hourly_question_automation(
-        started_by=admin.id if admin else None,
-        hourly_batch_size=hourly_batch_size,
-    )
+    try:
+        state = start_hourly_question_automation(
+            started_by=admin.id if admin else None,
+            hourly_batch_size=hourly_batch_size,
+        )
+    except Exception as exc:
+        current_app.logger.exception("[question-automation] start failed: %s", exc)
+        return jsonify({"error": "Failed to start question automation", "details": str(exc)}), 500
     _audit(
         action="question_automation_started",
         target_type="question_automation",
@@ -160,7 +168,11 @@ def question_automation_start():
 @admin_required
 def question_automation_stop():
     admin = getattr(g, "current_user", None)
-    state = stop_hourly_question_automation(stopped_by=admin.id if admin else None)
+    try:
+        state = stop_hourly_question_automation(stopped_by=admin.id if admin else None)
+    except Exception as exc:
+        current_app.logger.exception("[question-automation] stop failed: %s", exc)
+        return jsonify({"error": "Failed to stop question automation", "details": str(exc)}), 500
     _audit(
         action="question_automation_stopped",
         target_type="question_automation",
@@ -182,11 +194,15 @@ def question_automation_generate_batch():
         requested_count = 700
     requested_count = max(1, min(requested_count, 2000))
     admin = getattr(g, "current_user", None)
-    stats = generate_ai_question_batch(
-        target_count=requested_count,
-        source="manual_admin_batch",
-        started_by=admin.id if admin else None,
-    )
+    try:
+        stats = generate_ai_question_batch(
+            target_count=requested_count,
+            source="manual_admin_batch",
+            started_by=admin.id if admin else None,
+        )
+    except Exception as exc:
+        current_app.logger.exception("[question-automation] generate-batch failed: %s", exc)
+        return jsonify({"error": "Failed to generate question batch", "details": str(exc)}), 500
     _audit(
         action="question_automation_batch_generated",
         target_type="question_automation",

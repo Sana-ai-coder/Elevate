@@ -10,6 +10,7 @@ from datetime import timedelta
 from .ai_topic_service import generate_topic_mcqs
 from .models import MCQPipelineEvent, Question, QuestionAutomationState, db, utcnow
 from .validation import sanitize_string
+from sqlalchemy import inspect as sa_inspect
 
 _LOCK = threading.Lock()
 _WORKER_THREAD: threading.Thread | None = None
@@ -71,6 +72,7 @@ def _iter_variants(manifest: dict):
 
 
 def _get_or_create_state() -> QuestionAutomationState:
+    _ensure_automation_table()
     state = db.session.get(QuestionAutomationState, 1)
     if not state:
         # Default ON so production keeps growing the bank continuously.
@@ -80,8 +82,25 @@ def _get_or_create_state() -> QuestionAutomationState:
     return state
 
 
+def _ensure_automation_table() -> None:
+    """Create automation table if missing (Supabase-safe best-effort)."""
+    try:
+        inspector = sa_inspect(db.engine)
+        if "question_automation_state" in set(inspector.get_table_names()):
+            return
+        QuestionAutomationState.__table__.create(bind=db.engine, checkfirst=True)
+        db.session.commit()
+    except Exception:
+        # If the DB user cannot create tables, callers will raise when querying.
+        db.session.rollback()
+
+
 def _existing_text_keys() -> set[str]:
-    return {_normalize_text_key(row[0]) for row in db.session.query(Question.text).all() if row and row[0]}
+    try:
+        return {_normalize_text_key(row[0]) for row in db.session.query(Question.text).all() if row and row[0]}
+    except Exception:
+        db.session.rollback()
+        return set()
 
 
 def _normalize_generated_item(item: dict, subject: str, grade: str, difficulty: str, topic: str):
@@ -121,6 +140,7 @@ def _normalize_generated_item(item: dict, subject: str, grade: str, difficulty: 
 
 
 def generate_ai_question_batch(*, target_count: int, source: str, started_by: int | None = None) -> dict:
+    _ensure_automation_table()
     target = max(1, min(int(target_count or 1), 2000))
     manifest = _load_manifest()
     variants = _iter_variants(manifest)
@@ -282,8 +302,24 @@ def initialize_question_automation_worker(app):
 
 def get_question_automation_status() -> dict:
     with _LOCK:
-        state = _get_or_create_state()
-        return state.as_dict()
+        try:
+            state = _get_or_create_state()
+            return state.as_dict()
+        except Exception as exc:
+            db.session.rollback()
+            return {
+                "id": 1,
+                "is_enabled": False,
+                "hourly_batch_size": 10,
+                "last_run_at": None,
+                "next_run_at": None,
+                "last_generated_count": 0,
+                "total_generated_count": 0,
+                "last_error": f"automation_unavailable: {str(exc)[:240]}",
+                "started_by": None,
+                "stopped_by": None,
+                "updated_at": None,
+            }
 
 
 def start_hourly_question_automation(*, started_by: int | None = None, hourly_batch_size: int = 10) -> dict:
