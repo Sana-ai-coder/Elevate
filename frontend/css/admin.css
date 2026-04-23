@@ -629,13 +629,6 @@ body {
   border-top: 1px solid rgba(255,255,255,0.06);
 }
 
-.modal-feedback {
-  padding: 0 24px 16px;
-  font-size: 0.8rem;
-  color: #f87171;
-  min-height: 20px;
-}
-
 /* ---- Form Groups ---- */
 .form-group {
   margin-bottom: 16px;
@@ -1111,4 +1104,73 @@ body {
   background: rgba(0, 0, 0, 0.2);
   color: #94a3b8;
   cursor: not-allowed;
+}
+
+/* ---- Import Users Modal Styling ---- */
+.modal-tabs {
+  display: flex;
+  background: rgba(0, 0, 0, 0.15);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.tab-btn {
+  flex: 1;
+  padding: 14px 16px;
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s ease;
+}
+
+.tab-btn:hover {
+  color: #e2e8f0;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.tab-btn.active {
+  color: #818cf8;
+  border-bottom-color: #818cf8;
+  background: rgba(129, 140, 248, 0.05);
+}
+
+.modal-description {
+  font-size: 0.85rem;
+  color: #cbd5e1;
+  line-height: 1.5;
+  margin-bottom: 20px;
+}
+
+.file-input {
+  padding: 8px !important;
+  background: rgba(0, 0, 0, 0.2) !important;
+}
+
+/* Utility Classes for Modal */
+.w-full { width: 100%; }
+.mb-3 { margin-bottom: 16px; }
+.mt-2 { margin-top: 12px; }
+.mt-3 { margin-top: 20px; }
+
+.modal-feedback {
+  padding: 12px;
+  border-radius: 8px;
+  text-align: center;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.modal-feedback.success {
+  background: rgba(16, 185, 129, 0.1);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+.modal-feedback.error {
+  background: rgba(239, 68, 68, 0.1);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.2);
 }

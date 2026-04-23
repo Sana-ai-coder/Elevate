@@ -383,29 +383,35 @@ function setupUsersPanel() {
   // --- Import / Add Users Logic ---
   const importModal = document.getElementById('importUsersModal');
   const importFeedback = document.getElementById('importFeedback');
+  const tabBulkBtn = document.getElementById('tabBulkBtn');
+  const tabSingleBtn = document.getElementById('tabSingleBtn');
+  const tabBulkContent = document.getElementById('tabBulkContent');
+  const tabSingleContent = document.getElementById('tabSingleContent');
 
+  // Open Modal
   document.getElementById('openImportModalBtn')?.addEventListener('click', () => {
     importModal.classList.remove('hidden');
-    importFeedback.textContent = '';
-    document.getElementById('singleAddWarning').classList.add('hidden');
-    document.getElementById('forceCreateBtn').classList.add('hidden');
+    importFeedback.className = 'modal-feedback mt-3 hidden'; // Reset feedback
   });
 
+  // Close Modal
   document.getElementById('closeImportModal')?.addEventListener('click', () => importModal.classList.add('hidden'));
 
-  // Tab Switching
-  document.getElementById('tabBulkBtn')?.addEventListener('click', (e) => {
-    e.target.style.color = '#818cf8'; e.target.style.borderBottom = '2px solid #818cf8';
-    document.getElementById('tabSingleBtn').style.color = '#94a3b8'; document.getElementById('tabSingleBtn').style.borderBottom = 'none';
-    document.getElementById('tabBulkContent').classList.remove('hidden');
-    document.getElementById('tabSingleContent').classList.add('hidden');
+  // Tab Switching Logic
+  tabBulkBtn?.addEventListener('click', () => {
+    tabBulkBtn.classList.add('active');
+    tabSingleBtn.classList.remove('active');
+    tabBulkContent.classList.remove('hidden');
+    tabSingleContent.classList.add('hidden');
+    importFeedback.className = 'modal-feedback mt-3 hidden';
   });
 
-  document.getElementById('tabSingleBtn')?.addEventListener('click', (e) => {
-    e.target.style.color = '#818cf8'; e.target.style.borderBottom = '2px solid #818cf8';
-    document.getElementById('tabBulkBtn').style.color = '#94a3b8'; document.getElementById('tabBulkBtn').style.borderBottom = 'none';
-    document.getElementById('tabSingleContent').classList.remove('hidden');
-    document.getElementById('tabBulkContent').classList.add('hidden');
+  tabSingleBtn?.addEventListener('click', () => {
+    tabSingleBtn.classList.add('active');
+    tabBulkBtn.classList.remove('active');
+    tabSingleContent.classList.remove('hidden');
+    tabBulkContent.classList.add('hidden');
+    importFeedback.className = 'modal-feedback mt-3 hidden';
   });
 
   // 1. Download Template
@@ -425,53 +431,62 @@ function setupUsersPanel() {
     const formData = new FormData();
     formData.append('file', fileInput.files[0]);
     
-    importFeedback.style.color = '#94a3b8'; importFeedback.textContent = 'Processing upload...';
+    const btn = document.getElementById('uploadCsvBtn');
+    btn.innerHTML = '<div class="spinner"></div> Processing...';
+    btn.disabled = true;
+
     try {
       const res = await api.admin.bulkImportUsers(formData);
-      importFeedback.style.color = '#34d399';
+      importFeedback.className = 'modal-feedback mt-3 success';
       importFeedback.textContent = `Success! Added ${res.added} new users, linked ${res.updated} existing.`;
       showToast('Bulk import complete', 'success');
       loadUsers(1);
     } catch (err) {
-      importFeedback.style.color = '#f87171';
+      importFeedback.className = 'modal-feedback mt-3 error';
       importFeedback.textContent = err.error || 'Upload failed.';
+    } finally {
+      btn.innerHTML = '<i class="fas fa-upload"></i> Process Upload';
+      btn.disabled = false;
     }
   });
 
-  // 3. Single User Search / Add
-  const handleSingleAdd = async (forceCreate = false) => {
+  // 3. Single User Database Search
+  document.getElementById('singleAddBtn')?.addEventListener('click', async () => {
     const email = document.getElementById('singleAddEmail').value.trim();
     const name = document.getElementById('singleAddName').value.trim();
     const role = document.getElementById('singleAddRole').value;
     
-    if (!email || !name) return showToast('Email and Name are required', 'warning');
+    if (!email || !name) return showToast('Please enter both Email and Name.', 'warning');
     
-    importFeedback.style.color = '#94a3b8'; importFeedback.textContent = 'Searching database...';
+    const btn = document.getElementById('singleAddBtn');
+    btn.innerHTML = '<div class="spinner"></div> Searching...';
+    btn.disabled = true;
+    
+    const warningBox = document.getElementById('singleAddWarning');
+    warningBox.classList.add('hidden'); // Hide warning on new search
     
     try {
-      const res = await api.admin.singleAddUser({ email, name, role, force_create: forceCreate });
-      importFeedback.style.color = '#34d399';
+      const res = await api.admin.singleAddUser({ email, name, role });
+      importFeedback.className = 'modal-feedback mt-3 success';
       importFeedback.textContent = res.message;
-      document.getElementById('singleAddWarning').classList.add('hidden');
-      document.getElementById('forceCreateBtn').classList.add('hidden');
-      showToast(res.status === 'linked' ? 'User Linked!' : 'Account Created!', 'success');
+      showToast('User linked successfully!', 'success');
       loadUsers(1);
     } catch (err) {
       if (err.status === 'similar_found') {
-        importFeedback.textContent = '';
-        const warningBox = document.getElementById('singleAddWarning');
-        warningBox.innerHTML = `<strong>Wait!</strong> ${err.message}<br><br><em>${err.suggestion}</em>`;
+        // Show the intelligent yellow warning box
+        importFeedback.className = 'modal-feedback mt-3 hidden';
+        warningBox.innerHTML = `<strong>User Not Found!</strong><br>${err.error}<br><br><em>${err.suggestion}</em>`;
         warningBox.classList.remove('hidden');
-        document.getElementById('forceCreateBtn').classList.remove('hidden');
       } else {
-        importFeedback.style.color = '#f87171';
-        importFeedback.textContent = err.error || 'Failed to process user.';
+        // Show standard red error
+        importFeedback.className = 'modal-feedback mt-3 error';
+        importFeedback.textContent = err.error || 'An error occurred during search.';
       }
+    } finally {
+      btn.innerHTML = 'Add User';
+      btn.disabled = false;
     }
-  };
-
-  document.getElementById('singleAddBtn')?.addEventListener('click', () => handleSingleAdd(false));
-  document.getElementById('forceCreateBtn')?.addEventListener('click', () => handleSingleAdd(true));
+  });
 }
 // =====================================================
 // (End of Users Panel)

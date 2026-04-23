@@ -361,32 +361,41 @@ def single_add_user():
     email = data.get('email', '').strip().lower()
     name = data.get('name', '').strip()
     role = data.get('role', 'student').strip().lower()
-    admin_user = db.session.get(User, getattr(request, 'user_id', 1))
     
+    admin_id = getattr(request, 'user_id', 1)
+    admin_user = db.session.get(User, admin_id)
+    
+    # 1. Search the database for the exact email
     exact_user = User.query.filter_by(email=email).first()
+    
     if exact_user:
         exact_user.school_id = admin_user.school_id
+        if exact_user.role != 'admin':
+            exact_user.role = role
+            
         db.session.commit()
-        return jsonify({"status": "linked", "message": f"User {email} linked to your school."}), 200
-        
-    similar_user = User.query.filter(User.name.ilike(f"%{name}%")).first()
-    if similar_user and not data.get('force_create'):
-        parts = similar_user.email.split('@')
-        masked = parts[0][:3] + "***@" + parts[1] if len(parts[0]) > 3 else "***@" + parts[1]
         return jsonify({
-            "status": "similar_found", 
-            "message": f"A user named '{similar_user.name}' ({masked}) exists. Is this who you meant?",
-            "suggestion": "If you are sure this is a new user, click 'Force Create'."
-        }), 409
+            "status": "linked", 
+            "message": f"Success! {email} was found and assigned to your school."
+        }), 200
+        
+    # 2. Fuzzy Search: If email is wrong, check if a similar name exists
+    if name:
+        similar_user = User.query.filter(User.name.ilike(f"%{name}%")).first()
+        if similar_user:
+            # Mask the email to protect privacy (e.g., joh***@gmail.com)
+            parts = similar_user.email.split('@')
+            masked = parts[0][:3] + "***@" + parts[1] if len(parts[0]) > 3 else "***@" + parts[1]
+            return jsonify({
+                "status": "similar_found", 
+                "error": f"We could not find the email '{email}'.",
+                "suggestion": f"Did you mean '{similar_user.name}' ({masked})? Please verify their exact email and try again."
+            }), 404
 
-    raw_password = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-    new_user = User(email=email, name=name, role=role, school_id=admin_user.school_id, is_verified=True)
-    new_user.set_password(raw_password)
-    db.session.add(new_user)
-    db.session.commit()
-    
-    _send_invite_email(email, name, role, raw_password)
-    return jsonify({"status": "created", "message": f"User created! Invite email sent to {email}."}), 201
+    # 3. Complete failure
+    return jsonify({
+        "error": f"User '{email}' not found. They must register on Elevate before you can assign them."
+    }), 404
 
 
 # ─── 3. School hierarchy ──────────────────────────────────────────────────────
