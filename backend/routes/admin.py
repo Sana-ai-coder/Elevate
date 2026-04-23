@@ -466,27 +466,36 @@ def get_schools_hierarchy():
 def trigger_strict_ml_training():
     admin_user = getattr(g, "current_user", None)
     
-    # SAFETY NET: Catch Hugging Face Sleep/Timeout exceptions gracefully
+    # 1. Attempt the remote execution FIRST
     try:
         result = start_hf_strict_training()
     except Exception as e:
         current_app.logger.error(f"[HF CRASH] Failed to contact Hugging Face: {str(e)}")
+        # Do NOT touch the database. Return the error directly to the UI.
         return jsonify({
-            "error": f"Hugging Face Connection Error: {str(e)}. The AI space might be waking up from sleep mode. Please wait 60 seconds and try again."
+            "error": f"Hugging Face Connection Error. The AI space might be waking up. Details: {str(e)}"
         }), 502
 
-    # Fallback if result is somehow None
-    if not result:
-        result = {"ok": False, "error": "Hugging Face service returned an empty response."}
+    # 2. Validate the remote execution
+    if not result or not isinstance(result, dict):
+        return jsonify({"error": "Hugging Face service returned an invalid or empty response."}), 502
 
+    extracted_job_id = result.get("payload", {}).get("job_id") if isinstance(result.get("payload"), dict) else None
+
+    # 3. The Professional Check: If we don't have a valid remote ID, ABORT.
+    if not result.get("ok") or not extracted_job_id:
+        error_msg = result.get("error") or "Failed to retrieve a valid job_id from Hugging Face."
+        current_app.logger.warning(f"[HF START FAILED] {error_msg}")
+        return jsonify({"error": error_msg}), 502
+
+    # 4. Success! We have a guaranteed remote job_id. NOW we save to the strict database.
     job = TrainingJob(
-        job_id=result.get("payload", {}).get("job_id") if isinstance(result.get("payload"), dict) else None,
+        job_id=extracted_job_id,
         model_name="emotion",  
         triggered_by=admin_user.id if admin_user else None,
         trigger_source="admin_ui",
-        status="queued" if result.get("ok") else "failed",
-        started_at=utcnow(),
-        error_message=result.get("error") if not result.get("ok") else None,
+        status="queued",
+        started_at=utcnow()
     )
     db.session.add(job)
     
@@ -497,19 +506,12 @@ def trigger_strict_ml_training():
     except Exception as db_e:
         db.session.rollback()
         current_app.logger.error(f"[DB CRASH] Failed to save training job to database: {str(db_e)}")
-        return jsonify({"error": "Failed to save job to database."}), 500
-
-    if not result.get("ok"):
-        return jsonify({
-            "ok": False,
-            "error": result.get("error") or "Failed to trigger training on Hugging Face.",
-            "db_job_id": job.id,
-        }), int(result.get("status_code") or 502)
+        return jsonify({"error": f"Database strictness or connection error: {str(db_e)}"}), 500
 
     return jsonify({
         "ok": True,
         "db_job_id": job.id,
-        **(result.get("payload") if isinstance(result.get("payload"), dict) else {})
+        **(result.get("payload", {}))
     }), 202
 
 @admin_bp.get("/ml/train-strict/<job_id>")
