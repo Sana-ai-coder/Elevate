@@ -170,7 +170,7 @@ function setupPanelNav() {
 
 // Quick action buttons on dashboard
 function setupQuickActions() {
-  document.getElementById('qaTeacherRequests')?.addEventListener('click', () => activatePanel('teacher-requests'));
+  document.getElementById('qaUserManagement')?.addEventListener('click', () => activatePanel('users'));
   document.getElementById('qaTestResults')?.addEventListener('click', () => activatePanel('test-results'));
   document.getElementById('qaTriggerTraining')?.addEventListener('click', () => activatePanel('training'));
   document.getElementById('qaAuditLogs')?.addEventListener('click', () => activatePanel('audit'));
