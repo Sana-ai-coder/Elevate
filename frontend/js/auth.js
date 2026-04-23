@@ -125,7 +125,9 @@ export const auth = {
       const result = await api.auth.login(email, password, getSchoolSlugHint());
       console.log('Login result:', { hasUser: !!result.user, hasToken: !!result.token, rememberMe });
       this.saveSession(result.user, result.token, rememberMe);
-      return { success: true };
+      
+      // FIX: Return the user object so the login page knows the school_slug!
+      return { success: true, user: result.user }; 
     } catch (error) {
       console.error('Login error:', error);
       return {

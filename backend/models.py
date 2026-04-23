@@ -62,6 +62,7 @@ class User(db.Model):
             'grade': self.grade,
             'role': self.role,
             'school_id': self.school_id,
+            "school_slug": self.school.slug if self.school else None,
             'is_verified': self.is_verified,
             'is_disabled': self.is_disabled,
             'disabled_at': self.disabled_at.isoformat() if self.disabled_at else None,

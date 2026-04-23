@@ -91,7 +91,13 @@ function getRoleHomePage(role, schoolSlug = null) {
       ? 'admin.html'
       : 'dashboard.html';
 
-  return page;
+  // FIX: If a school slug exists and the user is NOT an admin, inject the slug into the URL!
+  if (schoolSlug && normalizedRole !== 'admin') {
+      return `/${schoolSlug}/${page}`;
+  }
+
+  // Fallback to standard root path
+  return `/${page}`;
 }
 
 function getScopedPagePath(pageFile) {
