@@ -423,7 +423,7 @@ function setupUsersPanel() {
   document.getElementById('downloadCsvTemplateBtn')?.addEventListener('click', () => {
     try {
       // 1. We write the exact CSV text directly in the browser
-      const csvText = "Name,Email,Role,Grade\nJohn Doe,john.doe@example.com,student,10\nJane Smith,jane.smith@example.com,teacher,\n";
+      const csvText = "Name,Email,Role,Grade\nJohn Doe,john.doe@example.com,student,College\nJane Smith,jane.smith@example.com,teacher,\n";
 
       // 2. Use your existing utility function to force the browser to download it
       downloadText(csvText, 'elevate_users_template.csv', 'text/csv');
@@ -455,9 +455,10 @@ function setupUsersPanel() {
       showToast('Bulk import complete', 'success');
       loadUsers(1);
     } catch (err) {
+      console.error("Bulk Import Error:", err); // <--- Log exact error to console
       importFeedback.className = '';
       importFeedback.style = 'margin-top:16px; padding:12px; border-radius:8px; text-align:center; font-size:0.875rem; font-weight:500; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.2);';
-      importFeedback.textContent = err.error || 'Upload failed.';
+      importFeedback.textContent = err.error || err.message || 'Upload failed.';
     } finally {
       btn.innerHTML = '<i class="fas fa-upload"></i> Process Upload';
       btn.disabled = false;
@@ -486,13 +487,14 @@ function setupUsersPanel() {
       showToast('User linked successfully!', 'success');
       loadUsers(1);
     } catch (err) {
+      console.error("Single Add Error:", err); // <--- Log exact error to console
       if (err.status === 'similar_found') {
         warningBox.innerHTML = `<strong>User Not Found!</strong><br/>${err.error}<br/><br/><em>${err.suggestion}</em>`;
         warningBox.classList.remove('hidden');
       } else {
         importFeedback.className = '';
         importFeedback.style = 'margin-top:16px; padding:12px; border-radius:8px; text-align:center; font-size:0.875rem; font-weight:500; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.2);';
-        importFeedback.textContent = err.error || 'Failed to process user.';
+        importFeedback.textContent = err.error || err.message || 'Failed to process user.';
       }
     } finally {
       btn.innerHTML = '<i class="fas fa-user-plus"></i> Add User';

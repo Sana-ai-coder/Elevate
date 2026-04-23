@@ -825,17 +825,32 @@ export const api = {
 
     enableUser: (id) => fetchWithAuth(`/api/admin/users/${id}/enable`, { method: 'POST' }),
 
-    // --- NEW IMPORT ENDPOINTS ---
     downloadCsvTemplate: () => fetchWithAuth('/api/admin/users/csv-template', {}, false), 
-    bulkImportUsers: (formData) => {
-        const token = localStorage.getItem('elevate_token') || sessionStorage.getItem('elevate_token');
-        return fetch('/api/admin/users/bulk-import', {
+    bulkImportUsers: async (formData) => {
+        // Correctly parse the Elevate session object
+        const sessionRaw = localStorage.getItem('elevate_user_session') || sessionStorage.getItem('elevate_user_session');
+        const session = sessionRaw ? JSON.parse(sessionRaw) : null;
+        const token = session ? session.token : '';
+        const baseUrl = config.API_BASE_URL || config.API_URL || config.BASE_URL || '';
+        
+        // Native fetch for FormData (files)
+        const res = await fetch(`${baseUrl}/api/admin/users/bulk-import`, {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${token}` }, // Browser auto-sets multipart boundary
+            headers: { 'Authorization': `Bearer ${token}` }, // Let browser set Content-Type for file boundary
             body: formData
-        }).then(res => res.json().then(data => res.ok ? data : Promise.reject(data)));
+        });
+        const data = await res.json();
+        if (!res.ok) throw data;
+        return data;
     },
-    singleAddUser: (data) => fetchWithAuth('/api/admin/users/single-add', { method: 'POST', body: JSON.stringify(data) }),
+
+    singleAddUser: async (data) => {
+        // Use the native Elevate wrapper for standard JSON requests
+        return await api.request('/admin/users/single-add', { 
+            method: 'POST', 
+            body: JSON.stringify(data) 
+        });
+    },
   },
 
   student: {
