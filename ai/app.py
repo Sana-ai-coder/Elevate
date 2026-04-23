@@ -21,6 +21,7 @@ from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from huggingface_hub import snapshot_download
 
 
 AI_ROOT = Path(__file__).resolve().parent
@@ -615,24 +616,23 @@ def health() -> dict:
     return payload
 
 @app.post("/warmup")
-def warmup(authorization: Optional[str] = Header(default=None, alias="Authorization")) -> dict:
-    global _MODEL_READY
-    _enforce_service_auth(authorization)
-    started = time.perf_counter()
-    generator = _ensure_generator_loaded()
-    if hasattr(generator, "ensure_model_loaded"):
-        generator.ensure_model_loaded()
-    _MODEL_READY = bool(getattr(generator, "is_model_loaded", lambda: True)())
-    elapsed_ms = int((time.perf_counter() - started) * 1000)
-    return {
-        "status": "ready",
-        "service": "topic-mcq",
-        "model_ready": _MODEL_READY,
-        "warmup_ms": elapsed_ms,
-    }
-
-
 def _run_strict_training_job(job_id: str, request_payload: StrictTrainingRequest) -> None:
+    # 1. Download the large dataset from HF Datasets into the local 'dataset' folder
+    try:
+        print("[hf-train-runner] Downloading dataset from Hugging Face...")
+        snapshot_download(
+            repo_id="your-username/elevate-emotion-dataset",
+            repo_type="dataset",
+            local_dir=str(AI_ROOT / "dataset"), # This creates the folder the script is looking for
+            token=os.environ.get("AI_TOPIC_SERVICE_TOKEN")
+        )
+    except Exception as e:
+        with _TRAINING_LOCK:
+            _TRAINING_JOBS[job_id]["status"] = "failed"
+            _TRAINING_JOBS[job_id]["error"] = f"Dataset download failed: {str(e)}"
+        return
+
+    # 2. Now run the training command as before
     command = [
         sys.executable,
         "-u", 
