@@ -43,12 +43,6 @@ from ..hf_training_service import (
     get_hf_training_service_url,
     start_hf_strict_training,
 )
-from ..question_bank_automation import (
-    generate_ai_question_batch,
-    get_question_automation_status,
-    start_hourly_question_automation,
-    stop_hourly_question_automation,
-)
 
 admin_bp = Blueprint("admin", __name__)
 
@@ -122,99 +116,6 @@ def stats():
         "schools": School.query.count(),
         "tests": Test.query.count(),
         "test_results": TestResult.query.count(),
-    })
-
-
-@admin_bp.get("/question-automation/status")
-@admin_required
-def question_automation_status():
-    try:
-        return jsonify(get_question_automation_status())
-    except Exception as exc:
-        current_app.logger.exception("[question-automation] status failed: %s", exc)
-        return jsonify({"error": "Question automation status unavailable", "details": str(exc)}), 500
-
-
-@admin_bp.post("/question-automation/start")
-@admin_required
-def question_automation_start():
-    data = request.get_json(silent=True) or {}
-    try:
-        hourly_batch_size = int(data.get("hourly_batch_size") or 10)
-    except (TypeError, ValueError):
-        hourly_batch_size = 10
-    hourly_batch_size = max(1, min(hourly_batch_size, 100))
-    admin = getattr(g, "current_user", None)
-    try:
-        state = start_hourly_question_automation(
-            started_by=admin.id if admin else None,
-            hourly_batch_size=hourly_batch_size,
-        )
-    except Exception as exc:
-        current_app.logger.exception("[question-automation] start failed: %s", exc)
-        return jsonify({"error": "Failed to start question automation", "details": str(exc)}), 500
-    _audit(
-        action="question_automation_started",
-        target_type="question_automation",
-        target_id=1,
-        target_label=f"hourly_batch_size={hourly_batch_size}",
-        after=state,
-    )
-    db.session.commit()
-    return jsonify({"message": "Question automation started", "state": state})
-
-
-@admin_bp.post("/question-automation/stop")
-@admin_required
-def question_automation_stop():
-    admin = getattr(g, "current_user", None)
-    try:
-        state = stop_hourly_question_automation(stopped_by=admin.id if admin else None)
-    except Exception as exc:
-        current_app.logger.exception("[question-automation] stop failed: %s", exc)
-        return jsonify({"error": "Failed to stop question automation", "details": str(exc)}), 500
-    _audit(
-        action="question_automation_stopped",
-        target_type="question_automation",
-        target_id=1,
-        target_label="stop",
-        after=state,
-    )
-    db.session.commit()
-    return jsonify({"message": "Question automation stopped", "state": state})
-
-
-@admin_bp.post("/question-automation/generate-batch")
-@admin_required
-def question_automation_generate_batch():
-    data = request.get_json(silent=True) or {}
-    try:
-        requested_count = int(data.get("count") or 700)
-    except (TypeError, ValueError):
-        requested_count = 700
-    requested_count = max(1, min(requested_count, 2000))
-    admin = getattr(g, "current_user", None)
-    try:
-        stats = generate_ai_question_batch(
-            target_count=requested_count,
-            source="manual_admin_batch",
-            started_by=admin.id if admin else None,
-        )
-    except Exception as exc:
-        current_app.logger.exception("[question-automation] generate-batch failed: %s", exc)
-        return jsonify({"error": "Failed to generate question batch", "details": str(exc)}), 500
-    _audit(
-        action="question_automation_batch_generated",
-        target_type="question_automation",
-        target_id=1,
-        target_label=f"count={requested_count}",
-        after=stats,
-    )
-    db.session.commit()
-    return jsonify({
-        "message": "Batch generation completed",
-        "stats": stats,
-        "state": get_question_automation_status(),
     })
 
 

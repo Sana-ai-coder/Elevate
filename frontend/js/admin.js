@@ -128,8 +128,6 @@ function loadPanelData(panelKey, force = false) {
       ]);
     case 'mcq-obs':
       return loadMcqObservability();
-    case 'question-automation':
-      return loadQuestionAutomationStatus();
     case 'audit':
       return loadAuditLogs(force ? 1 : auditPage || 1);
     default:
@@ -1352,107 +1350,6 @@ function setupMcqObsPanel() {
 }
 
 // =====================================================
-// Question Automation Panel
-// =====================================================
-let questionAutomationRefreshTimer = null;
-
-function _fmtDateTime(value) {
-  if (!value) return '—';
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return '—';
-  return d.toLocaleString();
-}
-
-async function loadQuestionAutomationStatus() {
-  const setText = (id, value) => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = value;
-  };
-  const errEl = document.getElementById('qaAutoLastError');
-  try {
-    const data = await api.admin.getQuestionAutomationStatus();
-    setText('qaEnabledVal', data.is_enabled ? 'Enabled' : 'Disabled');
-    setText('qaNextRunVal', _fmtDateTime(data.next_run_at));
-    setText('qaLastGeneratedVal', String(data.last_generated_count ?? 0));
-    setText('qaTotalGeneratedVal', String(data.total_generated_count ?? 0));
-
-    const hourlyInput = document.getElementById('qaHourlyBatchSize');
-    if (hourlyInput && Number.isFinite(Number(data.hourly_batch_size))) {
-      hourlyInput.value = String(data.hourly_batch_size);
-    }
-
-    if (errEl) {
-      const hasErr = Boolean(data.last_error);
-      errEl.style.display = hasErr ? 'block' : 'none';
-      errEl.style.color = hasErr ? '#f87171' : '';
-      errEl.textContent = hasErr ? `Last error: ${data.last_error}` : '';
-    }
-  } catch (err) {
-    showToast(`Failed to load automation status: ${err.message}`, 'error');
-  }
-}
-
-function setupQuestionAutomationPanel() {
-  const refreshBtn = document.getElementById('qaAutoRefreshBtn');
-  const generateBtn = document.getElementById('qaGenerateNowBtn');
-  const startBtn = document.getElementById('qaStartHourlyBtn');
-  const stopBtn = document.getElementById('qaStopHourlyBtn');
-
-  refreshBtn?.addEventListener('click', () => loadQuestionAutomationStatus());
-
-  generateBtn?.addEventListener('click', async () => {
-    const countRaw = parseInt(document.getElementById('qaBootstrapCount')?.value || '700', 10);
-    const count = Number.isFinite(countRaw) ? Math.max(100, Math.min(countRaw, 2000)) : 700;
-    if (!await showConfirm('Generate Questions', `Generate ${count} AI questions now? This may take a few minutes.`)) return;
-    const original = generateBtn.innerHTML;
-    generateBtn.disabled = true;
-    generateBtn.innerHTML = '<div class="spinner"></div> Generating...';
-    try {
-      const res = await api.admin.generateQuestionAutomationBatch(count);
-      const stats = res?.stats || {};
-      showToast(`Generated ${stats.generated || 0}/${stats.requested || count} questions`, 'success');
-      await loadQuestionAutomationStatus();
-    } catch (err) {
-      showToast(err.message, 'error');
-    } finally {
-      generateBtn.disabled = false;
-      generateBtn.innerHTML = original;
-    }
-  });
-
-  startBtn?.addEventListener('click', async () => {
-    const hourlyRaw = parseInt(document.getElementById('qaHourlyBatchSize')?.value || '10', 10);
-    const hourlyBatchSize = Number.isFinite(hourlyRaw) ? Math.max(1, Math.min(hourlyRaw, 100)) : 10;
-    try {
-      await api.admin.startQuestionAutomation(hourlyBatchSize);
-      showToast(`Hourly automation started (${hourlyBatchSize}/hour)`, 'success');
-      await loadQuestionAutomationStatus();
-    } catch (err) {
-      showToast(err.message, 'error');
-    }
-  });
-
-  stopBtn?.addEventListener('click', async () => {
-    if (!await showConfirm('Stop Hourly Automation', 'Stop automatic hourly question generation?')) return;
-    try {
-      await api.admin.stopQuestionAutomation();
-      showToast('Hourly automation stopped', 'warning');
-      await loadQuestionAutomationStatus();
-    } catch (err) {
-      showToast(err.message, 'error');
-    }
-  });
-
-  if (questionAutomationRefreshTimer) clearInterval(questionAutomationRefreshTimer);
-  questionAutomationRefreshTimer = setInterval(() => {
-    const panel = document.getElementById('panel-question-automation');
-    if (panel && panel.classList.contains('active')) {
-      loadQuestionAutomationStatus();
-    }
-  }, 15000);
-}
-
-// =====================================================
 // Audit Trail Panel
 // =====================================================
 let auditPage = 1;
@@ -1603,7 +1500,6 @@ document.addEventListener('DOMContentLoaded', () => {
   setupTrainingPanel();
   setupModelRegistryPanel();
   setupMcqObsPanel();
-  setupQuestionAutomationPanel();
   setupAuditPanel();
 
   // Dashboard refresh

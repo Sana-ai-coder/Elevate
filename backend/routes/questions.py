@@ -57,9 +57,6 @@ def _select_adaptive_questions(base_filters: dict, count: int, target_difficulty
         if base_filters.get("subject"):
             q = apply_subject_filter(q, base_filters["subject"])
         q = q.filter(Question.difficulty == difficulty_level)
-        # Practice mode should draw from generated banks (AI + teacher-generated),
-        # not from legacy static seed content.
-        q = q.filter(Question.is_generated.is_(True))
 
         if user_id and not include_answered:
             q = q.filter(~Question.id.in_(answered_ids))

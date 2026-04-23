@@ -1016,36 +1016,3 @@ class MCQPipelineEvent(db.Model):
             "error_message": self.error_message,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
-
-
-class QuestionAutomationState(db.Model):
-    """Singleton control row for automated AI question generation."""
-    __tablename__ = "question_automation_state"
-
-    id = db.Column(db.Integer, primary_key=True)
-    is_enabled = db.Column(db.Boolean, default=False, nullable=False, index=True)
-    hourly_batch_size = db.Column(db.Integer, default=10, nullable=False)
-    last_run_at = db.Column(db.DateTime, nullable=True, index=True)
-    next_run_at = db.Column(db.DateTime, nullable=True, index=True)
-    last_generated_count = db.Column(db.Integer, default=0, nullable=False)
-    total_generated_count = db.Column(db.Integer, default=0, nullable=False)
-    last_error = db.Column(db.Text, nullable=True)
-    started_by = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
-    stopped_by = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
-    created_at = db.Column(db.DateTime, default=utcnow, nullable=False)
-    updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow, nullable=False)
-
-    def as_dict(self):
-        return {
-            "id": self.id,
-            "is_enabled": bool(self.is_enabled),
-            "hourly_batch_size": int(self.hourly_batch_size or 10),
-            "last_run_at": self.last_run_at.isoformat() if self.last_run_at else None,
-            "next_run_at": self.next_run_at.isoformat() if self.next_run_at else None,
-            "last_generated_count": int(self.last_generated_count or 0),
-            "total_generated_count": int(self.total_generated_count or 0),
-            "last_error": self.last_error,
-            "started_by": self.started_by,
-            "stopped_by": self.stopped_by,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-        }

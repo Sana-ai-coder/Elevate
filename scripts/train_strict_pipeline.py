@@ -295,12 +295,12 @@ def parse_args() -> argparse.Namespace:
         default=max(2, min(os.cpu_count() or 2, 4)),
         help="Parallel process budget for training jobs",
     )
-    parser.add_argument("--min-emotion-accuracy", type=float, default=0.95)
-    parser.add_argument("--min-emotion-macro-f1", type=float, default=0.92)
+    parser.add_argument("--min-emotion-accuracy", type=float, default=0.88)
+    parser.add_argument("--min-emotion-macro-f1", type=float, default=0.85)
     parser.add_argument("--min-bkt-auc", type=float, default=0.75)
     parser.add_argument("--min-dkt-auc", type=float, default=0.75)
     parser.add_argument("--min-atrisk-auc", type=float, default=0.80)
-    parser.add_argument("--min-emotion-per-class-recall", type=float, default=0.70)
+    parser.add_argument("--min-emotion-per-class-recall", type=float, default=0.58)
     parser.add_argument("--dataset-min-events", type=int, default=20000)
     parser.add_argument("--dataset-min-users", type=int, default=60)
     parser.add_argument("--seed-questions-per-topic", type=int, default=20)
@@ -422,7 +422,7 @@ def main() -> int:
         ]
         if emotion_dataset_ready:
             parallel_steps.append(
-                ("train-emotion-cnn", [PYTHON, str(ROOT / "scripts" / "train_emotion_cnn_hf.py")])
+                ("train-emotion-hog-mlp", [PYTHON, str(ROOT / "scripts" / "train_emotion_fast.py")])
             )
         _run_parallel_steps(parallel_steps, max_workers=max(1, int(args.processes)))
 

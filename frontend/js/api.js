@@ -614,28 +614,6 @@ export const api = {
       return await api.request('/admin/stats', { method: 'GET' });
     },
 
-    async getQuestionAutomationStatus() {
-      return await api.request('/admin/question-automation/status', { method: 'GET' });
-    },
-
-    async startQuestionAutomation(hourly_batch_size = 10) {
-      return await api.request('/admin/question-automation/start', {
-        method: 'POST',
-        body: JSON.stringify({ hourly_batch_size }),
-      });
-    },
-
-    async stopQuestionAutomation() {
-      return await api.request('/admin/question-automation/stop', { method: 'POST' });
-    },
-
-    async generateQuestionAutomationBatch(count = 700) {
-      return await api.request('/admin/question-automation/generate-batch', {
-        method: 'POST',
-        body: JSON.stringify({ count }),
-      });
-    },
-
     async listUsers(params = {}) {
       const query = new URLSearchParams();
       if (params.page) query.append('page', String(params.page));

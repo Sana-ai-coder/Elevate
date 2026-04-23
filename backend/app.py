@@ -26,7 +26,7 @@ from .models import (
     SubjectPerformance, AnswerLog, Test, TestQuestion, TestResult,
     TeacherIntervention, TeacherDocument, TeacherDocumentChunk,
     SyllabusTopic, UserSetting, RagRetrievalEvent,
-    AuditLog, ModelVersion, TrainingJob, MCQPipelineEvent, QuestionAutomationState,  # ← NEW
+    AuditLog, ModelVersion, TrainingJob, MCQPipelineEvent,
 )
 from .routes.auth      import auth_bp
 from .routes.questions import questions_bp
@@ -40,7 +40,6 @@ from .routes.settings  import settings_bp
 
 # ── NEW: AI emotion inference blueprint ─────────────────────────────────────
 from .routes.ai_emotion import ai_emotion_bp, inspect_emotion_artifacts
-from .question_bank_automation import initialize_question_automation_worker
 
 from .logging_config import configure_logging
 
@@ -262,7 +261,6 @@ def _ensure_admin_tables(app: Flask) -> None:
             "model_versions": ModelVersion,
             "training_jobs": TrainingJob,
             "mcq_pipeline_events": MCQPipelineEvent,
-            "question_automation_state": QuestionAutomationState,
         }
         for table_name, model_cls in target_tables.items():
             if table_name not in existing:
@@ -345,8 +343,6 @@ def create_app(config_name: str | None = None) -> Flask:
 
     # ── NEW: AI blueprint ────────────────────────────────────────────────────
     app.register_blueprint(ai_emotion_bp, url_prefix="/api/ai/emotion")
-
-    initialize_question_automation_worker(app)
 
     # ── Frontend static serving ──────────────────────────────────────────────
     FRONTEND_DIR = os.path.abspath(

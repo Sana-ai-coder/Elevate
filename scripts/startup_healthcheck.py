@@ -404,8 +404,8 @@ def _ensure_emotion_model() -> None:
         return
 
     _run(
-        [str(PYTHON_EXE), "scripts/train_emotion_cnn_hf.py"],
-        "Training high-accuracy CNN emotion model for server inference",
+        [str(PYTHON_EXE), "scripts/train_emotion_fast.py"],
+        "Training HOG+MLP emotion model (TF.js export)",
     )
 
 
