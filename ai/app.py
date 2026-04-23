@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import shutil
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +48,37 @@ DEFAULT_RAG_CHUNK_OVERLAP = 220
 DEFAULT_RAG_EMBEDDING_DIM = 256
 RAG_CHUNKING_STRATEGY = "section_sentence_window_v2"
 RAG_EMBEDDING_MODEL = "hash-v2"
+
+
+def _is_range_not_satisfiable_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return "416" in message and "range" in message and "satisfiable" in message
+
+
+def _snapshot_download_with_416_retry(*, repo_id: str, repo_type: str, local_dir: Path, token: str | None) -> None:
+    local_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        snapshot_download(
+            repo_id=repo_id,
+            repo_type=repo_type,
+            local_dir=str(local_dir),
+            token=token,
+        )
+        return
+    except Exception as exc:
+        if not _is_range_not_satisfiable_error(exc):
+            raise
+        print("[hf-train-runner] WARN: got HTTP 416 while prefetching dataset; retrying clean + force_download.")
+
+    shutil.rmtree(local_dir, ignore_errors=True)
+    local_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_download(
+        repo_id=repo_id,
+        repo_type=repo_type,
+        local_dir=str(local_dir),
+        token=token,
+        force_download=True,
+    )
 
 _EMBEDDING_STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in",
@@ -620,11 +652,11 @@ def _run_strict_training_job(job_id: str, request_payload: StrictTrainingRequest
     # 1. Best-effort dataset prefetch. The training runner also prepares dataset in repo/dataset.
     try:
         print("[hf-train-runner] Downloading dataset from Hugging Face...")
-        snapshot_download(
+        _snapshot_download_with_416_retry(
             repo_id="Sana2704/elevate-emotion-dataset",
             repo_type="dataset",
-            local_dir=str(AI_ROOT / "dataset"), # This creates the folder the script is looking for
-            token=os.environ.get("AI_TOPIC_SERVICE_TOKEN")
+            local_dir=(AI_ROOT / "dataset"),
+            token=os.environ.get("AI_TOPIC_SERVICE_TOKEN"),
         )
     except Exception as e:
         print(f"[hf-train-runner] WARNING: dataset prefetch failed in service process: {e}")

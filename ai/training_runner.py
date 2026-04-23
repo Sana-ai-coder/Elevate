@@ -57,6 +57,39 @@ def _copy_path(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
 
 
+def _is_range_not_satisfiable_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return "416" in message and "range" in message and "satisfiable" in message
+
+
+def _download_snapshot_with_retry(*, repo_id: str, repo_type: str, local_dir: Path, token: str | None) -> None:
+    local_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        snapshot_download(
+            repo_id=repo_id,
+            repo_type=repo_type,
+            local_dir=str(local_dir),
+            token=token,
+        )
+        return
+    except Exception as exc:
+        if not _is_range_not_satisfiable_error(exc):
+            raise
+        print("[hf-train-runner] WARN: got HTTP 416 during dataset download. Retrying with clean local dir + force download.")
+
+    # Retry path for stale partial downloads / invalid byte-range resume state.
+    if local_dir.exists():
+        shutil.rmtree(local_dir, ignore_errors=True)
+    local_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_download(
+        repo_id=repo_id,
+        repo_type=repo_type,
+        local_dir=str(local_dir),
+        token=token,
+        force_download=True,
+    )
+
+
 def _sync_artifacts(repo_dir: Path, output_root: Path) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     target = output_root / stamp
@@ -92,10 +125,10 @@ def _prepare_emotion_dataset(repo_dir: Path) -> None:
 
     token = os.environ.get("AI_TOPIC_SERVICE_TOKEN") or os.environ.get("HF_TOKEN")
     print(f"[hf-train-runner] Downloading emotion dataset repo={repo_id} -> {target_dir}")
-    snapshot_download(
+    _download_snapshot_with_retry(
         repo_id=repo_id,
         repo_type="dataset",
-        local_dir=str(target_dir),
+        local_dir=target_dir,
         token=token,
     )
     print("[hf-train-runner] Emotion dataset ready")

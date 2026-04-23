@@ -73,7 +73,8 @@ def _iter_variants(manifest: dict):
 def _get_or_create_state() -> QuestionAutomationState:
     state = db.session.get(QuestionAutomationState, 1)
     if not state:
-        state = QuestionAutomationState(id=1, is_enabled=False, hourly_batch_size=10, total_generated_count=0)
+        # Default ON so production keeps growing the bank continuously.
+        state = QuestionAutomationState(id=1, is_enabled=True, hourly_batch_size=10, total_generated_count=0)
         db.session.add(state)
         db.session.commit()
     return state
@@ -224,11 +225,46 @@ def _run_hourly_generation_tick():
             db.session.commit()
 
 
+def _run_startup_bootstrap_if_needed():
+    with _LOCK:
+        state = _get_or_create_state()
+        target_min = max(100, min(int(os.environ.get("QUESTION_AUTOMATION_BOOTSTRAP_COUNT") or 700), 5000))
+        current_generated = int(
+            db.session.query(Question.id)
+            .filter(Question.is_generated.is_(True))
+            .count()
+        )
+        if current_generated >= target_min:
+            return
+
+        missing = target_min - current_generated
+        try:
+            stats = generate_ai_question_batch(
+                target_count=missing,
+                source="startup_bootstrap",
+                started_by=state.started_by,
+            )
+            generated_now = int(stats.get("generated") or 0)
+            state.last_generated_count = generated_now
+            state.total_generated_count = int(state.total_generated_count or 0) + generated_now
+            state.last_error = "; ".join((stats.get("errors") or [])[:2]) or None
+            state.last_run_at = utcnow()
+            state.next_run_at = state.last_run_at + timedelta(hours=1)
+            db.session.add(state)
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            state.last_error = str(exc)[:300]
+            db.session.add(state)
+            db.session.commit()
+
+
 def _worker_loop():
     while not _STOP_EVENT.wait(20):
         if _APP is None:
             continue
         with _APP.app_context():
+            _run_startup_bootstrap_if_needed()
             _run_hourly_generation_tick()
 
 

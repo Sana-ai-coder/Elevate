@@ -1794,12 +1794,10 @@ async function loadQuestionsForCurrentSelection() {
     console.log('🔍 Question API params:', params);
 
     let response;
-    if (topic) {
-      console.log('🔎 Generating questions for topic:', topic);
-      response = await api.questions.generate({ grade: gradeToLoad, subject: state.selectedSubject, topic, count, difficulty: difficultyToUse, exclude_answered: true });
-    } else {
-      response = await api.questions.list(params);
-    }
+    // Fast path: pull from existing generated bank first to avoid request timeout.
+    const listParams = { ...params };
+    if (topic) listParams.topic = topic;
+    response = await api.questions.list(listParams);
 
     if (response.adaptive && response.adaptive.recommended_difficulty) {
       updateState({ serverAdaptiveDifficulty: response.adaptive.recommended_difficulty });
@@ -1810,23 +1808,14 @@ async function loadQuestionsForCurrentSelection() {
     // Fallback 1: Try without difficulty filter if no questions found
     if (!response.questions || response.questions.length === 0) {
       console.log('⚠️ No questions with recommended difficulty, trying all difficulties...');
-      if (topic) {
-        response = await api.questions.generate({
-          grade: gradeToLoad,
-          subject: state.selectedSubject,
-          topic,
-          count,
-          exclude_answered: true,
-        });
-      } else {
-        const paramsWithoutDifficulty = {
-          grade: gradeToLoad,
-          subject: state.selectedSubject,
-          limit: count,
-          exclude_answered: true,
-        };
-        response = await api.questions.list(paramsWithoutDifficulty);
-      }
+      const paramsWithoutDifficulty = {
+        grade: gradeToLoad,
+        subject: state.selectedSubject,
+        topic: topic || undefined,
+        limit: count,
+        exclude_answered: true,
+      };
+      response = await api.questions.list(paramsWithoutDifficulty);
       console.log('🔄 Retry result: ' + (response.questions?.length || 0) + ' questions found');
     }
     
@@ -1835,11 +1824,31 @@ async function loadQuestionsForCurrentSelection() {
       console.log('⚠️ No questions for selected grade, trying all grades...');
       const paramsOnlySubject = {
         subject: state.selectedSubject,
+        topic: topic || undefined,
         limit: count,
         exclude_answered: true,
       };
       response = await api.questions.list(paramsOnlySubject);
       console.log('🔄 Retry with all grades: ' + (response.questions?.length || 0) + ' questions found');
+    // Final top-up path: if still short and topic selected, trigger generation once.
+    if (topic && (!response.questions || response.questions.length < count)) {
+      try {
+        const generated = await api.questions.generate({
+          grade: gradeToLoad,
+          subject: state.selectedSubject,
+          topic,
+          count,
+          difficulty: difficultyToUse,
+          exclude_answered: true,
+        });
+        if (generated && Array.isArray(generated.questions) && generated.questions.length > 0) {
+          response = generated;
+        }
+      } catch (genErr) {
+        console.warn('Topic generation fallback failed:', genErr);
+      }
+    }
+
       
       if (response.questions && response.questions.length > 0) {
         utils.showNotification('No ' + utils.getGradeDisplayName(gradeToLoad) + ' questions available. Showing questions from other grades.', 'info');

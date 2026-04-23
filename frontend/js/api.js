@@ -239,6 +239,7 @@ export const api = {
       const queryParams = new URLSearchParams();
       if (params.grade) queryParams.append('grade', params.grade);
       if (params.subject) queryParams.append('subject', params.subject);
+      if (params.topic) queryParams.append('topic', params.topic);
       if (params.difficulty) queryParams.append('difficulty', params.difficulty);
       if (params.exclude_answered !== undefined) queryParams.append('exclude_answered', params.exclude_answered);
       if (params.limit) queryParams.append('limit', params.limit);
@@ -274,7 +275,7 @@ export const api = {
       if (params.count) query.append('count', params.count);
       if (params.exclude_answered !== undefined) query.append('exclude_answered', params.exclude_answered);
       const endpoint = `/questions/generate?${query.toString()}`;
-      return await api.request(endpoint, { method: 'GET' });
+      return await api.request(endpoint, { method: 'GET', timeoutMs: 45000 });
     },
 
     async topics(params = {}) {

@@ -51,6 +51,10 @@
         <i class="fas fa-eye nav-icon"></i>
         <span>MCQ Observability</span>
       </a>
+      <a href="#" class="nav-item" data-panel="question-automation" id="nav-question-automation">
+        <i class="fas fa-robot nav-icon"></i>
+        <span>Question Automation</span>
+      </a>
 
       <div class="nav-section-label">Governance</div>
       <a href="#" class="nav-item" data-panel="audit" id="nav-audit">
@@ -599,6 +603,74 @@
           </tbody>
         </table>
         <div class="pagination-bar" id="auditPagination"></div>
+      </div>
+    </section>
+
+    <!-- ============ PANEL: QUESTION AUTOMATION ============ -->
+    <section class="admin-panel" id="panel-question-automation">
+      <div class="panel-header">
+        <h2 class="panel-title">Question Automation</h2>
+        <div class="panel-header-actions">
+          <button class="btn btn-secondary btn-sm" id="qaAutoRefreshBtn">
+            <i class="fas fa-sync-alt"></i> Refresh
+          </button>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px;">
+        <div class="card-header">
+          <h3 class="card-title">Current Status</h3>
+        </div>
+        <div id="qaAutoStatusGrid" class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-icon"><i class="fas fa-power-off"></i></div>
+            <div class="stat-body">
+              <div class="stat-value" id="qaEnabledVal">—</div>
+              <div class="stat-label">Automation</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon accent-purple"><i class="fas fa-clock"></i></div>
+            <div class="stat-body">
+              <div class="stat-value" id="qaNextRunVal">—</div>
+              <div class="stat-label">Next Run</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon accent-green"><i class="fas fa-plus-circle"></i></div>
+            <div class="stat-body">
+              <div class="stat-value" id="qaLastGeneratedVal">—</div>
+              <div class="stat-label">Last Generated</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon accent-teal"><i class="fas fa-database"></i></div>
+            <div class="stat-body">
+              <div class="stat-value" id="qaTotalGeneratedVal">—</div>
+              <div class="stat-label">Total Generated</div>
+            </div>
+          </div>
+        </div>
+        <div id="qaAutoLastError" class="table-empty" style="margin-top:8px;display:none;"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">Controls</h3>
+        </div>
+        <div class="filter-row" style="padding:14px;">
+          <input class="filter-input" id="qaBootstrapCount" type="number" min="100" max="2000" value="700" placeholder="Batch count" style="max-width:180px;" />
+          <button class="btn btn-primary btn-sm" id="qaGenerateNowBtn">
+            <i class="fas fa-magic"></i> Generate Now
+          </button>
+          <input class="filter-input" id="qaHourlyBatchSize" type="number" min="1" max="100" value="10" placeholder="Hourly size" style="max-width:180px;" />
+          <button class="btn btn-success btn-sm" id="qaStartHourlyBtn">
+            <i class="fas fa-play"></i> Start Hourly
+          </button>
+          <button class="btn btn-danger btn-sm" id="qaStopHourlyBtn">
+            <i class="fas fa-stop"></i> Stop Hourly
+          </button>
+        </div>
       </div>
     </section>
   </div><!-- /admin-main -->

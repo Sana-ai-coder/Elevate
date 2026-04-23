@@ -1,15 +1,16 @@
 from datetime import datetime, timezone
 from flask_sqlalchemy import SQLAlchemy
 
-# --- ADD THIS BLOCK ---
+# --- pgvector fallback ---
 try:
     from pgvector.sqlalchemy import Vector
     VectorType = Vector
 except ImportError:
-    VectorType = db.Text
-# ----------------------
+    VectorType = None
 
 db = SQLAlchemy()
+if VectorType is None:
+    VectorType = db.Text
 
 
 def utcnow():
