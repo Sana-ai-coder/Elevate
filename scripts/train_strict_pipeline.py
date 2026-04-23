@@ -346,6 +346,7 @@ def main() -> int:
                 PYTHON,
                 str(ROOT / "backend" / "seed_questions.py"),
                 "--augment-large",
+                "--skip-ai-augment",
                 "--per-topic",
                 str(max(5, int(args.seed_questions_per_topic))),
             ],

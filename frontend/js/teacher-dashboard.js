@@ -1483,20 +1483,52 @@ function syncAssignmentFormOptions() {
   const testSelect = document.getElementById('assignmentTestId');
   const classroomSelect = document.getElementById('assignmentClassroomId');
   const studentSelect = document.getElementById('assignmentStudentId');
+  const dueInput = document.getElementById('assignmentDueAt');
+  const mandatorySelect = document.getElementById('assignmentMandatory');
+  const allowLateSelect = document.getElementById('assignmentAllowLate');
+  const notesInput = document.getElementById('assignmentNotes');
+
+  const prev = {
+    test_id: testSelect?.value || '',
+    classroom_id: classroomSelect?.value || '',
+    student_id: studentSelect?.value || '',
+    due_at: dueInput?.value || '',
+    mandatory: mandatorySelect?.value,
+    allow_late: allowLateSelect?.value,
+    notes: notesInput?.value ?? '',
+  };
+
   const knownStudents = getKnownStudents();
+
+  const optionExists = (select, value) => {
+    if (!select || value === '' || value === null || value === undefined) return false;
+    return Array.from(select.options || []).some(opt => String(opt.value) === String(value));
+  };
 
   if (testSelect) {
     const published = (teacherCache.tests || []).filter(t => t.is_published);
     testSelect.innerHTML = '<option value="">Select test</option>' + published.map(t => `<option value="${t.id}">${escapeHtml(t.title)} (${escapeHtml(t.subject)})</option>`).join('');
+    if (optionExists(testSelect, prev.test_id)) testSelect.value = String(prev.test_id);
   }
 
   if (classroomSelect) {
     classroomSelect.innerHTML = '<option value="">No classroom target</option>' + (teacherCache.classrooms || []).map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+    if (optionExists(classroomSelect, prev.classroom_id)) classroomSelect.value = String(prev.classroom_id);
   }
 
   if (studentSelect) {
     studentSelect.innerHTML = '<option value="">No direct student target</option>' + knownStudents.map(s => `<option value="${s.id}">${escapeHtml(s.name)} (${escapeHtml(s.email)})</option>`).join('');
+    if (optionExists(studentSelect, prev.student_id)) studentSelect.value = String(prev.student_id);
   }
+
+  if (dueInput && prev.due_at) dueInput.value = prev.due_at;
+  if (mandatorySelect && prev.mandatory !== undefined && optionExists(mandatorySelect, prev.mandatory)) {
+    mandatorySelect.value = prev.mandatory;
+  }
+  if (allowLateSelect && prev.allow_late !== undefined && optionExists(allowLateSelect, prev.allow_late)) {
+    allowLateSelect.value = prev.allow_late;
+  }
+  if (notesInput && prev.notes !== undefined) notesInput.value = prev.notes;
 }
 
 async function loadAssignments() {

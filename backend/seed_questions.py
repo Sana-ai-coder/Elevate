@@ -6,6 +6,7 @@ Usage:
     python seed_questions.py
     python seed_questions.py --reset-questions
     python seed_questions.py --augment-large --per-topic 12
+    python seed_questions.py --augment-large --skip-ai-augment --per-topic 12
     python seed_questions.py --reset-questions --strict-stem-rebuild --per-subtopic 20
 """
 
@@ -1229,8 +1230,13 @@ def _normalize_generated_item(item, subject: str, grade: str, topic: str, diffic
     }
 
 
-def build_large_question_bank(manifest: dict, per_topic: int = 12):
-    """Create a large deterministic bank for all subject/grade/topic combinations."""
+def build_large_question_bank(manifest: dict, per_topic: int = 12, *, skip_ai: bool = False):
+    """Create a large deterministic bank for all subject/grade/topic combinations.
+
+    When ``skip_ai`` is True (recommended for CI / HF strict training), skip HTTP calls to
+    the topic MCQ service and use synthetic stems only. Otherwise each (topic × difficulty)
+    batch may block on ``generate_topic_mcqs`` (long timeouts when the service is down).
+    """
     if not manifest:
         return []
 
@@ -1245,6 +1251,7 @@ def build_large_question_bank(manifest: dict, per_topic: int = 12):
                 yield subject, "high_school", payload
 
     generated = []
+    combo_idx = 0
     for subject, grade, topics in _iter_manifest_topic_groups():
         difficulties = ["easy", "medium", "hard"]
         if str(grade).strip().lower() == "college":
@@ -1253,27 +1260,35 @@ def build_large_question_bank(manifest: dict, per_topic: int = 12):
         for topic in topics:
             for difficulty in difficulties:
                 ai_seed_batch = []
-                service = generate_topic_mcqs(
-                    subject=subject,
-                    grade=grade,
-                    difficulty=difficulty,
-                    topic=topic,
-                    count=per_topic,
-                    generation_mode="standard",
-                    seed=random.randint(1, 2_147_483_647),
-                )
-                if service.get("ok"):
-                    for item in (service.get("questions") or []):
-                        normalized = _normalize_generated_item(item, subject, grade, topic, difficulty)
-                        if normalized:
-                            ai_seed_batch.append(normalized)
-                        if len(ai_seed_batch) >= per_topic:
-                            break
+                if not skip_ai:
+                    service = generate_topic_mcqs(
+                        subject=subject,
+                        grade=grade,
+                        difficulty=difficulty,
+                        topic=topic,
+                        count=per_topic,
+                        generation_mode="standard",
+                        seed=random.randint(1, 2_147_483_647),
+                    )
+                    if service.get("ok"):
+                        for item in (service.get("questions") or []):
+                            normalized = _normalize_generated_item(item, subject, grade, topic, difficulty)
+                            if normalized:
+                                ai_seed_batch.append(normalized)
+                            if len(ai_seed_batch) >= per_topic:
+                                break
 
                 generated.extend(ai_seed_batch)
                 for idx in range(max(0, per_topic - len(ai_seed_batch))):
                     generated.append(
                         _build_synthetic_question(subject, grade, topic, difficulty, idx)
+                    )
+                combo_idx += 1
+                if combo_idx % 25 == 0:
+                    print(
+                        f"[seed_questions] coverage progress: combos={combo_idx} generated={len(generated)} "
+                        f"(subject={subject!r} topic={topic!r} diff={difficulty})",
+                        flush=True,
                     )
 
     return generated
@@ -1289,7 +1304,7 @@ def _split_count_across_difficulties(total: int, include_expert: bool):
     return plan
 
 
-def build_strict_stem_bank(manifest: dict, per_subtopic: int = 20):
+def build_strict_stem_bank(manifest: dict, per_subtopic: int = 20, *, skip_ai: bool = False):
     """Create exactly `per_subtopic` questions per (subject, grade, topic)."""
     if not manifest:
         return []
@@ -1313,22 +1328,23 @@ def build_strict_stem_bank(manifest: dict, per_subtopic: int = 20):
             variant = 0
             for difficulty, qty in distribution.items():
                 ai_seed_batch = []
-                service = generate_topic_mcqs(
-                    subject=subject,
-                    grade=grade,
-                    difficulty=difficulty,
-                    topic=topic,
-                    count=qty,
-                    generation_mode="standard",
-                    seed=random.randint(1, 2_147_483_647),
-                )
-                if service.get("ok"):
-                    for item in (service.get("questions") or []):
-                        normalized = _normalize_generated_item(item, subject, grade, topic, difficulty)
-                        if normalized:
-                            ai_seed_batch.append(normalized)
-                        if len(ai_seed_batch) >= qty:
-                            break
+                if not skip_ai:
+                    service = generate_topic_mcqs(
+                        subject=subject,
+                        grade=grade,
+                        difficulty=difficulty,
+                        topic=topic,
+                        count=qty,
+                        generation_mode="standard",
+                        seed=random.randint(1, 2_147_483_647),
+                    )
+                    if service.get("ok"):
+                        for item in (service.get("questions") or []):
+                            normalized = _normalize_generated_item(item, subject, grade, topic, difficulty)
+                            if normalized:
+                                ai_seed_batch.append(normalized)
+                            if len(ai_seed_batch) >= qty:
+                                break
 
                 generated.extend(ai_seed_batch)
                 for _ in range(max(0, qty - len(ai_seed_batch))):
@@ -1340,7 +1356,14 @@ def build_strict_stem_bank(manifest: dict, per_subtopic: int = 20):
     return generated
 
 
-def seed_database(reset_questions=False, augment_large=False, per_topic=12, strict_stem_rebuild=False, per_subtopic=20):
+def seed_database(
+    reset_questions=False,
+    augment_large=False,
+    per_topic=12,
+    strict_stem_rebuild=False,
+    per_subtopic=20,
+    skip_ai_augment=False,
+):
     """Populate database with questions."""
     import json, os
 
@@ -1402,12 +1425,24 @@ def seed_database(reset_questions=False, augment_large=False, per_topic=12, stri
         
         question_bank = list(QUESTIONS)
         if strict_stem_rebuild:
-            question_bank = build_strict_stem_bank(manifest, per_subtopic=per_subtopic)
-            print(f"INFO: Built strict STEM bank: {len(question_bank)} questions ({per_subtopic} per subject-grade-topic).")
+            question_bank = build_strict_stem_bank(
+                manifest, per_subtopic=per_subtopic, skip_ai=skip_ai_augment
+            )
+            print(f"INFO: Built strict STEM bank: {len(question_bank)} questions ({per_subtopic} per subject-grade-topic).", flush=True)
         elif augment_large:
-            generated = build_large_question_bank(manifest, per_topic=per_topic)
+            print(
+                f"[seed_questions] building large bank per_topic={per_topic} skip_ai_augment={skip_ai_augment} …",
+                flush=True,
+            )
+            generated = build_large_question_bank(
+                manifest, per_topic=per_topic, skip_ai=skip_ai_augment
+            )
             question_bank.extend(generated)
-            print(f"INFO: Built {len(generated)} synthetic coverage questions ({per_topic} per topic per difficulty).")
+            print(
+                f"INFO: Built {len(generated)} coverage questions ({per_topic} per topic per difficulty; "
+                f"ai_calls={'off' if skip_ai_augment else 'on'}).",
+                flush=True,
+            )
 
         # Prevent duplicate inserts when augmenting existing banks.
         existing_texts = {
@@ -1459,10 +1494,11 @@ def seed_database(reset_questions=False, augment_large=False, per_topic=12, stri
 
 
 if __name__ == "__main__":
-    print("Seeding question database...")
+    print("Seeding question database...", flush=True)
     should_reset = "--reset-questions" in sys.argv
     should_augment = "--augment-large" in sys.argv
     should_strict_rebuild = "--strict-stem-rebuild" in sys.argv
+    skip_ai_augment = "--skip-ai-augment" in sys.argv
     per_topic = 12
     per_subtopic = 20
     if "--per-topic" in sys.argv:
@@ -1485,4 +1521,5 @@ if __name__ == "__main__":
         per_topic=per_topic,
         strict_stem_rebuild=should_strict_rebuild,
         per_subtopic=per_subtopic,
+        skip_ai_augment=skip_ai_augment,
     )
