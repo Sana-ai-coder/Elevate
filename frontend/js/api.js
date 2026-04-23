@@ -827,25 +827,32 @@ export const api = {
 
     downloadCsvTemplate: () => fetchWithAuth('/api/admin/users/csv-template', {}, false), 
     bulkImportUsers: async (formData) => {
-        // Correctly parse the Elevate session object
         const sessionRaw = localStorage.getItem('elevate_user_session') || sessionStorage.getItem('elevate_user_session');
         const session = sessionRaw ? JSON.parse(sessionRaw) : null;
         const token = session ? session.token : '';
-        const baseUrl = config.API_BASE_URL || config.API_URL || config.BASE_URL || '';
         
-        // Native fetch for FormData (files)
+        // Safely grab the base URL and remove any accidental trailing slashes
+        let baseUrl = config.API_BASE_URL || config.API_URL || config.BASE_URL || '';
+        baseUrl = baseUrl.replace(/\/$/, '');
+        
         const res = await fetch(`${baseUrl}/api/admin/users/bulk-import`, {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${token}` }, // Let browser set Content-Type for file boundary
+            headers: { 'Authorization': `Bearer ${token}` }, 
             body: formData
         });
-        const data = await res.json();
-        if (!res.ok) throw data;
-        return data;
+        
+        const text = await res.text();
+        try {
+            const data = JSON.parse(text);
+            if (!res.ok) throw data;
+            return data;
+        } catch (e) {
+            // If it fails to parse JSON, it means the server threw an HTML error (like 405)
+            throw { error: `Server error: ${res.status}. Make sure backend is fully deployed.` };
+        }
     },
 
     singleAddUser: async (data) => {
-        // Use the native Elevate wrapper for standard JSON requests
         return await api.request('/admin/users/single-add', { 
             method: 'POST', 
             body: JSON.stringify(data) 
