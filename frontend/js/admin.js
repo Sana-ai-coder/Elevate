@@ -206,12 +206,13 @@ async function checkServer() {
 async function loadDashboardStats() {
   try {
     const data = await api.admin.getStats();
-    document.getElementById('statUsersVal').textContent = data.users ?? '—';
-    document.getElementById('statQuestionsVal').textContent = data.questions ?? '—';
-    document.getElementById('statEmotionsVal').textContent = data.emotion_logs ?? '—';
-    document.getElementById('statTrainingVal').textContent = data.training_jobs_running ?? 0;
-    document.getElementById('statModelsVal').textContent = data.production_models ?? 0;
-    document.getElementById('statMcqTodayVal').textContent = data.mcq_events_today ?? 0;
+    const setStat = (id, value) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = value;
+    };
+    setStat('statUsersVal', data.users ?? '—');
+    setStat('statQuestionsVal', data.questions ?? '—');
+    setStat('statEmotionsVal', data.emotion_logs ?? '—');
   } catch (err) {
     showToast('Failed to load stats: ' + err.message, 'error');
   }
@@ -729,8 +730,10 @@ async function loadSchools() {
 
     // Update user school filter dropdown
     const schoolSel = document.getElementById('userSchoolFilter');
-    schoolSel.innerHTML = '<option value="">All Schools</option>' +
-      allSchools.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+    if (schoolSel) {
+      schoolSel.innerHTML = '<option value="">All Schools</option>' +
+        allSchools.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+    }
 
     const resultsSchoolSel = document.getElementById('resultsSchoolFilter');
     if (resultsSchoolSel) {
@@ -866,12 +869,13 @@ async function loadTestResults(page = 1) {
   // Get the current admin's school ID
   const currentUser = loadSession().user;
 
+  const schoolFilterValue = document.getElementById('resultsSchoolFilter')?.value;
   const params = {
     page, per_page: resPerPage,
     subject: document.getElementById('resultsSubjectFilter')?.value.trim() || '',
     email: document.getElementById('resultsEmailFilter')?.value.trim() || '',
     status: document.getElementById('resultsStatusFilter')?.value || '',
-    school_id: currentUser.school_id, // <--- LOCKED TO ADMIN'S SCHOOL
+    school_id: schoolFilterValue || currentUser.school_id || '',
     start: document.getElementById('resultsDateFrom')?.value || '',
     end: document.getElementById('resultsDateTo')?.value || '',
     min_score: Number.isFinite(minScoreValue) ? minScoreValue : 0,
@@ -890,6 +894,7 @@ async function loadTestResults(page = 1) {
         const pct = r.score_pct ?? 0;
         const scoreColor = pct >= 80 ? '#34d399' : pct >= 60 ? '#fbbf24' : '#f87171';
         const statusBadge = r.status === 'completed' ? 'badge-green' : r.status === 'in_progress' ? 'badge-blue' : 'badge-gray';
+        const canViewHistory = Number.isFinite(Number(r.user?.id));
         return `<tr>
           <td>${r.id}</td>
           <td>
@@ -907,12 +912,21 @@ async function loadTestResults(page = 1) {
           <td style="color:#6b7280;font-size:0.78rem">${r.started_at ? new Date(r.started_at).toLocaleDateString() : '—'}</td>
           <td>
             <button class="action-btn action-btn-primary view-result-btn" data-id="${r.id}">View</button>
-            <button class="action-btn action-btn-primary view-history-detail-btn" data-user-id="${r.user?.id}">History</button>
+            <button class="action-btn action-btn-primary view-history-detail-btn" data-user-id="${r.user?.id || ''}" ${canViewHistory ? '' : 'disabled'}>History</button>
           </td>
         </tr>`;
       }).join('');
       tbody.querySelectorAll('.view-result-btn').forEach(btn => btn.addEventListener('click', () => showTestDetail(parseInt(btn.dataset.id))));
-      tbody.querySelectorAll('.view-history-detail-btn').forEach(btn => btn.addEventListener('click', () => showUserHistory(parseInt(btn.dataset.userId))));
+      tbody.querySelectorAll('.view-history-detail-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const userId = parseInt(btn.dataset.userId, 10);
+          if (!Number.isFinite(userId)) {
+            showToast('History is unavailable for this row.', 'warning');
+            return;
+          }
+          showUserHistory(userId);
+        });
+      });
     }
     const totalPages = Math.ceil((data.total || 0) / resPerPage);
     renderPagination(document.getElementById('resultsPagination'), page, totalPages, loadTestResults);
@@ -1057,6 +1071,11 @@ async function showUserHistory(userId) {
 
 function setupTestResultsPanel() {
   document.getElementById('resultsSearchBtn').addEventListener('click', () => loadTestResults(1));
+  document.getElementById('resultsSubjectFilter')?.addEventListener('keydown', e => { if (e.key === 'Enter') loadTestResults(1); });
+  document.getElementById('resultsEmailFilter')?.addEventListener('keydown', e => { if (e.key === 'Enter') loadTestResults(1); });
+  ['resultsStatusFilter', 'resultsSchoolFilter', 'resultsDateFrom', 'resultsDateTo', 'resultsMinScore', 'resultsMaxScore'].forEach(id => {
+    document.getElementById(id)?.addEventListener('change', () => loadTestResults(1));
+  });
   document.getElementById('exportResultsCsvBtn').addEventListener('click', async () => {
     const minScoreValue = parseFloat(document.getElementById('resultsMinScore').value);
     const maxScoreValue = parseFloat(document.getElementById('resultsMaxScore').value);
@@ -1303,6 +1322,7 @@ function setupModelRegistryPanel() {
 // =====================================================
 let mcqTimeChart = null;
 let mcqModeChart = null;
+let mcqObsAutoRefreshTimer = null;
 
 async function loadMcqObservability() {
   const days = parseInt(document.getElementById('mcqObsDays').value || 30);
@@ -1351,15 +1371,24 @@ async function loadMcqObservability() {
     // Mode chart (donut)
     const modes = data.by_mode || {};
     const modeCtx = document.getElementById('mcqModeChart')?.getContext('2d');
-    if (modeCtx && Object.keys(modes).length) {
+    if (modeCtx) {
       if (mcqModeChart) { mcqModeChart.destroy(); mcqModeChart = null; }
+      const modeEntries = Object.entries(modes);
+      if (!modeEntries.length) {
+        mcqModeChart = new Chart(modeCtx, {
+          type: 'doughnut',
+          data: { labels: ['No data'], datasets: [{ data: [1], backgroundColor: ['#334155'], borderColor: '#1a2236', borderWidth: 2 }] },
+          options: { responsive: true, plugins: { legend: { labels: { color: '#94a3b8' } } } }
+        });
+        return;
+      }
       const modeColors = ['#818cf8', '#34d399', '#fbbf24', '#f87171', '#22d3ee', '#f472b6'];
       mcqModeChart = new Chart(modeCtx, {
         type: 'doughnut',
         data: {
-          labels: Object.keys(modes),
+          labels: modeEntries.map(([label]) => label),
           datasets: [{
-            data: Object.values(modes),
+            data: modeEntries.map(([, value]) => value),
             backgroundColor: modeColors,
             borderColor: '#1a2236',
             borderWidth: 3,
@@ -1379,6 +1408,14 @@ async function loadMcqObservability() {
 function setupMcqObsPanel() {
   document.getElementById('refreshMcqObsBtn').addEventListener('click', loadMcqObservability);
   document.getElementById('mcqObsDays').addEventListener('change', loadMcqObservability);
+  document.getElementById('mcqObsSubject').addEventListener('keydown', e => { if (e.key === 'Enter') loadMcqObservability(); });
+  if (mcqObsAutoRefreshTimer) clearInterval(mcqObsAutoRefreshTimer);
+  mcqObsAutoRefreshTimer = setInterval(() => {
+    const panel = document.getElementById('panel-mcq-obs');
+    if (panel && panel.classList.contains('active')) {
+      loadMcqObservability();
+    }
+  }, 15000);
 }
 
 // =====================================================
@@ -1404,10 +1441,10 @@ async function loadAuditLogs(page = 1) {
     if (!items.length) {
       tbody.innerHTML = `<tr><td colspan="7" class="table-empty">No audit logs found.</td></tr>`;
     } else {
-      tbody.innerHTML = items.map(log => `<tr>
-        <td>${log.id}</td>
+      tbody.innerHTML = items.map((log, index) => `<tr>
+        <td>${((page - 1) * auditPerPage) + index + 1}</td>
         <td><span class="badge badge-purple">${esc(log.action)}</span></td>
-        <td>${esc(log.actor_name || `ID:${log.actor_id}` || '—')}</td>
+        <td>${esc(log.actor_name || (log.actor_id ? `ID:${log.actor_id}` : '—'))}</td>
         <td>${log.target_type ? `<span class="badge badge-gray">${esc(log.target_type)}</span> ${esc(log.target_id || '')}` : '—'}</td>
         <td style="color:#6b7280;font-size:0.75rem">${esc(log.ip || '—')}</td>
         <td style="color:#6b7280;font-size:0.78rem;max-width:200px;overflow:hidden;text-overflow:ellipsis">${esc(log.notes || '—')}</td>
@@ -1423,9 +1460,17 @@ async function loadAuditLogs(page = 1) {
 
 function setupAuditPanel() {
   document.getElementById('auditSearchBtn').addEventListener('click', () => loadAuditLogs(1));
+  ['auditActionFilter', 'auditTargetType', 'auditDateFrom', 'auditDateTo'].forEach(id => {
+    document.getElementById(id)?.addEventListener('change', () => loadAuditLogs(1));
+  });
   document.getElementById('exportAuditBtn').addEventListener('click', async () => {
     try {
-      const csv = await api.admin.exportAuditLogs();
+      const csv = await api.admin.exportAuditLogs({
+        action: document.getElementById('auditActionFilter').value.trim(),
+        target_type: document.getElementById('auditTargetType').value,
+        date_from: document.getElementById('auditDateFrom').value,
+        date_to: document.getElementById('auditDateTo').value,
+      });
       downloadText(csv, `audit_logs_${today()}.csv`, 'text/csv');
       showToast('Audit CSV downloaded', 'success');
     } catch (err) { showToast(err.message, 'error'); }

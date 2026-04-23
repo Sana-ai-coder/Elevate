@@ -811,37 +811,22 @@ export const api = {
       return await api.request(`/admin/audit-logs${qs ? `?${qs}` : ''}`, { method: 'GET' });
     },
 
-    async exportAuditLogs() {
-      return await this.fetchText('/admin/audit-logs/export', 'GET');
+    async exportAuditLogs(params = {}) {
+      const query = new URLSearchParams();
+      if (params.action) query.append('action', String(params.action));
+      if (params.target_type) query.append('target_type', String(params.target_type));
+      if (params.date_from) query.append('date_from', String(params.date_from));
+      if (params.date_to) query.append('date_to', String(params.date_to));
+      const qs = query.toString();
+      return await this.fetchText(`/admin/audit-logs/export${qs ? `?${qs}` : ''}`, 'GET');
     },
-
-    enableUser: (id) => fetchWithAuth(`/api/admin/users/${id}/enable`, { method: 'POST' }),
 
     downloadCsvTemplate: () => fetchWithAuth('/api/admin/users/csv-template', {}, false), 
     bulkImportUsers: async (formData) => {
-        const sessionRaw = localStorage.getItem('elevate_user_session') || sessionStorage.getItem('elevate_user_session');
-        const session = sessionRaw ? JSON.parse(sessionRaw) : null;
-        const token = session ? session.token : '';
-        
-        // Safely grab the base URL and remove any accidental trailing slashes
-        let baseUrl = config.API_BASE_URL || config.API_URL || config.BASE_URL || '';
-        baseUrl = baseUrl.replace(/\/$/, '');
-        
-        const res = await fetch(`${baseUrl}/admin/users/bulk-import`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${token}` }, 
-            body: formData
-        });
-        
-        const text = await res.text();
-        try {
-            const data = JSON.parse(text);
-            if (!res.ok) throw data;
-            return data;
-        } catch (e) {
-            // If it fails to parse JSON, it means the server threw an HTML error (like 405)
-            throw { error: `Server error: ${res.status}. Make sure backend is fully deployed.` };
-        }
+      return await api.request('/admin/users/bulk-import', {
+        method: 'POST',
+        body: formData,
+      });
     },
 
     singleAddUser: async (data) => {

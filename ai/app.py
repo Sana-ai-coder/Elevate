@@ -621,7 +621,7 @@ def _run_strict_training_job(job_id: str, request_payload: StrictTrainingRequest
     try:
         print("[hf-train-runner] Downloading dataset from Hugging Face...")
         snapshot_download(
-            repo_id="your-username/elevate-emotion-dataset",
+            repo_id="Sana2704/elevate-emotion-dataset",
             repo_type="dataset",
             local_dir=str(AI_ROOT / "dataset"), # This creates the folder the script is looking for
             token=os.environ.get("AI_TOPIC_SERVICE_TOKEN")

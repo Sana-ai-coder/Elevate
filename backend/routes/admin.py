@@ -232,15 +232,81 @@ def update_user(uid):
 @admin_bp.delete("/users/<int:uid>")
 @admin_required
 def disable_user(uid):
-    """Soft-disable: sets is_verified=False (does NOT delete the row)."""
+    """Legacy soft-disable endpoint (kept for compatibility)."""
     u = db.session.get(User, uid)
     if not u:
         return jsonify({"error": "not found"}), 404
-    before = {"is_verified": u.is_verified}
-    u.is_verified = False
-    _audit("user.disabled", "user", u.id, u.email, before, {"is_verified": False})
+    before = {
+        "is_disabled": bool(u.is_disabled),
+        "disabled_at": u.disabled_at.isoformat() if u.disabled_at else None,
+        "disabled_reason": u.disabled_reason,
+    }
+    admin_user = getattr(g, "current_user", None)
+    u.is_disabled = True
+    u.disabled_at = utcnow()
+    u.disabled_reason = "Legacy admin disable endpoint"
+    u.disabled_by = admin_user.id if admin_user else None
+    _audit("user.disabled", "user", u.id, u.email, before, {
+        "is_disabled": True,
+        "disabled_at": u.disabled_at.isoformat() if u.disabled_at else None,
+        "disabled_reason": u.disabled_reason,
+    })
     db.session.commit()
     return jsonify({"message": "user disabled"})
+
+@admin_bp.post("/users/<int:uid>/disable")
+@admin_required
+def disable_user_post(uid):
+    """Primary disable endpoint used by admin dashboard."""
+    u = db.session.get(User, uid)
+    if not u:
+        return jsonify({"error": "not found"}), 404
+    if u.role == "admin":
+        return jsonify({"error": "Admin users cannot be disabled from this action."}), 400
+
+    payload = request.get_json(silent=True) or {}
+    reason = sanitize_string(payload.get("reason"), max_length=255) or "Admin action"
+    admin_user = getattr(g, "current_user", None)
+    before = {
+        "is_disabled": bool(u.is_disabled),
+        "disabled_at": u.disabled_at.isoformat() if u.disabled_at else None,
+        "disabled_reason": u.disabled_reason,
+    }
+
+    u.is_disabled = True
+    u.disabled_at = utcnow()
+    u.disabled_reason = reason
+    u.disabled_by = admin_user.id if admin_user else None
+
+    _audit("user.disabled", "user", u.id, u.email, before, {
+        "is_disabled": True,
+        "disabled_at": u.disabled_at.isoformat() if u.disabled_at else None,
+        "disabled_reason": reason,
+    })
+    db.session.commit()
+    return jsonify({"message": "user disabled", "user": u.as_dict()})
+
+@admin_bp.post("/users/<int:uid>/enable")
+@admin_required
+def enable_user_post(uid):
+    """Enable a previously disabled user."""
+    u = db.session.get(User, uid)
+    if not u:
+        return jsonify({"error": "not found"}), 404
+
+    before = {
+        "is_disabled": bool(u.is_disabled),
+        "disabled_at": u.disabled_at.isoformat() if u.disabled_at else None,
+        "disabled_reason": u.disabled_reason,
+    }
+    u.is_disabled = False
+    u.disabled_at = None
+    u.disabled_reason = None
+    u.disabled_by = None
+
+    _audit("user.enabled", "user", u.id, u.email, before, {"is_disabled": False})
+    db.session.commit()
+    return jsonify({"message": "user enabled", "user": u.as_dict()})
 
 @admin_bp.get('/users/csv-template')
 def get_csv_template():
@@ -725,7 +791,7 @@ def mcq_observability():
 
     events = q.all()
     total = len(events)
-    success = sum(1 for e in events if e.outcome == "success")
+    success = sum(1 for e in events if e.outcome in ("success", "partial", "fallback"))
     failed = sum(1 for e in events if e.outcome == "failed")
     fallback = sum(1 for e in events if e.fallback_used)
 
@@ -740,11 +806,17 @@ def mcq_observability():
         if date_str not in ts_dict:
             ts_dict[date_str] = {"date": date_str, "success": 0, "failure": 0, "fallback": 0}
         
-        if e.outcome == "success": ts_dict[date_str]["success"] += 1
+        if e.outcome in ("success", "partial", "fallback"): ts_dict[date_str]["success"] += 1
         if e.outcome == "failed": ts_dict[date_str]["failure"] += 1
         if e.fallback_used: ts_dict[date_str]["fallback"] += 1
 
-        mode = getattr(e, "generation_mode", "standard") or "standard"
+        mode = (
+            getattr(e, "generation_mode_effective", None)
+            or getattr(e, "generation_mode_requested", None)
+            or ("fallback" if e.fallback_used else None)
+            or getattr(e, "llm_provider", None)
+            or "standard"
+        )
         by_mode[mode] = by_mode.get(mode, 0) + 1
 
     return jsonify({
@@ -787,16 +859,83 @@ def list_audit_logs():
         since = utcnow() - timedelta(days=int(days))
         q = q.filter(AuditLog.created_at >= since)
 
-    pag = q.order_by(AuditLog.created_at.desc()).paginate(
+    if request.args.get("date_from"):
+        try:
+            q = q.filter(AuditLog.created_at >= datetime.fromisoformat(request.args["date_from"]))
+        except ValueError:
+            pass
+    if request.args.get("date_to"):
+        try:
+            q = q.filter(AuditLog.created_at < datetime.fromisoformat(request.args["date_to"]) + timedelta(days=1))
+        except ValueError:
+            pass
+
+    pag = q.order_by(AuditLog.id.asc()).paginate(
         page=page, per_page=per_page, error_out=False
     )
+    items = []
+    for e in pag.items:
+        row = e.as_dict()
+        row["actor_id"] = e.admin_id
+        row["actor_name"] = e.admin_email
+        row["ip"] = e.ip_address
+        row["notes"] = (
+            row.get("target_label")
+            or (str(row.get("after_value"))[:160] if row.get("after_value") else "")
+            or (str(row.get("before_value"))[:160] if row.get("before_value") else "")
+            or ""
+        )
+        items.append(row)
+
     return jsonify({
-        "items": [e.as_dict() for e in pag.items],
+        "items": items,
         "page": page,
         "per_page": per_page,
         "total": pag.total,
         "pages": pag.pages,
     })
+
+@admin_bp.get("/audit-logs/export")
+@admin_required
+def export_audit_logs():
+    q = AuditLog.query
+    if request.args.get("action"):
+        q = q.filter(AuditLog.action.ilike(f"%{request.args['action']}%"))
+    if request.args.get("target_type"):
+        q = q.filter_by(target_type=request.args["target_type"])
+    if request.args.get("date_from"):
+        try:
+            q = q.filter(AuditLog.created_at >= datetime.fromisoformat(request.args["date_from"]))
+        except ValueError:
+            pass
+    if request.args.get("date_to"):
+        try:
+            q = q.filter(AuditLog.created_at < datetime.fromisoformat(request.args["date_to"]) + timedelta(days=1))
+        except ValueError:
+            pass
+
+    rows = q.order_by(AuditLog.id.asc()).all()
+    si = StringIO()
+    writer = csv.writer(si)
+    writer.writerow(["row_no", "id", "action", "actor", "target", "ip", "notes", "created_at"])
+    for idx, row in enumerate(rows, start=1):
+        target = f"{row.target_type or ''}:{row.target_id or ''}".strip(":")
+        notes = row.target_label or ""
+        writer.writerow([
+            idx,
+            row.id,
+            row.action,
+            row.admin_email or (f"ID:{row.admin_id}" if row.admin_id else ""),
+            target,
+            row.ip_address or "",
+            notes,
+            row.created_at.isoformat() if row.created_at else "",
+        ])
+
+    response = make_response(si.getvalue())
+    response.headers["Content-Type"] = "text/csv; charset=utf-8"
+    response.headers["Content-Disposition"] = "attachment; filename=audit_logs.csv"
+    return response
 
 
 # ─── 9 & 10. Test results — paginated, server-side filtered ──────────────────
@@ -831,7 +970,15 @@ def list_test_results():
 
     subject = request.args.get("subject")
     if subject:
-        q = q.filter(TestResult.subject == subject)
+        q = q.filter(TestResult.subject.ilike(f"%{subject.strip()}%"))
+
+    status = request.args.get("status")
+    if status:
+        q = q.filter(TestResult.status == status)
+
+    email = (request.args.get("email") or "").strip()
+    if email:
+        q = q.join(User, User.id == TestResult.user_id).filter(User.email.ilike(f"%{email}%"))
 
     user_id = request.args.get("user_id")
     if user_id:
@@ -842,6 +989,25 @@ def list_test_results():
         q = q.join(User, User.id == TestResult.user_id).filter(
             User.school_id == int(school_id)
         )
+
+    min_score = request.args.get("min_score")
+    max_score = request.args.get("max_score")
+    if min_score is not None:
+        try:
+            min_score_v = float(min_score)
+            q = q.filter(
+                (TestResult.correct_answers * 100.0 / func.nullif(TestResult.total_questions, 0)) >= min_score_v
+            )
+        except ValueError:
+            pass
+    if max_score is not None:
+        try:
+            max_score_v = float(max_score)
+            q = q.filter(
+                (TestResult.correct_answers * 100.0 / func.nullif(TestResult.total_questions, 0)) <= max_score_v
+            )
+        except ValueError:
+            pass
 
     # For CSV export we skip pagination and stream all results
     if fmt == "csv":
@@ -886,6 +1052,7 @@ def list_test_results():
             round(tr.correct_answers / tr.total_questions * 100, 1)
             if tr.total_questions else 0
         )
+        d["avg_time_per_question"] = tr.average_time_per_question
         items.append(d)
 
     return jsonify({
@@ -910,6 +1077,37 @@ def test_results_history(uid):
         .all()
     ]
     return jsonify({"user": u.as_dict(), "items": items})
+
+@admin_bp.get("/test-results/<int:result_id>")
+@admin_required
+def test_result_detail(result_id):
+    tr = db.session.get(TestResult, result_id)
+    if not tr:
+        return jsonify({"error": "not found"}), 404
+
+    user = db.session.get(User, tr.user_id)
+    test_payload = tr.as_dict()
+    test_payload["score_pct"] = (
+        round(tr.correct_answers / tr.total_questions * 100, 1) if tr.total_questions else 0
+    )
+    test_payload["avg_time_per_question"] = tr.average_time_per_question
+    test_payload["user_name"] = user.name if user else ""
+    test_payload["user_email"] = user.email if user else ""
+
+    answers_payload = []
+    for ans in tr.answers.order_by(AnswerLog.id.asc()).all():
+        qn = db.session.get(Question, ans.question_id)
+        answers_payload.append({
+            "id": ans.id,
+            "question_id": ans.question_id,
+            "question_text": qn.text if qn else "",
+            "selected_index": ans.selected_index,
+            "is_correct": bool(ans.is_correct),
+            "time_spent": ans.time_spent,
+            "answered_at": ans.answered_at.isoformat() if ans.answered_at else None,
+        })
+
+    return jsonify({"test": test_payload, "answers": answers_payload})
 
 
 # ─── Teacher requests (unchanged, kept for compatibility) ────────────────────
