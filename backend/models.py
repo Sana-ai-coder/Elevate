@@ -963,17 +963,20 @@ class TrainingJob(db.Model):
     job_id = db.Column(db.String(128), nullable=True, index=True)    # HF job id or local run id
     model_name = db.Column(db.String(64), nullable=False, index=True)
     triggered_by = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
-    trigger_source = db.Column(db.String(64), default="admin_ui")   # "admin_ui" | "ci" | "scheduled"
+    trigger_source = db.Column(db.String(128), default="admin_ui")   # "admin_ui" | "ci" | "scheduled"
     status = db.Column(db.String(32), default="queued", nullable=False, index=True)
     # status: "queued" | "running" | "completed" | "failed" | "cancelled"
-    started_at = db.Column(db.DateTime, nullable=True)
-    finished_at = db.Column(db.DateTime, nullable=True)
+    started_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    finished_at = db.Column(db.DateTime(timezone=True), nullable=True)
     duration_seconds = db.Column(db.Integer, nullable=True)
     logs = db.Column(db.Text, nullable=True)                         # captured stdout/stderr or HF log
     metrics = db.Column(db.JSON, nullable=True)                      # final metrics dict
     artifact_urls = db.Column(db.JSON, nullable=True)                # list of artifact URLs/paths
     error_message = db.Column(db.Text, nullable=True)
-    created_at = db.Column(db.DateTime, default=utcnow, nullable=False, index=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+    
+    # THE FIX: Tell SQLAlchemy to auto-fill this on creation and update, matching your DB's NOT NULL rule.
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
     def as_dict(self):
         return {
@@ -991,6 +994,7 @@ class TrainingJob(db.Model):
             "artifact_urls": self.artifact_urls,
             "error_message": self.error_message,
             "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None, # Added to dictionary
         }
 
 
