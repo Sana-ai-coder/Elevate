@@ -745,16 +745,12 @@ export const api = {
       if (params.page) query.append('page', String(params.page));
       if (params.per_page) query.append('per_page', String(params.per_page));
       if (params.status) query.append('status', String(params.status));
-      if (params.sync !== undefined) query.append('sync', params.sync ? '1' : '0');
       const qs = query.toString();
-      return await api.request(`/admin/ml/jobs${qs ? `?${qs}` : ''}`, { method: 'GET' });
+      return await api.request(`/admin/ml/training-jobs${qs ? `?${qs}` : ''}`, { method: 'GET' });
     },
 
     async getTrainingJob(jobDbId, params = {}) {
-      const query = new URLSearchParams();
-      if (params.sync !== undefined) query.append('sync', params.sync ? '1' : '0');
-      const qs = query.toString();
-      return await api.request(`/admin/ml/jobs/${jobDbId}${qs ? `?${qs}` : ''}`, { method: 'GET' });
+      return await api.request(`/admin/ml/training-jobs/${jobDbId}`, { method: 'GET' });
     },
 
     async listModelVersions(params = {}) {
@@ -763,31 +759,31 @@ export const api = {
       if (params.per_page) query.append('per_page', String(params.per_page));
       if (params.model_name) query.append('model_name', String(params.model_name));
       const qs = query.toString();
-      return await api.request(`/admin/ml/versions${qs ? `?${qs}` : ''}`, { method: 'GET' });
+      return await api.request(`/admin/ml/model-versions${qs ? `?${qs}` : ''}`, { method: 'GET' });
     },
 
     async getModelRegistrySummary(params = {}) {
       const query = new URLSearchParams();
       if (params.model_name) query.append('model_name', String(params.model_name));
       const qs = query.toString();
-      return await api.request(`/admin/ml/versions/registry-summary${qs ? `?${qs}` : ''}`, { method: 'GET' });
+      return await api.request(`/admin/ml/model-versions/registry-summary${qs ? `?${qs}` : ''}`, { method: 'GET' });
     },
 
     async createModelVersion(payload = {}) {
-      return await api.request('/admin/ml/versions', {
+      return await api.request('/admin/ml/model-versions', {
         method: 'POST',
         body: JSON.stringify(payload || {}),
       });
     },
 
     async promoteModelVersion(versionId) {
-      return await api.request(`/admin/ml/versions/${versionId}/promote`, {
+      return await api.request(`/admin/ml/model-versions/${versionId}/promote`, {
         method: 'POST',
       });
     },
 
     async setRollbackTarget(versionId) {
-      return await api.request(`/admin/ml/versions/${versionId}/set-rollback-target`, {
+      return await api.request(`/admin/ml/model-versions/${versionId}/rollback`, {
         method: 'POST',
       });
     },
@@ -796,10 +792,6 @@ export const api = {
       const query = new URLSearchParams();
       if (params.days) query.append('days', String(params.days));
       if (params.subject) query.append('subject', String(params.subject));
-      if (params.school_id !== undefined && params.school_id !== null && String(params.school_id) !== '') {
-        query.append('school_id', String(params.school_id));
-      }
-      if (params.bucket) query.append('bucket', String(params.bucket));
       const qs = query.toString();
       return await api.request(`/admin/mcq/observability${qs ? `?${qs}` : ''}`, { method: 'GET' });
     },

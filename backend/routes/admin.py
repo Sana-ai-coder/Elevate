@@ -464,7 +464,6 @@ def get_schools_hierarchy():
 @admin_bp.post("/ml/train-strict")
 @admin_required
 def trigger_strict_ml_training():
-    """Trigger a strict HF training job and record it in TrainingJob table."""
     result = start_hf_strict_training()
 
     job = TrainingJob(
@@ -484,30 +483,22 @@ def trigger_strict_ml_training():
     if not result.get("ok"):
         return jsonify({
             "ok": False,
-            "service_url": get_hf_training_service_url(),
             "error": result.get("error") or "failed to trigger training",
             "db_job_id": job.id,
         }), int(result.get("status_code") or 502)
 
-    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
     return jsonify({
         "ok": True,
-        "service_url": get_hf_training_service_url(),
-        "service_latency_ms": result.get("latency_ms"),
         "db_job_id": job.id,
-        **payload,
+        **(result.get("payload") if isinstance(result.get("payload"), dict) else {})
     }), 202
-
 
 @admin_bp.get("/ml/train-strict/<job_id>")
 @admin_required
 def strict_ml_training_status(job_id):
     result = get_hf_strict_training_status(job_id)
-
-    # Sync status back to DB if we have a matching record
-    db_job = TrainingJob.query.filter_by(job_id=job_id).order_by(
-        TrainingJob.created_at.desc()
-    ).first()
+    db_job = TrainingJob.query.filter_by(job_id=job_id).order_by(TrainingJob.created_at.desc()).first()
+    
     if db_job and result.get("ok"):
         payload = result.get("payload") or {}
         remote_status = payload.get("status")
@@ -516,9 +507,7 @@ def strict_ml_training_status(job_id):
         if remote_status in ("completed", "failed") and not db_job.finished_at:
             db_job.finished_at = utcnow()
             if db_job.started_at:
-                db_job.duration_seconds = int(
-                    (db_job.finished_at - db_job.started_at).total_seconds()
-                )
+                db_job.duration_seconds = int((db_job.finished_at - db_job.started_at).total_seconds())
         if payload.get("metrics"):
             db_job.metrics = payload["metrics"]
         if payload.get("logs"):
@@ -526,240 +515,173 @@ def strict_ml_training_status(job_id):
         db.session.commit()
 
     if not result.get("ok"):
-        return jsonify({
-            "ok": False,
-            "error": result.get("error") or "failed to fetch status",
-        }), int(result.get("status_code") or 502)
+        return jsonify({"ok": False, "error": result.get("error") or "failed"}), int(result.get("status_code") or 502)
 
-    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
-    return jsonify({
-        "ok": True,
-        "service_url": get_hf_training_service_url(),
-        "service_latency_ms": result.get("latency_ms"),
-        "db_job": db_job.as_dict() if db_job else None,
-        **payload,
-    })
-
+    return jsonify({"ok": True, "db_job": db_job.as_dict() if db_job else None, **(result.get("payload") or {})})
 
 @admin_bp.get("/ml/training-jobs")
 @admin_required
 def list_training_jobs():
-    """
-    GET /api/admin/ml/training-jobs
-    Query params: model_type, status, page, per_page
-    """
     page = max(1, int(request.args.get("page", 1) or 1))
     per_page = min(100, max(1, int(request.args.get("per_page", 20) or 20)))
-
     q = TrainingJob.query
-    if request.args.get("model_type"):
-        q = q.filter_by(model_type=request.args["model_type"])
     if request.args.get("status"):
         q = q.filter_by(status=request.args["status"])
 
-    pag = q.order_by(TrainingJob.created_at.desc()).paginate(
-        page=page, per_page=per_page, error_out=False
-    )
-    return jsonify({
-        "items": [j.as_dict() for j in pag.items],
-        "page": page,
-        "per_page": per_page,
-        "total": pag.total,
-        "pages": pag.pages,
-    })
+    pag = q.order_by(TrainingJob.created_at.desc()).paginate(page=page, per_page=per_page, error_out=False)
+    return jsonify({"items": [j.as_dict() for j in pag.items], "page": page, "per_page": per_page, "total": pag.total, "pages": pag.pages})
 
-
-@admin_bp.patch("/ml/training-jobs/<int:jid>")
+@admin_bp.get("/ml/training-jobs/<int:jid>")
 @admin_required
-def update_training_job(jid):
-    """Allow admin to manually update logs/metrics/status for a job record."""
+def get_training_job_detail(jid):
     j = db.session.get(TrainingJob, jid)
     if not j:
         return jsonify({"error": "not found"}), 404
-
-    data = request.get_json(silent=True) or {}
-    allowed = ("status", "logs", "metrics", "artifact_urls", "error_message",
-               "finished_at", "duration_seconds")
-    for field in allowed:
-        if field in data:
-            setattr(j, field, data[field])
-
-    db.session.commit()
     return jsonify({"job": j.as_dict()})
-
 
 # ─── 6. Model version registry ───────────────────────────────────────────────
 
 @admin_bp.get("/ml/model-versions")
 @admin_required
 def list_model_versions():
-    model_type = request.args.get("model_type")
+    page = max(1, int(request.args.get("page", 1) or 1))
+    per_page = min(100, max(1, int(request.args.get("per_page", 20) or 20)))
+    
+    # Adapt UI 'model_name' to DB 'model_type'
+    model_type = request.args.get("model_name") or request.args.get("model_type")
     q = ModelVersion.query
     if model_type:
         q = q.filter_by(model_type=model_type)
-    items = q.order_by(ModelVersion.created_at.desc()).all()
-    return jsonify({"items": [v.as_dict() for v in items]})
+        
+    pag = q.order_by(ModelVersion.created_at.desc()).paginate(page=page, per_page=per_page, error_out=False)
+    
+    items = []
+    for v in pag.items:
+        d = v.as_dict()
+        d["model_name"] = d.get("model_type", "unknown")
+        d["is_production"] = (d.get("status") == "production")
+        d["is_rollback_candidate"] = (d.get("status") == "rollback_candidate")
+        items.append(d)
 
+    return jsonify({"items": items, "page": page, "per_page": per_page, "total": pag.total, "pages": pag.pages})
+
+@admin_bp.get("/ml/model-versions/registry-summary")
+@admin_required
+def registry_summary():
+    model_types = db.session.query(ModelVersion.model_type).distinct().all()
+    items = []
+    for (m_type,) in model_types:
+        if not m_type: continue
+        total = ModelVersion.query.filter_by(model_type=m_type).count()
+        current = ModelVersion.query.filter_by(model_type=m_type, status="production").order_by(ModelVersion.created_at.desc()).first()
+        rollback = ModelVersion.query.filter_by(model_type=m_type, status="rollback_candidate").order_by(ModelVersion.created_at.desc()).first()
+        previous = ModelVersion.query.filter_by(model_type=m_type, status="archived").order_by(ModelVersion.promoted_at.desc()).first()
+
+        items.append({
+            "model_name": m_type,
+            "total_versions": total,
+            "current_production": {"version_tag": current.version_tag} if current else None,
+            "previous": {"version_tag": previous.version_tag} if previous else None,
+            "rollback_target": {"version_tag": rollback.version_tag} if rollback else None
+        })
+    return jsonify({"items": items})
 
 @admin_bp.post("/ml/model-versions")
 @admin_required
 def register_model_version():
     data = request.get_json(silent=True) or {}
-    required = ("model_type", "version_tag")
-    for f in required:
-        if not data.get(f):
-            return jsonify({"error": f"{f} required"}), 400
+    model_type = data.get("model_name") or data.get("model_type")
+    version_tag = data.get("version_tag")
+    if not model_type or not version_tag:
+        return jsonify({"error": "Model Name and Version Tag required"}), 400
 
-    v = ModelVersion(
-        model_type=data["model_type"],
-        version_tag=data["version_tag"],
-        status=data.get("status", "staging"),
-        accuracy=data.get("accuracy"),
-        f1_score=data.get("f1_score"),
-        loss=data.get("loss"),
-        extra_metrics=data.get("extra_metrics"),
-        artifact_path=data.get("artifact_path"),
-        notes=data.get("notes"),
-    )
+    v = ModelVersion(model_type=model_type, version_tag=version_tag, status="staging", notes=data.get("notes"))
     db.session.add(v)
-    _audit("model_version.registered", "model_version", None,
-           f"{data['model_type']}:{data['version_tag']}", None, v.as_dict())
+    _audit("model_version.registered", "model_version", None, f"{model_type}:{version_tag}", None, None)
     db.session.commit()
     return jsonify({"version": v.as_dict()}), 201
-
 
 @admin_bp.post("/ml/model-versions/<int:vid>/promote")
 @admin_required
 def promote_model_version(vid):
-    """
-    Promote a version to 'production'.
-    Demotes the current production version to 'archived'.
-    """
     v = db.session.get(ModelVersion, vid)
     if not v:
         return jsonify({"error": "not found"}), 404
 
-    admin = getattr(g, "current_user", None)
-
-    # Demote old production versions of same model_type
-    old_prod = ModelVersion.query.filter_by(
-        model_type=v.model_type, status="production"
-    ).all()
-    for old in old_prod:
-        old.status = "archived"
-
-    v.status = "production"
-    v.promoted_by = admin.id if admin else None
-    v.promoted_at = utcnow()
-
-    _audit("model_version.promoted", "model_version", v.id,
-           f"{v.model_type}:{v.version_tag}", {"status": "staging"}, {"status": "production"})
-    db.session.commit()
-    return jsonify({"version": v.as_dict()})
-
-
-@admin_bp.post("/ml/model-versions/<int:vid>/rollback")
-@admin_required
-def rollback_model_version(vid):
-    """Mark a version as 'rollback_candidate' and demote the current prod."""
-    v = db.session.get(ModelVersion, vid)
-    if not v:
-        return jsonify({"error": "not found"}), 404
-
-    old_prod = ModelVersion.query.filter_by(
-        model_type=v.model_type, status="production"
-    ).all()
+    old_prod = ModelVersion.query.filter_by(model_type=v.model_type, status="production").all()
     for old in old_prod:
         old.status = "archived"
 
     v.status = "production"
     v.promoted_by = getattr(getattr(g, "current_user", None), "id", None)
     v.promoted_at = utcnow()
-
-    _audit("model_version.rollback", "model_version", v.id,
-           f"{v.model_type}:{v.version_tag}", None, {"status": "production"})
+    _audit("model_version.promoted", "model_version", v.id, f"{v.model_type}:{v.version_tag}", None, {"status": "production"})
     db.session.commit()
-    return jsonify({"version": v.as_dict(), "message": "rollback complete"})
+    return jsonify({"version": v.as_dict()})
 
+@admin_bp.post("/ml/model-versions/<int:vid>/rollback")
+@admin_required
+def rollback_model_version(vid):
+    v = db.session.get(ModelVersion, vid)
+    if not v:
+        return jsonify({"error": "not found"}), 404
+
+    old_rollbacks = ModelVersion.query.filter_by(model_type=v.model_type, status="rollback_candidate").all()
+    for old in old_rollbacks:
+        old.status = "archived"
+
+    v.status = "rollback_candidate"
+    _audit("model_version.rollback", "model_version", v.id, f"{v.model_type}:{v.version_tag}", None, {"status": "rollback_candidate"})
+    db.session.commit()
+    return jsonify({"version": v.as_dict(), "message": "rollback set"})
 
 # ─── 7. MCQ pipeline observability ───────────────────────────────────────────
 
-@admin_bp.get("/mcq/events")
+@admin_bp.get("/mcq/observability")
 @admin_required
-def list_mcq_events():
-    """
-    GET /api/admin/mcq/events
-    Query params: subject, outcome, days, page, per_page
-    """
-    page = max(1, int(request.args.get("page", 1) or 1))
-    per_page = min(100, max(1, int(request.args.get("per_page", 50) or 50)))
-
-    q = MCQPipelineEvent.query
-
+def mcq_observability():
+    days = int(request.args.get("days", 30))
+    since = utcnow() - timedelta(days=days)
+    q = MCQPipelineEvent.query.filter(MCQPipelineEvent.created_at >= since)
     if request.args.get("subject"):
         q = q.filter_by(subject=request.args["subject"])
-    if request.args.get("outcome"):
-        q = q.filter_by(outcome=request.args["outcome"])
-    days = request.args.get("days")
-    if days:
-        since = utcnow() - timedelta(days=int(days))
-        q = q.filter(MCQPipelineEvent.created_at >= since)
 
-    pag = q.order_by(MCQPipelineEvent.created_at.desc()).paginate(
-        page=page, per_page=per_page, error_out=False
-    )
-    return jsonify({
-        "items": [e.as_dict() for e in pag.items],
-        "page": page,
-        "per_page": per_page,
-        "total": pag.total,
-        "pages": pag.pages,
-    })
+    events = q.all()
+    total = len(events)
+    success = sum(1 for e in events if e.outcome == "success")
+    failed = sum(1 for e in events if e.outcome == "failed")
+    fallback = sum(1 for e in events if e.fallback_used)
 
+    latencies = [e.latency_ms for e in events if e.latency_ms]
+    avg_latency = sum(latencies)/len(latencies) if latencies else 0
+    gen_tot = sum(e.generated_count for e in events if e.generated_count)
+    
+    ts_dict = {}
+    by_mode = {}
+    for e in events:
+        date_str = e.created_at.strftime("%Y-%m-%d")
+        if date_str not in ts_dict:
+            ts_dict[date_str] = {"date": date_str, "success": 0, "failure": 0, "fallback": 0}
+        
+        if e.outcome == "success": ts_dict[date_str]["success"] += 1
+        if e.outcome == "failed": ts_dict[date_str]["failure"] += 1
+        if e.fallback_used: ts_dict[date_str]["fallback"] += 1
 
-@admin_bp.get("/mcq/summary")
-@admin_required
-def mcq_summary():
-    """Aggregate stats: total, success, partial, failed, fallback, avg latency."""
-    days = int(request.args.get("days", 7))
-    since = utcnow() - timedelta(days=days)
-
-    q = MCQPipelineEvent.query.filter(MCQPipelineEvent.created_at >= since)
-
-    total = q.count()
-    success = q.filter_by(outcome="success").count()
-    partial = q.filter_by(outcome="partial").count()
-    failed = q.filter_by(outcome="failed").count()
-    fallback = q.filter_by(fallback_used=True).count()
-
-    avg_latency = (
-        db.session.query(func.avg(MCQPipelineEvent.latency_ms))
-        .filter(MCQPipelineEvent.created_at >= since)
-        .scalar()
-    )
-    total_generated = (
-        db.session.query(func.sum(MCQPipelineEvent.generated_count))
-        .filter(MCQPipelineEvent.created_at >= since)
-        .scalar() or 0
-    )
-    total_failed_q = (
-        db.session.query(func.sum(MCQPipelineEvent.failed_count))
-        .filter(MCQPipelineEvent.created_at >= since)
-        .scalar() or 0
-    )
+        mode = getattr(e, "generation_mode", "standard") or "standard"
+        by_mode[mode] = by_mode.get(mode, 0) + 1
 
     return jsonify({
-        "days": days,
-        "total_requests": total,
-        "success": success,
-        "partial": partial,
-        "failed": failed,
-        "fallback_used": fallback,
-        "failure_rate": round((failed / total * 100) if total else 0, 2),
-        "fallback_rate": round((fallback / total * 100) if total else 0, 2),
-        "avg_latency_ms": round(avg_latency, 1) if avg_latency else None,
-        "total_questions_generated": int(total_generated),
-        "total_questions_failed": int(total_failed_q),
+        "summary": {
+            "total": total,
+            "success_rate": round((success/total*100) if total else 0, 1),
+            "failure_rate": round((failed/total*100) if total else 0, 1),
+            "fallback_rate": round((fallback/total*100) if total else 0, 1),
+            "questions_generated_total": int(gen_tot),
+            "questions_requested_total": int(gen_tot) + failed,
+            "avg_latency_ms": round(avg_latency, 1)
+        },
+        "time_series": sorted(list(ts_dict.values()), key=lambda x: x["date"]),
+        "by_mode": by_mode
     })
 
 

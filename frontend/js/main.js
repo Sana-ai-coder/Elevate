@@ -75,12 +75,21 @@ function getStoredSchoolSlugHint() {
 }
 
 function getCurrentPathSlug() {
+  // 1. Safely check URL parameters first (Best for static sites)
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('school')) {
+    return normalizeSchoolSlug(params.get('school'));
+  }
+  
+  // 2. Fallback to path segment (Legacy support)
   const segments = String(window.location.pathname || '').split('/').filter(Boolean);
-  if (segments.length !== 1) return null;
-  const onlySegment = segments[0] || '';
-  if (!onlySegment || onlySegment.includes('.')) return null;
-  if (onlySegment.toLowerCase() === 'api') return null;
-  return normalizeSchoolSlug(onlySegment);
+  if (segments.length === 1) {
+    const onlySegment = segments[0] || '';
+    if (!onlySegment || onlySegment.includes('.')) return null;
+    if (onlySegment.toLowerCase() === 'api') return null;
+    return normalizeSchoolSlug(onlySegment);
+  }
+  return null;
 }
 
 function getRoleHomePage(role, schoolSlug = null) {
@@ -91,12 +100,11 @@ function getRoleHomePage(role, schoolSlug = null) {
       ? 'admin.html'
       : 'dashboard.html';
 
-  // FIX: If a school slug exists and the user is NOT an admin, inject the slug into the URL!
+  // FIX: Use query parameters instead of path segments so Render doesn't throw a 404
   if (schoolSlug && normalizedRole !== 'admin') {
-      return `/${schoolSlug}/${page}`;
+      return `/${page}?school=${schoolSlug}`;
   }
 
-  // Fallback to standard root path
   return `/${page}`;
 }
 
@@ -149,7 +157,8 @@ function routeFromStandalonePage(page) {
 function redirectStandaloneStudentPageToShell(page) {
   const route = routeFromStandalonePage(page);
   if (!route) return false;
-  window.location.replace(`${getScopedPagePath('dashboard.html')}#${route}`);
+  // Preserve the ?school=slug parameter when redirecting
+  window.location.replace(`${getScopedPagePath('dashboard.html')}${window.location.search}#${route}`);
   return true;
 }
 
@@ -195,7 +204,10 @@ async function loadStudentShellRoute(route, options = {}) {
   currentShellRoute = route;
   setActiveSidebarRoute(route);
 
-  const shellUrl = `${getScopedPagePath('dashboard.html')}#${route}`;
+  // FIX: Preserve the ?school=slug parameter during SPA navigation
+  const currentSearch = window.location.search;
+  const shellUrl = `${getScopedPagePath('dashboard.html')}${currentSearch}#${route}`;
+  
   if (replaceState) {
     history.replaceState({ shellRoute: route }, '', shellUrl);
   } else if (pushState) {

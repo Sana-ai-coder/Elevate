@@ -1139,7 +1139,7 @@ async function showJobDetail(jobDbId) {
 
   let j;
   try {
-    const detail = await api.admin.getTrainingJob(jobDbId, { sync: true });
+    const detail = await api.admin.getTrainingJob(jobDbId);
     j = detail.job;
   } catch (err) {
     body.innerHTML = `<div style="color:#f87171">Error: ${esc(err.message)}</div>`;
@@ -1148,20 +1148,29 @@ async function showJobDetail(jobDbId) {
 
   const shortTitle = j.job_id ? (String(j.job_id).length > 20 ? `${String(j.job_id).slice(0, 20)}...` : String(j.job_id)) : `#${jobDbId}`;
   document.getElementById('jobDetailModalTitle').textContent = `Job: ${shortTitle}`;
+  
   body.innerHTML = `
     <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px">
-      <div><strong style="color:#94a3b8">Status:</strong> ${j.status}</div>
-      <div><strong style="color:#94a3b8">Source:</strong> ${j.source || '—'}</div>
-      <div><strong style="color:#94a3b8">Triggered by:</strong> ${j.triggered_by_name || j.triggered_by || '—'}</div>
-      <div><strong style="color:#94a3b8">Duration:</strong> ${j.duration_ms ? (j.duration_ms/1000).toFixed(1) + 's' : '—'}</div>
+      <div><strong style="color:#94a3b8">Status:</strong> <span class="badge badge-blue">${j.status}</span></div>
+      <div><strong style="color:#94a3b8">Trigger Source:</strong> ${j.trigger_source || '—'}</div>
+      <div><strong style="color:#94a3b8">Duration:</strong> ${j.duration_seconds ? j.duration_seconds + 's' : '—'}</div>
       <div><strong style="color:#94a3b8">Started:</strong> ${j.started_at ? new Date(j.started_at).toLocaleString() : '—'}</div>
       <div><strong style="color:#94a3b8">Finished:</strong> ${j.finished_at ? new Date(j.finished_at).toLocaleString() : '—'}</div>
     </div>
-    ${j.error_summary ? `<div style="color:#f87171;background:rgba(239,68,68,0.1);padding:8px 12px;border-radius:8px;margin-bottom:12px">⚠ ${esc(j.error_summary)}</div>` : ''}
-    ${Object.keys(j.metrics || {}).length ? `<div style="margin-bottom:12px"><strong style="color:#94a3b8">Metrics:</strong><pre class="info-pre">${JSON.stringify(j.metrics, null, 2)}</pre></div>` : ''}
-    ${Object.keys(j.artifact_manifest || {}).length ? `<div style="margin-bottom:12px"><strong style="color:#94a3b8">Artifacts:</strong><pre class="info-pre">${JSON.stringify(j.artifact_manifest, null, 2)}</pre></div>` : ''}
-    ${j.stdout_tail ? `<div style="margin-bottom:12px"><strong style="color:#94a3b8">Stdout tail:</strong><pre class="info-pre">${esc(j.stdout_tail)}</pre></div>` : ''}
-    ${j.stderr_tail ? `<div><strong style="color:#94a3b8">Stderr tail:</strong><pre class="info-pre" style="color:#f87171">${esc(j.stderr_tail)}</pre></div>` : ''}
+    
+    ${j.error_message ? `<div style="color:#f87171;background:rgba(239,68,68,0.1);padding:10px 14px;border-radius:8px;margin-bottom:16px;border:1px solid rgba(239,68,68,0.2);">⚠ ${esc(j.error_message)}</div>` : ''}
+    
+    ${j.metrics && Object.keys(j.metrics).length ? `
+      <div style="margin-bottom:16px">
+        <strong style="color:#94a3b8;display:block;margin-bottom:6px;">Final Metrics:</strong>
+        <pre class="info-pre">${JSON.stringify(j.metrics, null, 2)}</pre>
+      </div>` : ''}
+      
+    ${j.logs ? `
+      <div style="margin-bottom:12px">
+        <strong style="color:#94a3b8;display:block;margin-bottom:6px;">Execution Logs:</strong>
+        <pre class="info-pre">${esc(j.logs)}</pre>
+      </div>` : ''}
   `;
 }
 
