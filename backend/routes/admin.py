@@ -464,11 +464,21 @@ def get_schools_hierarchy():
 @admin_bp.post("/ml/train-strict")
 @admin_required
 def trigger_strict_ml_training():
-    result = start_hf_strict_training()
-
     admin_user = getattr(g, "current_user", None)
     
-    # FIX: Use model_name to match PostgreSQL schema
+    # SAFETY NET: Catch Hugging Face Sleep/Timeout exceptions gracefully
+    try:
+        result = start_hf_strict_training()
+    except Exception as e:
+        current_app.logger.error(f"[HF CRASH] Failed to contact Hugging Face: {str(e)}")
+        return jsonify({
+            "error": f"Hugging Face Connection Error: {str(e)}. The AI space might be waking up from sleep mode. Please wait 60 seconds and try again."
+        }), 502
+
+    # Fallback if result is somehow None
+    if not result:
+        result = {"ok": False, "error": "Hugging Face service returned an empty response."}
+
     job = TrainingJob(
         job_id=result.get("payload", {}).get("job_id") if isinstance(result.get("payload"), dict) else None,
         model_name="emotion",  
@@ -479,14 +489,20 @@ def trigger_strict_ml_training():
         error_message=result.get("error") if not result.get("ok") else None,
     )
     db.session.add(job)
-    _audit("ml.train_strict.triggered", "training_job", None, "emotion", None,
-           {"job_id": job.job_id, "status": job.status})
-    db.session.commit()
+    
+    try:
+        _audit("ml.train_strict.triggered", "training_job", None, "emotion", None,
+               {"job_id": job.job_id, "status": job.status})
+        db.session.commit()
+    except Exception as db_e:
+        db.session.rollback()
+        current_app.logger.error(f"[DB CRASH] Failed to save training job to database: {str(db_e)}")
+        return jsonify({"error": "Failed to save job to database."}), 500
 
     if not result.get("ok"):
         return jsonify({
             "ok": False,
-            "error": result.get("error") or "failed to trigger training",
+            "error": result.get("error") or "Failed to trigger training on Hugging Face.",
             "db_job_id": job.id,
         }), int(result.get("status_code") or 502)
 
