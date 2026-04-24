@@ -1471,8 +1471,7 @@ function renderAssignmentsTable() {
           </div>
         </td>
         <td class="d-flex gap-2">
-          <button class="btn btn-sm btn-outline-secondary assignment-status" data-id="${item.id}" data-status="reviewed">Mark Reviewed</button>
-          <button class="btn btn-sm btn-outline-danger assignment-status" data-id="${item.id}" data-status="cancelled">Cancel</button>
+          <button class="btn btn-sm btn-outline-danger assignment-delete" data-id="${item.id}">Delete</button>
         </td>
       </tr>
     `;
@@ -2620,19 +2619,20 @@ function bindEvents() {
         return;
       }
 
-      const statusBtn = evt.target.closest('.assignment-status');
-      if (!statusBtn) return;
-      const assignmentId = Number(statusBtn.dataset.id);
-      const status = statusBtn.dataset.status;
-      if (!assignmentId || !status) return;
+      const deleteBtn = evt.target.closest('.assignment-delete');
+      if (!deleteBtn) return;
+      const assignmentId = Number(deleteBtn.dataset.id);
+      if (!assignmentId) return;
+
+      if (!window.confirm('Delete this assignment permanently? This cannot be undone.')) return;
 
       try {
-        await api.teacher.updateAssignment(assignmentId, { status });
-        utils.showNotification('Assignment status updated.', 'success');
+        await api.teacher.deleteAssignment(assignmentId);
+        utils.showNotification('Assignment deleted.', 'success');
         await loadAssignments();
       } catch (error) {
         console.error(error);
-        utils.showNotification(error.message || 'Failed to update assignment', 'error');
+        utils.showNotification(error.message || 'Failed to delete assignment', 'error');
       }
     });
   }

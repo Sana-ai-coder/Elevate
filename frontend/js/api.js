@@ -500,6 +500,12 @@ export const api = {
       });
     },
 
+    async deleteAssignment(assignmentId) {
+      return await api.request(`/teacher/assignments/${assignmentId}`, {
+        method: 'DELETE',
+      });
+    },
+
     async getReports(params = {}) {
       const query = new URLSearchParams();
       if (params.subject) query.append('subject', params.subject);

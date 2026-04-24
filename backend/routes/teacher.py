@@ -2809,6 +2809,25 @@ def update_assignment(assignment_id):
     return jsonify({"message": "Assignment updated", "assignment": assignment.as_dict()}), 200
 
 
+@teacher_bp.delete("/assignments/<int:assignment_id>")
+@require_auth
+@role_required("teacher")
+def delete_assignment(assignment_id: int):
+    teacher = g.current_user
+    assignment = TestAssignment.query.filter_by(id=int(assignment_id), assigned_by=teacher.id).first()
+    if not assignment:
+        return jsonify({"error": "Assignment not found"}), 404
+
+    try:
+        db.session.delete(assignment)
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to delete assignment: {str(exc)}"}), 500
+
+    return jsonify({"message": "Assignment deleted"}), 200
+
+
 @teacher_bp.get("/reports")
 @require_auth
 @role_required("teacher")
