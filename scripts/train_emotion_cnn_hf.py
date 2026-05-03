@@ -94,7 +94,7 @@ def _collect_paths() -> Tuple[List[str], np.ndarray]:
             )
         files = sorted(
             str(p)
-            for p in class_dir.iterdir()
+            for p in class_dir.rglob("*") # THE FIX: 'rglob' searches all sub-shards recursively
             if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}
         )
         if len(files) < MIN_PER_CLASS:
