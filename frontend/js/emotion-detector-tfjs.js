@@ -393,54 +393,24 @@ export const emotionDetector = {
     try {
       await this._ensureTFLibraries();
 
-      const emotionHeadUrl = config.EMOTION_TFJS_EMOTION_HEAD_URL;
-      const engagementHeadUrl = config.EMOTION_TFJS_ENGAGEMENT_HEAD_URL;
-
-      if (emotionHeadUrl && engagementHeadUrl) {
-        const [emotionHeadExists, engagementHeadExists] = await Promise.all([
-          this._urlExists(emotionHeadUrl),
-          this._urlExists(engagementHeadUrl),
-        ]);
-
-        if (emotionHeadExists && engagementHeadExists) {
-          try {
-            console.info('[EmotionDetector] Loading TF.js two-head models');
-            const [emotionHeadModel, engagementHeadModel] = await Promise.all([
-              tf.loadLayersModel(emotionHeadUrl, { strict: false }),
-              tf.loadLayersModel(engagementHeadUrl, { strict: false }),
-            ]);
-
-            this.tfjsEmotionHeadModel = emotionHeadModel;
-            this.tfjsEngagementHeadModel = engagementHeadModel;
-            this.tfjsModel = emotionHeadModel;
-
-            let scalerLoaded = await this._hydrateScalerFromModelMeta(emotionHeadUrl);
-            if (!scalerLoaded) scalerLoaded = await this._hydrateScalerFromModelWeights();
-            if (!scalerLoaded) {
-              console.warn('[EmotionDetector] Scaler unavailable for two-head TF.js model; accuracy may degrade');
-            }
-
-            this._ensureModelClassNames();
-
-            this.inferenceMode = MODE_TFJS;
-            console.info('[EmotionDetector] TF.js two-head models loaded');
-            return true;
-          } catch (headErr) {
-            console.warn('[EmotionDetector] Two-head TF.js load failed, falling back to single model:', headErr?.message || headErr);
-            this.tfjsEmotionHeadModel = null;
-            this.tfjsEngagementHeadModel = null;
-            this.tfjsModel = null;
-          }
-        } else {
-          console.info('[EmotionDetector] Two-head TF.js models not found; using single-head model');
-        }
-      }
-
       const modelUrl = config.EMOTION_TFJS_MODEL_URL || '/js/emotion_tfjs/model.json';
       console.info('[EmotionDetector] Loading TF.js single-head model from', modelUrl);
 
+      // 1. Load the model
       this.tfjsModel = await tf.loadLayersModel(modelUrl, { strict: false });
 
+      // 2. THE FIX: Manually force the input shape if the converter stripped it
+      if (this.tfjsModel.layers && this.tfjsModel.layers.length > 0) {
+        const firstLayer = this.tfjsModel.layers[0];
+        
+        // If it doesn't have an input shape, we inject it manually
+        if (!firstLayer.batchInputShape) {
+           console.info('[EmotionDetector] Injecting missing input shape: [null, 48, 48, 1]');
+           firstLayer.batchInputShape = [null, 48, 48, 1];
+        }
+      }
+
+      // 3. Hydrate Scaler and Class Names
       let scalerLoaded = await this._hydrateScalerFromModelMeta(modelUrl);
       if (!scalerLoaded) scalerLoaded = await this._hydrateScalerFromModelWeights();
       if (!scalerLoaded) {
