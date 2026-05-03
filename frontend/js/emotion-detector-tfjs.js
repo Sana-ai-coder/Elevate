@@ -301,7 +301,11 @@ export const emotionDetector = {
       return;
     }
 
-    // Face tracking and inference run on separate guarded timers.
+    // RAF loop: draws the last known landmarks at 60fps regardless of inference speed.
+    // This decouples visual smoothness from the slower FaceMesh/inference timers.
+    this._startDrawLoop();
+
+    // FaceMesh runs on its own guarded timer — only updates _lastFacePrediction.
     this._facemeshTimer = setInterval(async () => {
       if (!this.detectionActive || this.isRunningFacemesh) return;
       this.isRunningFacemesh = true;
@@ -309,12 +313,26 @@ export const emotionDetector = {
       finally { this.isRunningFacemesh = false; }
     }, FACEMESH_INTERVAL_MS);
 
+    // Emotion inference runs on a separate slower timer.
     this._inferenceTimer = setInterval(async () => {
       if (!this.detectionActive || this.isRunningInference) return;
       this.isRunningInference = true;
       try { await this._runInference(); }
       finally { this.isRunningInference = false; }
     }, INFERENCE_INTERVAL_MS);
+  },
+
+  _startDrawLoop() {
+    const loop = () => {
+      if (!this.detectionActive) return;
+      this.animationFrameId = requestAnimationFrame(loop);
+      if (!this.canvasElement || !state.cameraActive) return;
+      const ctx = this.canvasElement.getContext('2d');
+      if (!ctx) return;
+      ctx.clearRect(0, 0, this.canvasElement.width, this.canvasElement.height);
+      if (this._lastFacePrediction) this._drawLandmarks(ctx, this._lastFacePrediction);
+    };
+    this.animationFrameId = requestAnimationFrame(loop);
   },
 
   stopDetection() {
@@ -690,26 +708,31 @@ export const emotionDetector = {
       });
       if (!state.cameraActive) return;
 
-      const ctx = this.canvasElement.getContext('2d');
-      ctx.clearRect(0, 0, this.canvasElement.width, this.canvasElement.height);
-
       if (predictions && predictions.length > 0) {
         if (!state.faceDetectionConfirmed) updateState({ faceDetectionConfirmed: true });
         this._lastFacePrediction = predictions[0];
-        this._drawLandmarks(ctx, predictions[0]);
       } else {
         this._lastFacePrediction = null;
       }
-    } catch (_) {}
+      // Canvas drawing is handled by the 60fps RAF loop in _startDrawLoop().
+    } catch (err) {
+      console.warn('[EmotionDetector] FaceMesh estimateFaces error:', err.message);
+    }
   },
 
   async _runInference() {
-    if (!this._lastFacePrediction && !this.serverModelAvailable) return;
-    let result = null;
+    // Compute hasTfjsModel BEFORE the early-return guard so we don't bail
+    // out when there's a TF.js model but no face prediction yet.
     const hasTfjsModel = Boolean(this.tfjsEmotionHeadModel || this.tfjsModel);
+
+    if (!this._lastFacePrediction && !this.serverModelAvailable && !hasTfjsModel) {
+      this._dbg('gate', '[EmotionDetector] runInference: no face, no model, no server — skipping');
+      return;
+    }
+
+    let result = null;
     const preferServer = config.EMOTION_PREFER_SERVER_INFERENCE === true;
 
-    // For high-accuracy deployments, prefer server CNN first.
     if (preferServer && this.serverModelAvailable) {
       result = await this._serverInference(this._lastFacePrediction);
       if (result) this.inferenceMode = MODE_SERVER;
@@ -726,7 +749,12 @@ export const emotionDetector = {
       else if (!hasTfjsModel) this.serverModelAvailable = false;
     }
 
-    if (!result) return;
+    if (!result) {
+      this._dbg('gate', '[EmotionDetector] runInference: inference returned null');
+      return;
+    }
+
+    this._dbg('raw', `[EmotionDetector] Raw result — emotion:${result.emotion} conf:${result.confidence?.toFixed(3)} scores:${JSON.stringify(Object.fromEntries(Object.entries(result.all_scores||{}).map(([k,v])=>[k,+v.toFixed(3)])))}`);
 
     const calibratedScores = this._applyLandmarkEmotionPriors(
       result.all_scores,
@@ -742,11 +770,27 @@ export const emotionDetector = {
     }
 
     const { emotion, confidence, all_scores } = result;
-    if (!this._passesGate(all_scores, confidence)) return;
+    const passes = this._passesGate(all_scores, confidence);
+
+    this._dbg('gate', `[EmotionDetector] Gate — top:${emotion}(${confidence?.toFixed(3)}) passes:${passes} | ${JSON.stringify(Object.fromEntries(Object.entries(all_scores||{}).map(([k,v])=>[k,+v.toFixed(3)])))}`);
+
+    if (!passes) return;
 
     this._applySmoothing(all_scores);
     const smoothed = this._getSmoothedEmotion();
+
+    this._dbg('smoothed', `[EmotionDetector] Smoothed → ${smoothed.emotion} (${Math.round(smoothed.confidence*100)}%)`);
+
     this._applyEmotion(smoothed.emotion, smoothed.confidence);
+  },
+
+  // Throttled debug logger — logs each key at most once per 1.5 s to avoid spam.
+  _dbgTimers: {},
+  _dbg(key, msg) {
+    const now = Date.now();
+    if ((this._dbgTimers[key] || 0) + 1500 > now) return;
+    this._dbgTimers[key] = now;
+    console.log(msg);
   },
 
 
@@ -795,45 +839,75 @@ export const emotionDetector = {
   async _tfjsInference(facePrediction) {
     try {
       const emotionModel = this.tfjsEmotionHeadModel || this.tfjsModel;
-      if (!emotionModel || !this.videoElement) return null;
+      if (!emotionModel || !this.videoElement) {
+        console.warn('[EmotionDetector] _tfjsInference: no model or no video element');
+        return null;
+      }
+
+      const vw = this.videoElement.videoWidth;
+      const vh = this.videoElement.videoHeight;
+      if (!vw || !vh) {
+        this._dbg('crop', '[EmotionDetector] _tfjsInference: video not ready (0x0)');
+        return null;
+      }
 
       const rect = this._getFaceCropRect(facePrediction);
 
-      // CNN Preprocessing: Crop face, resize to 48x48, grayscale, normalize
+      // Clamp crop rect so it can never go out of bounds for tf.slice
+      const sx = Math.max(0, Math.min(Math.floor(rect.sx), vw - 1));
+      const sy = Math.max(0, Math.min(Math.floor(rect.sy), vh - 1));
+      const sw = Math.max(1, Math.min(Math.floor(rect.sw), vw - sx));
+      const sh = Math.max(1, Math.min(Math.floor(rect.sh), vh - sy));
+
+      this._dbg('crop', `[EmotionDetector] Crop rect: sx=${sx} sy=${sy} sw=${sw} sh=${sh} (video ${vw}x${vh})`);
+
       const rawProbs = tf.tidy(() => {
-        let img = tf.browser.fromPixels(this.videoElement);
-        img = img.slice([Math.floor(rect.sy), Math.floor(rect.sx), 0], [Math.floor(rect.sh), Math.floor(rect.sw), 3]);
+        let img = tf.browser.fromPixels(this.videoElement); // [vh, vw, 3]
+
+        // Crop to face region
+        img = img.slice([sy, sx, 0], [sh, sw, 3]);
+
+        // Resize to 48×48
         img = tf.image.resizeBilinear(img, [48, 48]);
-        img = img.mean(2); // Convert to grayscale
-        img = img.expandDims(0).expandDims(-1); // Shape to [1, 48, 48, 1]
-        img = img.div(255.0); // Normalize [0, 1]
-        
+
+        // Grayscale: weighted average matching BT.601 — same as PIL.convert('L')
+        // Doing it with a matmul avoids the mean(2) which equally weights RGB
+        const weights = tf.tensor1d([0.299, 0.587, 0.114]);
+        img = img.mul(weights).sum(2); // [48, 48]
+
+        // Reshape to [1, 48, 48, 1] and normalise to [0, 1]
+        img = img.expandDims(0).expandDims(-1).div(255.0);
+
         return Array.from(emotionModel.predict(img).dataSync());
       });
 
-      if (!rawProbs || !rawProbs.length) return null;
-      this._ensureModelClassNames();
-      
-      const mappedScores = this._mapScoresToCanonical(rawProbs, this._modelClassNames);
-      if (!mappedScores) return null;
+      this._dbg('probs', `[EmotionDetector] Raw model probs: [${rawProbs.map(v=>v.toFixed(3)).join(', ')}]`);
 
-      // Apply class balance weights only — outer _applySmoothing handles temporal EMA.
-      // Previously _smoothEmotions() was called here too, causing double-smoothing that
-      // crushed peak confidence to ~0.14 (near-uniform) so the gate never passed.
+      if (!rawProbs || !rawProbs.length) {
+        console.warn('[EmotionDetector] _tfjsInference: model returned empty output');
+        return null;
+      }
+
+      this._ensureModelClassNames();
+      const mappedScores = this._mapScoresToCanonical(rawProbs, this._modelClassNames);
+      if (!mappedScores) {
+        console.warn('[EmotionDetector] _tfjsInference: _mapScoresToCanonical returned null');
+        return null;
+      }
+
       const balancedScores = this._applyClassBalance(mappedScores);
-      
       const engagementScore = this._inferEngagementScore([]);
 
       const ranked = Object.entries(balancedScores).sort((a, b) => b[1] - a[1]);
 
       return {
-        emotion:    ranked[0]?.[0] || 'neutral',
-        confidence: Number(ranked[0]?.[1] || 0),
+        emotion:          ranked[0]?.[0] || 'neutral',
+        confidence:       Number(ranked[0]?.[1] || 0),
         engagement_score: engagementScore,
-        all_scores: balancedScores,
+        all_scores:       balancedScores,
       };
     } catch (err) {
-      console.warn('[EmotionDetector] TF.js inference error:', err.message);
+      console.warn('[EmotionDetector] _tfjsInference error:', err.message, err.stack);
       return null;
     }
   },
@@ -1274,23 +1348,29 @@ export const emotionDetector = {
     const icon      = document.getElementById('emotionIcon');
     const text      = document.getElementById('emotionText');
     const indicator = document.getElementById('emotionIndicator');
-    if (!icon || !text || !indicator) return;
+
+    if (!icon || !text || !indicator) {
+      console.warn('[EmotionDetector] _updateEmotionUI: missing DOM element(s)',
+        { icon: !!icon, text: !!text, indicator: !!indicator });
+      return;
+    }
 
     const pct   = Math.round(confidence * 100);
     const label = emotion.charAt(0).toUpperCase() + emotion.slice(1);
+    const emoji = EMOTION_EMOJI[emotion.toLowerCase()] || '😐';
 
-    icon.textContent = EMOTION_EMOJI[emotion.toLowerCase()] || '😐';
-
-    // Use innerHTML so the percentage can be styled smaller/dimmer without
-    // relying on the container being wide enough to show plain "Label (XX%)".
-    // emotion is always from CLASS_NAMES so this is XSS-safe.
+    icon.textContent = emoji;
+    // innerHTML is safe — emotion is always from CLASS_NAMES (fixed set).
     text.innerHTML =
       `${label}<span style="font-size:0.78em;opacity:0.72;margin-left:5px">${pct}%</span>`;
 
-    indicator.style.display = 'flex';
-    indicator.style.cssText = 'display:flex;position:absolute;top:8px;right:8px;left:auto;bottom:auto;';
+    indicator.style.cssText =
+      'display:flex;position:absolute;top:8px;right:8px;left:auto;bottom:auto;';
+
     document.getElementById('emotionModeLabel')?.remove();
     document.getElementById('emotionScoreLabel')?.remove();
+
+    this._dbg('ui', `[EmotionDetector] UI updated → ${label} ${pct}%`);
   },
 
   async _throttledLog(emotion, confidence) {
