@@ -44,7 +44,7 @@ CLASS_FOLDER_ALIASES = {
     "surprised": ["surprised", "surprise"],
 }
 
-IMG_SIZE = (224, 224)
+IMG_SIZE = (48, 48)
 BATCH_SIZE = int(os.environ.get("ELEVATE_EMOTION_BATCH_SIZE", "32"))
 EPOCHS_HEAD = int(os.environ.get("ELEVATE_EMOTION_EPOCHS_HEAD", "18"))
 EPOCHS_FINETUNE = int(os.environ.get("ELEVATE_EMOTION_EPOCHS_FINETUNE", "14"))
@@ -135,7 +135,7 @@ def _split_dataset(files: List[str], labels: np.ndarray) -> DatasetSplit:
 
 def _decode_image(path: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
     img = tf.io.read_file(path)
-    img = tf.image.decode_image(img, channels=3, expand_animations=False)
+    img = tf.image.decode_image(img, channels=1, expand_animations=False)
     img = tf.image.resize(img, IMG_SIZE, method=tf.image.ResizeMethod.BILINEAR)
     img = tf.cast(img, tf.float32)
     return img, label
@@ -159,22 +159,28 @@ def _build_tf_dataset(files: List[str], labels: np.ndarray, training: bool) -> t
 
 
 def _build_model(num_classes: int) -> tf.keras.Model:
-    base = tf.keras.applications.EfficientNetV2B0(
-        include_top=False,
-        weights="imagenet",
-        input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3),
-    )
-    base.trainable = False
-
-    inputs = tf.keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3))
-    x = tf.keras.applications.efficientnet_v2.preprocess_input(inputs)
-    x = base(x, training=False)
-    x = tf.keras.layers.GlobalAveragePooling2D()(x)
-    x = tf.keras.layers.Dropout(0.35)(x)
-    x = tf.keras.layers.Dense(256, activation="relu")(x)
-    x = tf.keras.layers.Dropout(0.25)(x)
-    outputs = tf.keras.layers.Dense(num_classes, activation="softmax")(x)
-    model = tf.keras.Model(inputs=inputs, outputs=outputs, name="elevate_emotion_effnetv2b0")
+    model = tf.keras.Sequential([
+        tf.keras.layers.Conv2D(32, (3,3), activation='relu', input_shape=(IMG_SIZE[0], IMG_SIZE[1], 1)),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.MaxPooling2D((2,2)),
+        tf.keras.layers.Dropout(0.25),
+        
+        tf.keras.layers.Conv2D(64, (3,3), activation='relu'),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.MaxPooling2D((2,2)),
+        tf.keras.layers.Dropout(0.25),
+        
+        tf.keras.layers.Conv2D(128, (3,3), activation='relu'),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.MaxPooling2D((2,2)),
+        tf.keras.layers.Dropout(0.25),
+        
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dense(256, activation='relu'),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.Dropout(0.5),
+        tf.keras.layers.Dense(num_classes, activation='softmax')
+    ])
     return model
 
 
@@ -255,30 +261,30 @@ def main() -> None:
         verbose=1,
     )
 
-    print("[emotion-cnn] Fine-tuning backbone")
-    base_model = None
-    for layer in model.layers:
-        if isinstance(layer, tf.keras.Model) and "efficientnetv2" in layer.name.lower():
-            base_model = layer
-            break
-    if base_model is not None:
-        base_model.trainable = True
-        for layer in base_model.layers[:FINE_TUNE_AT]:
-            layer.trainable = False
+    # print("[emotion-cnn] Fine-tuning backbone")
+    # base_model = None
+    # for layer in model.layers:
+    #     if isinstance(layer, tf.keras.Model) and "efficientnetv2" in layer.name.lower():
+    #         base_model = layer
+    #         break
+    # if base_model is not None:
+    #     base_model.trainable = True
+    #     for layer in base_model.layers[:FINE_TUNE_AT]:
+    #         layer.trainable = False
 
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
-        loss=tf.keras.losses.SparseCategoricalCrossentropy(),
-        metrics=["accuracy"],
-    )
-    hist_tune = model.fit(
-        ds_train,
-        validation_data=ds_val,
-        epochs=EPOCHS_FINETUNE,
-        class_weight=class_weight,
-        callbacks=callbacks,
-        verbose=1,
-    )
+    # model.compile(
+    #     optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
+    #     loss=tf.keras.losses.SparseCategoricalCrossentropy(),
+    #     metrics=["accuracy"],
+    # )
+    # hist_tune = model.fit(
+    #     ds_train,
+    #     validation_data=ds_val,
+    #     epochs=EPOCHS_FINETUNE,
+    #     class_weight=class_weight,
+    #     callbacks=callbacks,
+    #     verbose=1,
+    # )
 
     val_metrics = _evaluate(model, ds_val, split.val_labels)
     test_metrics = _evaluate(model, ds_test, split.test_labels)
@@ -298,10 +304,8 @@ def main() -> None:
         },
         "class_weight": class_weight,
         "training_history": {
-            "head_epochs": len(hist_head.history.get("loss", [])),
-            "finetune_epochs": len(hist_tune.history.get("loss", [])),
-            "best_val_accuracy_head": float(max(hist_head.history.get("val_accuracy", [0.0]))),
-            "best_val_accuracy_finetune": float(max(hist_tune.history.get("val_accuracy", [0.0]))),
+            "epochs_run": len(hist_head.history.get("loss", [])),
+            "best_val_accuracy": float(max(hist_head.history.get("val_accuracy", [0.0]))),
         },
         "validation_metrics": val_metrics,
         "test_metrics": test_metrics,

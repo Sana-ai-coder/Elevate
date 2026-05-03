@@ -164,6 +164,9 @@ export const emotionDetector = {
   _logIntervalMs:        10_000,
   _modelMetaCache:       null,
 
+  _emotionHistory:       [],
+  _HISTORY_LENGTH:       10,
+
 
   // ═══════════════════════════════════════════
   //  PUBLIC API
@@ -712,6 +715,28 @@ export const emotionDetector = {
   //  INFERENCE IMPLEMENTATIONS
   // ═══════════════════════════════════════════
 
+
+  _smoothEmotions(rawEmotions) {
+    this._emotionHistory.push(rawEmotions);
+    if (this._emotionHistory.length > this._HISTORY_LENGTH) {
+      this._emotionHistory.shift(); 
+    }
+
+    let smoothed = {};
+    for (const key of CLASS_NAMES) smoothed[key] = 0;
+    
+    for (let frame of this._emotionHistory) {
+      for (let key in frame) {
+        smoothed[key] += (frame[key] || 0);
+      }
+    }
+
+    for (let key in smoothed) {
+      smoothed[key] /= this._emotionHistory.length;
+    }
+    return smoothed;
+  },
+
   async _serverInference(facePrediction) {
     try {
       const b64 = this._captureAlignedFaceB64(facePrediction, 96);
@@ -730,36 +755,42 @@ export const emotionDetector = {
 
   async _tfjsInference(facePrediction) {
     try {
-      // Step 1: HOG features (FIX 2 + FIX 3 applied inside)
-      const hogFeatures = this._extractHog32(facePrediction);
-      if (!hogFeatures) return null;
-
-      // Step 2: FIX 1 — StandardScaler normalisation from .bin weights
-      const scaled = this._applyScaler(hogFeatures);
       const emotionModel = this.tfjsEmotionHeadModel || this.tfjsModel;
-      if (!emotionModel) return null;
+      if (!emotionModel || !this.videoElement) return null;
 
-      // Step 3: MLP forward pass
+      const rect = this._getFaceCropRect(facePrediction);
+
+      // CNN Preprocessing: Crop face, resize to 48x48, grayscale, normalize
       const rawProbs = tf.tidy(() => {
-        const t = tf.tensor2d(scaled, [1, HOG_FEATURE_DIM]);
-        return Array.from(emotionModel.predict(t).dataSync());
+        let img = tf.browser.fromPixels(this.videoElement);
+        img = img.slice([Math.floor(rect.sy), Math.floor(rect.sx), 0], [Math.floor(rect.sh), Math.floor(rect.sw), 3]);
+        img = tf.image.resizeBilinear(img, [48, 48]);
+        img = img.mean(2); // Convert to grayscale
+        img = img.expandDims(0).expandDims(-1); // Shape to [1, 48, 48, 1]
+        img = img.div(255.0); // Normalize [0, 1]
+        
+        return Array.from(emotionModel.predict(img).dataSync());
       });
 
       if (!rawProbs || !rawProbs.length) return null;
       this._ensureModelClassNames();
+      
       const mappedScores = this._mapScoresToCanonical(rawProbs, this._modelClassNames);
       if (!mappedScores) return null;
 
-      // Step 4: FIX 4 — recall-derived class balance
+      // Apply weights and temporal smoothing
       const balancedScores = this._applyClassBalance(mappedScores);
-      const engagementScore = this._inferEngagementScore(scaled);
-      const ranked = Object.entries(balancedScores).sort((a, b) => b[1] - a[1]);
+      const finalScores = this._smoothEmotions(balancedScores);
+      
+      const engagementScore = this._inferEngagementScore([]); // Pass empty array if engagement head isn't updated yet
+
+      const ranked = Object.entries(finalScores).sort((a, b) => b[1] - a[1]);
 
       return {
         emotion:    ranked[0]?.[0] || 'neutral',
         confidence: Number(ranked[0]?.[1] || 0),
         engagement_score: engagementScore,
-        all_scores: balancedScores,
+        all_scores: finalScores,
       };
     } catch (err) {
       console.warn('[EmotionDetector] TF.js inference error:', err.message);
@@ -834,18 +865,18 @@ export const emotionDetector = {
   },
 
   // FIX 1: Apply StandardScaler — z = (x - mean) / std
-  _applyScaler(features) {
-    if (!this._scalerMean || !this._scalerStd ||
-        this._scalerMean.length !== features.length) {
-      return features; // No scaler → raw features (accuracy reduced but no crash)
-    }
-    const out = new Float32Array(features.length);
-    for (let i = 0; i < features.length; i++) {
-      const std = this._scalerStd[i] > 1e-8 ? this._scalerStd[i] : 1.0;
-      out[i] = (features[i] - this._scalerMean[i]) / std;
-    }
-    return out;
-  },
+  // _applyScaler(features) {
+  //   if (!this._scalerMean || !this._scalerStd ||
+  //       this._scalerMean.length !== features.length) {
+  //     return features; // No scaler → raw features (accuracy reduced but no crash)
+  //   }
+  //   const out = new Float32Array(features.length);
+  //   for (let i = 0; i < features.length; i++) {
+  //     const std = this._scalerStd[i] > 1e-8 ? this._scalerStd[i] : 1.0;
+  //     out[i] = (features[i] - this._scalerMean[i]) / std;
+  //   }
+  //   return out;
+  // },
 
   // FIX 4: Recall-derived class balance weights
   _applyClassBalance(scoreMap) {
@@ -1048,102 +1079,102 @@ export const emotionDetector = {
    * FIX 2: gx = img[y,x+1] - img[y,x-1]  (NOT Sobel)
    * FIX 3: No CLAHE, no gamma, no blur before HOG
    */
-  _extractHog32(facePrediction) {
-    if (!this.videoElement) return null;
+  // _extractHog32(facePrediction) {
+  //   if (!this.videoElement) return null;
 
-    if (!this._hogCanvas) {
-      this._hogCanvas        = document.createElement('canvas');
-      this._hogCanvas.width  = HOG_IMG_SIZE;
-      this._hogCanvas.height = HOG_IMG_SIZE;
-    }
+  //   if (!this._hogCanvas) {
+  //     this._hogCanvas        = document.createElement('canvas');
+  //     this._hogCanvas.width  = HOG_IMG_SIZE;
+  //     this._hogCanvas.height = HOG_IMG_SIZE;
+  //   }
 
-    const ctx = this._hogCanvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) return null;
+  //   const ctx = this._hogCanvas.getContext('2d', { willReadFrequently: true });
+  //   if (!ctx) return null;
 
-    this._drawAlignedFaceToCanvas(ctx, HOG_IMG_SIZE, HOG_IMG_SIZE, facePrediction);
+  //   this._drawAlignedFaceToCanvas(ctx, HOG_IMG_SIZE, HOG_IMG_SIZE, facePrediction);
 
-    const rgba = ctx.getImageData(0, 0, HOG_IMG_SIZE, HOG_IMG_SIZE).data;
+  //   const rgba = ctx.getImageData(0, 0, HOG_IMG_SIZE, HOG_IMG_SIZE).data;
 
-    // FIX 3: BT.601 grayscale ONLY — no CLAHE, no gamma, no blur
-    const W    = HOG_IMG_SIZE;
-    const H    = HOG_IMG_SIZE;
-    const gray = new Float32Array(W * H);
-    for (let i = 0; i < W * H; i++) {
-      const r = rgba[i * 4];
-      const g = rgba[i * 4 + 1];
-      const b = rgba[i * 4 + 2];
-      gray[i] = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
-    }
+  //   // FIX 3: BT.601 grayscale ONLY — no CLAHE, no gamma, no blur
+  //   const W    = HOG_IMG_SIZE;
+  //   const H    = HOG_IMG_SIZE;
+  //   const gray = new Float32Array(W * H);
+  //   for (let i = 0; i < W * H; i++) {
+  //     const r = rgba[i * 4];
+  //     const g = rgba[i * 4 + 1];
+  //     const b = rgba[i * 4 + 2];
+  //     gray[i] = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
+  //   }
 
-    // Gradient computation
-    // FIX 2: Simple central difference — matches skimage.feature.hog exactly
-    const cellHist = new Float32Array(HOG_CELLS_X * HOG_CELLS_Y * HOG_BINS);
+  //   // Gradient computation
+  //   // FIX 2: Simple central difference — matches skimage.feature.hog exactly
+  //   const cellHist = new Float32Array(HOG_CELLS_X * HOG_CELLS_Y * HOG_BINS);
 
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const xm1 = x > 0     ? x - 1 : 0;
-        const xp1 = x < W - 1 ? x + 1 : W - 1;
-        const ym1 = y > 0     ? y - 1 : 0;
-        const yp1 = y < H - 1 ? y + 1 : H - 1;
+  //   for (let y = 0; y < H; y++) {
+  //     for (let x = 0; x < W; x++) {
+  //       const xm1 = x > 0     ? x - 1 : 0;
+  //       const xp1 = x < W - 1 ? x + 1 : W - 1;
+  //       const ym1 = y > 0     ? y - 1 : 0;
+  //       const yp1 = y < H - 1 ? y + 1 : H - 1;
 
-        // FIX 2: central difference only — NO Sobel row weighting
-        const gx = gray[y * W + xp1] - gray[y * W + xm1];
-        const gy = gray[yp1 * W + x] - gray[ym1 * W + x];
+  //       // FIX 2: central difference only — NO Sobel row weighting
+  //       const gx = gray[y * W + xp1] - gray[y * W + xm1];
+  //       const gy = gray[yp1 * W + x] - gray[ym1 * W + x];
 
-        const mag = Math.sqrt(gx * gx + gy * gy);
-        if (mag === 0) continue;
+  //       const mag = Math.sqrt(gx * gx + gy * gy);
+  //       if (mag === 0) continue;
 
-        // Unsigned orientation [0, 180)
-        let angle = Math.atan2(Math.abs(gy), gx) * (180 / Math.PI);
-        if (angle < 0) angle += 180;
-        if (angle >= 180) angle = 0;
+  //       // Unsigned orientation [0, 180)
+  //       let angle = Math.atan2(Math.abs(gy), gx) * (180 / Math.PI);
+  //       if (angle < 0) angle += 180;
+  //       if (angle >= 180) angle = 0;
 
-        // Soft bin assignment
-        const binF = (angle / 180) * HOG_BINS;
-        const bin0 = Math.floor(binF) % HOG_BINS;
-        const bin1 = (bin0 + 1) % HOG_BINS;
-        const w1   = binF - Math.floor(binF);
-        const w0   = 1 - w1;
+  //       // Soft bin assignment
+  //       const binF = (angle / 180) * HOG_BINS;
+  //       const bin0 = Math.floor(binF) % HOG_BINS;
+  //       const bin1 = (bin0 + 1) % HOG_BINS;
+  //       const w1   = binF - Math.floor(binF);
+  //       const w0   = 1 - w1;
 
-        const cx   = Math.min(HOG_CELLS_X - 1, Math.floor(x / HOG_PPC_X));
-        const cy   = Math.min(HOG_CELLS_Y - 1, Math.floor(y / HOG_PPC_Y));
-        const base = (cy * HOG_CELLS_X + cx) * HOG_BINS;
-        cellHist[base + bin0] += mag * w0;
-        cellHist[base + bin1] += mag * w1;
-      }
-    }
+  //       const cx   = Math.min(HOG_CELLS_X - 1, Math.floor(x / HOG_PPC_X));
+  //       const cy   = Math.min(HOG_CELLS_Y - 1, Math.floor(y / HOG_PPC_Y));
+  //       const base = (cy * HOG_CELLS_X + cx) * HOG_BINS;
+  //       cellHist[base + bin0] += mag * w0;
+  //       cellHist[base + bin1] += mag * w1;
+  //     }
+  //   }
 
-    // Block normalisation: 7×7 blocks of 2×2 cells, L2-Hys
-    const nBX     = HOG_CELLS_X - 1;  // 7
-    const nBY     = HOG_CELLS_Y - 1;  // 7
-    const bSize   = HOG_BLOCK_W * HOG_BLOCK_H * HOG_BINS;  // 36
-    const features = new Float32Array(nBX * nBY * bSize);  // 1764
-    let outIdx = 0;
+  //   // Block normalisation: 7×7 blocks of 2×2 cells, L2-Hys
+  //   const nBX     = HOG_CELLS_X - 1;  // 7
+  //   const nBY     = HOG_CELLS_Y - 1;  // 7
+  //   const bSize   = HOG_BLOCK_W * HOG_BLOCK_H * HOG_BINS;  // 36
+  //   const features = new Float32Array(nBX * nBY * bSize);  // 1764
+  //   let outIdx = 0;
 
-    for (let by = 0; by < nBY; by++) {
-      for (let bx = 0; bx < nBX; bx++) {
-        const block = new Float32Array(bSize);
-        let p = 0;
-        for (let dy = 0; dy < HOG_BLOCK_H; dy++) {
-          for (let dx = 0; dx < HOG_BLOCK_W; dx++) {
-            const cellBase = ((by + dy) * HOG_CELLS_X + (bx + dx)) * HOG_BINS;
-            for (let b = 0; b < HOG_BINS; b++) block[p++] = cellHist[cellBase + b];
-          }
-        }
-        // L2-Hys: normalise → clip 0.2 → renormalise
-        let sqSum = 0;
-        for (let i = 0; i < bSize; i++) sqSum += block[i] * block[i];
-        let norm = Math.sqrt(sqSum + 1e-6);
-        for (let i = 0; i < bSize; i++) block[i] = Math.min(0.2, block[i] / norm);
-        sqSum = 0;
-        for (let i = 0; i < bSize; i++) sqSum += block[i] * block[i];
-        norm = Math.sqrt(sqSum + 1e-6);
-        for (let i = 0; i < bSize; i++) features[outIdx++] = block[i] / norm;
-      }
-    }
+  //   for (let by = 0; by < nBY; by++) {
+  //     for (let bx = 0; bx < nBX; bx++) {
+  //       const block = new Float32Array(bSize);
+  //       let p = 0;
+  //       for (let dy = 0; dy < HOG_BLOCK_H; dy++) {
+  //         for (let dx = 0; dx < HOG_BLOCK_W; dx++) {
+  //           const cellBase = ((by + dy) * HOG_CELLS_X + (bx + dx)) * HOG_BINS;
+  //           for (let b = 0; b < HOG_BINS; b++) block[p++] = cellHist[cellBase + b];
+  //         }
+  //       }
+  //       // L2-Hys: normalise → clip 0.2 → renormalise
+  //       let sqSum = 0;
+  //       for (let i = 0; i < bSize; i++) sqSum += block[i] * block[i];
+  //       let norm = Math.sqrt(sqSum + 1e-6);
+  //       for (let i = 0; i < bSize; i++) block[i] = Math.min(0.2, block[i] / norm);
+  //       sqSum = 0;
+  //       for (let i = 0; i < bSize; i++) sqSum += block[i] * block[i];
+  //       norm = Math.sqrt(sqSum + 1e-6);
+  //       for (let i = 0; i < bSize; i++) features[outIdx++] = block[i] / norm;
+  //     }
+  //   }
 
-    return features;
-  },
+  //   return features;
+  // },
 
 
   // ═══════════════════════════════════════════

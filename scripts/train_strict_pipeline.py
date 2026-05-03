@@ -1,5 +1,5 @@
 """Strict, fail-fast ML training pipeline for Elevate.
-
+para
 This script always runs the full training stack and exits non-zero on any failure:
 1) Build interaction dataset
 2) Train BKT, DKT, Emotion (HOG+MLP), and At-Risk models in parallel
@@ -463,6 +463,9 @@ def main() -> int:
                     str(max(50, int(args.atrisk_max_snapshots_per_student))),
                 ],
             ),
+            (
+                "train-emotion-cnn", [PYTHON, str(ROOT / "scripts" / "train_emotion_cnn_hf.py")]
+            )
         ]
         if emotion_dataset_ready:
             parallel_steps.append(
