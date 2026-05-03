@@ -357,7 +357,7 @@ def main() -> None:
             
             # Configure Git Bot
             subprocess.run(["git", "config", "--global", "user.email", "ai-bot@cortexa.com"], check=False)
-            subprocess.run(["git", "config", "--global", "user.name", "Cortexa AI"], check=False)
+            subprocess.run(["git", "config", "--global", "user.name", "Elevate"], check=False)
             
             # Add, Commit, Push
             subprocess.run(["git", "add", str(tfjs_out_dir)], cwd=ROOT, check=True)
