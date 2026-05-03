@@ -91,21 +91,24 @@ const HOG_FEATURE_DIM =
   HOG_BLOCK_W * HOG_BLOCK_H * HOG_BINS;
 
 // Confidence gates
-const MIN_CONFIDENCE = 0.32;
-const MIN_MARGIN     = 0.06;
+// Lowered from 0.32/0.06 — CNN softmax distributions are wider than HOG+Dense,
+// and after EMA smoothing the peak rarely exceeds 0.30 even for clear expressions.
+const MIN_CONFIDENCE = 0.20;
+const MIN_MARGIN     = 0.04;
 
 // Temporal smoothing
-const SMOOTH_ALPHA = 0.35;
-const SMOOTH_LEAK  = 0.02;
+// Raised alpha (0.35→0.55) so the EMA reacts faster to expression changes.
+const SMOOTH_ALPHA = 0.55;
+const SMOOTH_LEAK  = 0.01;
 
 // FIX 4: Class balance weights from 1/recall, normalised to mean=1
-// Source: training console output test metrics
+// Neutral weight reduced to 1.0 (was 1.08) — it was over-dominating the CNN output
 const DEFAULT_CLASS_BALANCE_WEIGHTS = {
   happy: 0.99,
   bored: 0.90,
   focused: 0.92,
   confused: 1.00,
-  neutral: 1.08,
+  neutral: 1.00,
   angry: 0.86,
   surprised: 1.05,
 };
@@ -117,7 +120,7 @@ const DEFAULT_CLASS_PRIOR_MULTIPLIERS = {
   bored: 1.0,
   focused: 1.03,
   confused: 1.02,
-  neutral: 1.04,
+  neutral: 1.0,
   angry: 0.94,
   surprised: 1.02,
 };
@@ -814,19 +817,20 @@ export const emotionDetector = {
       const mappedScores = this._mapScoresToCanonical(rawProbs, this._modelClassNames);
       if (!mappedScores) return null;
 
-      // Apply weights and temporal smoothing
+      // Apply class balance weights only — outer _applySmoothing handles temporal EMA.
+      // Previously _smoothEmotions() was called here too, causing double-smoothing that
+      // crushed peak confidence to ~0.14 (near-uniform) so the gate never passed.
       const balancedScores = this._applyClassBalance(mappedScores);
-      const finalScores = this._smoothEmotions(balancedScores);
       
-      const engagementScore = this._inferEngagementScore([]); // Pass empty array if engagement head isn't updated yet
+      const engagementScore = this._inferEngagementScore([]);
 
-      const ranked = Object.entries(finalScores).sort((a, b) => b[1] - a[1]);
+      const ranked = Object.entries(balancedScores).sort((a, b) => b[1] - a[1]);
 
       return {
         emotion:    ranked[0]?.[0] || 'neutral',
         confidence: Number(ranked[0]?.[1] || 0),
         engagement_score: engagementScore,
-        all_scores: finalScores,
+        all_scores: balancedScores,
       };
     } catch (err) {
       console.warn('[EmotionDetector] TF.js inference error:', err.message);
@@ -1272,8 +1276,17 @@ export const emotionDetector = {
     const indicator = document.getElementById('emotionIndicator');
     if (!icon || !text || !indicator) return;
 
+    const pct   = Math.round(confidence * 100);
+    const label = emotion.charAt(0).toUpperCase() + emotion.slice(1);
+
     icon.textContent = EMOTION_EMOJI[emotion.toLowerCase()] || '😐';
-    text.textContent = `${emotion} (${Math.round(confidence * 100)}%)`;
+
+    // Use innerHTML so the percentage can be styled smaller/dimmer without
+    // relying on the container being wide enough to show plain "Label (XX%)".
+    // emotion is always from CLASS_NAMES so this is XSS-safe.
+    text.innerHTML =
+      `${label}<span style="font-size:0.78em;opacity:0.72;margin-left:5px">${pct}%</span>`;
+
     indicator.style.display = 'flex';
     indicator.style.cssText = 'display:flex;position:absolute;top:8px;right:8px;left:auto;bottom:auto;';
     document.getElementById('emotionModeLabel')?.remove();
