@@ -875,8 +875,9 @@ export const emotionDetector = {
         const weights = tf.tensor1d([0.299, 0.587, 0.114]);
         img = img.mul(weights).sum(2); // [48, 48]
 
-        // Reshape to [1, 48, 48, 1] and normalise to [0, 1]
-        img = img.expandDims(0).expandDims(-1).div(255.0);
+        // Reshape to [1, 48, 48, 1]. 
+        // THE FIX: DO NOT .div(255.0)! The Python model was trained on raw 0-255 pixels!
+        img = img.expandDims(0).expandDims(-1);
 
         return Array.from(emotionModel.predict(img).dataSync());
       });
