@@ -877,7 +877,7 @@ export const emotionDetector = {
 
         // Reshape to [1, 48, 48, 1]. 
         // THE FIX: DO NOT .div(255.0)! The Python model was trained on raw 0-255 pixels!
-        img = img.expandDims(0).expandDims(-1);
+        img = img.expandDims(0).expandDims(-1).div(255.0);
 
         return Array.from(emotionModel.predict(img).dataSync());
       });

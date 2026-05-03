@@ -140,6 +140,10 @@ def _decode_image(path: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tens
     img = tf.image.decode_image(img, channels=1, expand_animations=False)
     img = tf.image.resize(img, IMG_SIZE, method=tf.image.ResizeMethod.BILINEAR)
     img = tf.cast(img, tf.float32)
+    
+    # THE CRITICAL FIX: Normalize training data to [0, 1]
+    img = img / 255.0
+    
     return img, label
 
 
