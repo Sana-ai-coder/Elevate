@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -161,7 +162,8 @@ def _build_tf_dataset(files: List[str], labels: np.ndarray, training: bool) -> t
 
 def _build_model(num_classes: int) -> tf.keras.Model:
     model = tf.keras.Sequential([
-        tf.keras.layers.Conv2D(32, (3,3), activation='relu', input_shape=(IMG_SIZE[0], IMG_SIZE[1], 1)),
+        tf.keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 1)), # EXPLICIT INPUT LAYER FOR TFJS
+        tf.keras.layers.Conv2D(32, (3,3), activation='relu'),
         tf.keras.layers.BatchNormalization(),
         tf.keras.layers.MaxPooling2D((2,2)),
         tf.keras.layers.Dropout(0.25),
@@ -313,25 +315,6 @@ def main() -> None:
         "val_accuracy": val_metrics.get("accuracy", 0.0),
     }
     info_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    
-    # === NEW: Auto-Convert to TFJS ===
-    print("[emotion-cnn] Converting model to TensorFlow.js format...")
-    tfjs_out_dir = ROOT / "frontend" / "js" / "emotion_tfjs"
-    tfjs_out_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Empty the directory first to avoid old weight conflicts
-    for item in tfjs_out_dir.iterdir():
-        if item.is_file():
-            item.unlink()
-
-    # Run the tensorflowjs_converter as a terminal command
-    subprocess.run([
-        "tensorflowjs_converter",
-        "--input_format=keras",
-        str(model_path), # backend/ai_models/emotion_model.h5
-        str(tfjs_out_dir) # frontend/js/emotion_tfjs/
-    ], check=True)
-    print(f"[emotion-cnn] TF.js model saved to {tfjs_out_dir}")
 
     print(f"[emotion-cnn] Saved model: {model_path}")
     print(f"[emotion-cnn] Saved metadata: {info_path}")
@@ -339,6 +322,53 @@ def main() -> None:
         "[emotion-cnn] Test accuracy="
         f"{test_metrics['accuracy']:.4f} macro_f1={test_metrics['macro_f1']:.4f}"
     )
+    
+    # ==========================================
+    # AUTO-CONVERT & GITHUB PUSH AUTOMATION
+    # ==========================================
+    try:
+        print("[emotion-cnn] Installing tensorflowjs converter in cloud...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "tensorflowjs", "numpy<1.24"], check=True)
+
+        print("[emotion-cnn] Converting model to TFJS format...")
+        tfjs_out_dir = ROOT / "frontend" / "js" / "emotion_tfjs"
+        tfjs_out_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Clear out old web weights
+        for item in tfjs_out_dir.iterdir():
+            if item.is_file():
+                item.unlink()
+
+        # Convert
+        subprocess.run([
+            "tensorflowjs_converter",
+            "--input_format=keras",
+            str(model_path),
+            str(tfjs_out_dir)
+        ], check=True)
+        print("[emotion-cnn] Conversion successful!")
+
+        # Push to GitHub
+        github_token = os.environ.get("GITHUB_TOKEN")
+        if github_token:
+            print("[emotion-cnn] Pushing web model to GitHub...")
+            # Use the Cortexa/Elevate repo name
+            repo_url = f"https://{github_token}@github.com/Sana-ai-coder/Elevate.git"
+            
+            # Configure Git Bot
+            subprocess.run(["git", "config", "--global", "user.email", "ai-bot@cortexa.com"], check=False)
+            subprocess.run(["git", "config", "--global", "user.name", "Cortexa AI"], check=False)
+            
+            # Add, Commit, Push
+            subprocess.run(["git", "add", str(tfjs_out_dir)], cwd=ROOT, check=True)
+            subprocess.run(["git", "commit", "-m", "Auto-deploy: Update CNN Emotion Model TFJS weights"], cwd=ROOT, check=True)
+            subprocess.run(["git", "push", repo_url, "main"], cwd=ROOT, check=True)
+            print("✅ [emotion-cnn] SUCCESSFULLY PUSHED NEW MODEL TO GITHUB!")
+        else:
+            print("⚠️ [emotion-cnn] Skipping GitHub push: GITHUB_TOKEN not found in environment.")
+
+    except Exception as e:
+        print(f"❌ [emotion-cnn] Automation Pipeline Failed: {e}")
 
 
 if __name__ == "__main__":
