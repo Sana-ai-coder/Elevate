@@ -396,21 +396,74 @@ export const emotionDetector = {
       const modelUrl = config.EMOTION_TFJS_MODEL_URL || '/js/emotion_tfjs/model.json';
       console.info('[EmotionDetector] Loading TF.js single-head model from', modelUrl);
 
-      // 1. Load the model
-      this.tfjsModel = await tf.loadLayersModel(modelUrl, { strict: false });
+      // 1. Pre-fetch and patch the model JSON before TF.js sees it.
+      //
+      //    Root cause: Keras 3 / TF.js Converter v4 serialises the InputLayer
+      //    with "batch_shape" but TF.js loadLayersModel expects "batchInputShape".
+      //    Trying to fix it after loadLayersModel() is too late — the error is
+      //    thrown inside the loader before we ever get a model object back.
+      //    Solution: fetch → patch → load via tf.io.fromMemory().
+      const baseUrl = modelUrl.substring(0, modelUrl.lastIndexOf('/') + 1);
 
-      // 2. THE FIX: Manually force the input shape if the converter stripped it
-      if (this.tfjsModel.layers && this.tfjsModel.layers.length > 0) {
-        const firstLayer = this.tfjsModel.layers[0];
-        
-        // If it doesn't have an input shape, we inject it manually
-        if (!firstLayer.batchInputShape) {
-           console.info('[EmotionDetector] Injecting missing input shape: [null, 48, 48, 1]');
-           firstLayer.batchInputShape = [null, 48, 48, 1];
+      const modelResp = await fetch(modelUrl, { cache: 'no-store' });
+      if (!modelResp.ok) throw new Error(`Failed to fetch model.json (${modelResp.status})`);
+      const modelJson = await modelResp.json();
+
+      // Walk every layer config and rename batch_shape → batchInputShape
+      const patchLayers = (layers) => {
+        if (!Array.isArray(layers)) return;
+        for (const layer of layers) {
+          const cfg = layer?.config;
+          if (!cfg) continue;
+          if (cfg.batch_shape !== undefined && cfg.batchInputShape === undefined) {
+            cfg.batchInputShape = cfg.batch_shape;
+            delete cfg.batch_shape;
+          }
+          // Handle nested layers (e.g. Sequential-inside-Sequential)
+          if (Array.isArray(cfg.layers)) patchLayers(cfg.layers);
+        }
+      };
+
+      const topLevelLayers =
+        modelJson?.modelTopology?.model_config?.config?.layers;
+      if (topLevelLayers) {
+        patchLayers(topLevelLayers);
+        console.info('[EmotionDetector] Patched batch_shape → batchInputShape in model topology');
+      }
+
+      // 2. Fetch all weight shards and concatenate them into one ArrayBuffer.
+      const weightsManifest = modelJson.weightsManifest || [];
+      const weightSpecs     = weightsManifest.flatMap(m => m.weights);
+      const shardBuffers    = [];
+
+      for (const manifest of weightsManifest) {
+        for (const shardPath of manifest.paths) {
+          const shardUrl  = baseUrl + shardPath;
+          const shardResp = await fetch(shardUrl, { cache: 'no-store' });
+          if (!shardResp.ok) throw new Error(`Failed to fetch weight shard: ${shardPath} (${shardResp.status})`);
+          shardBuffers.push(await shardResp.arrayBuffer());
         }
       }
 
-      // 3. Hydrate Scaler and Class Names
+      const totalBytes  = shardBuffers.reduce((n, b) => n + b.byteLength, 0);
+      const weightBytes = new Uint8Array(totalBytes);
+      let   writeOffset = 0;
+      for (const buf of shardBuffers) {
+        weightBytes.set(new Uint8Array(buf), writeOffset);
+        writeOffset += buf.byteLength;
+      }
+
+      // 3. Load the (now-patched) model entirely from memory.
+      this.tfjsModel = await tf.loadLayersModel(
+        tf.io.fromMemory(
+          modelJson.modelTopology,
+          weightSpecs,
+          weightBytes.buffer,
+        ),
+        { strict: false },
+      );
+
+      // 4. Hydrate Scaler and Class Names
       let scalerLoaded = await this._hydrateScalerFromModelMeta(modelUrl);
       if (!scalerLoaded) scalerLoaded = await this._hydrateScalerFromModelWeights();
       if (!scalerLoaded) {
