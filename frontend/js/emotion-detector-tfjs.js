@@ -454,20 +454,33 @@ export const emotionDetector = {
       }
 
       // 3. Load the (now-patched) model entirely from memory.
+      //    Use the single-argument ModelArtifacts form — the multi-arg overload
+      //    is deprecated in recent TF.js builds.
       this.tfjsModel = await tf.loadLayersModel(
-        tf.io.fromMemory(
-          modelJson.modelTopology,
+        tf.io.fromMemory({
+          modelTopology: modelJson.modelTopology,
           weightSpecs,
-          weightBytes.buffer,
-        ),
+          weightData: weightBytes.buffer,
+        }),
         { strict: false },
       );
 
-      // 4. Hydrate Scaler and Class Names
-      let scalerLoaded = await this._hydrateScalerFromModelMeta(modelUrl);
-      if (!scalerLoaded) scalerLoaded = await this._hydrateScalerFromModelWeights();
-      if (!scalerLoaded) {
-        console.warn('[EmotionDetector] Scaler unavailable for single-head TF.js model; accuracy may degrade');
+      // 4. Determine model type: CNN (Conv2D input) vs HOG+Dense.
+      //    The scaler (StandardScaler over HOG features) only applies to the
+      //    Dense-only variant.  For CNN models the raw pixel tensor goes
+      //    straight into the network, so skip scaler hydration entirely.
+      const isCNN = (modelJson?.modelTopology?.model_config?.config?.layers || [])
+        .some(l => l.class_name === 'Conv2D');
+
+      if (isCNN) {
+        console.info('[EmotionDetector] CNN model detected — skipping HOG scaler (not needed)');
+      } else {
+        // HOG+Dense path: attempt to load the StandardScaler
+        let scalerLoaded = await this._hydrateScalerFromModelMeta(modelUrl);
+        if (!scalerLoaded) scalerLoaded = await this._hydrateScalerFromModelWeights();
+        if (!scalerLoaded) {
+          console.warn('[EmotionDetector] Scaler unavailable for single-head TF.js model; accuracy may degrade');
+        }
       }
 
       this._ensureModelClassNames();

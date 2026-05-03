@@ -352,11 +352,11 @@ def main() -> None:
         github_token = os.environ.get("GITHUB_TOKEN")
         if github_token:
             print("[emotion-cnn] Pushing web model to GitHub...")
-            # Use the Cortexa/Elevate repo name
+            # Use the Elevate repo name
             repo_url = f"https://{github_token}@github.com/Sana-ai-coder/Elevate.git"
             
             # Configure Git Bot
-            subprocess.run(["git", "config", "--global", "user.email", "ai-bot@cortexa.com"], check=False)
+            subprocess.run(["git", "config", "--global", "user.email", "ai-bot@elevate.com"], check=False)
             subprocess.run(["git", "config", "--global", "user.name", "Elevate"], check=False)
             
             # Add, Commit, Push
