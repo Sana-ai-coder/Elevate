@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -312,6 +313,25 @@ def main() -> None:
         "val_accuracy": val_metrics.get("accuracy", 0.0),
     }
     info_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    
+    # === NEW: Auto-Convert to TFJS ===
+    print("[emotion-cnn] Converting model to TensorFlow.js format...")
+    tfjs_out_dir = ROOT / "frontend" / "js" / "emotion_tfjs"
+    tfjs_out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Empty the directory first to avoid old weight conflicts
+    for item in tfjs_out_dir.iterdir():
+        if item.is_file():
+            item.unlink()
+
+    # Run the tensorflowjs_converter as a terminal command
+    subprocess.run([
+        "tensorflowjs_converter",
+        "--input_format=keras",
+        str(model_path), # backend/ai_models/emotion_model.h5
+        str(tfjs_out_dir) # frontend/js/emotion_tfjs/
+    ], check=True)
+    print(f"[emotion-cnn] TF.js model saved to {tfjs_out_dir}")
 
     print(f"[emotion-cnn] Saved model: {model_path}")
     print(f"[emotion-cnn] Saved metadata: {info_path}")
